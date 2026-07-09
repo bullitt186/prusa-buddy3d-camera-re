@@ -29,6 +29,7 @@ protocol from the ARM firmware and reimplements it so you can:
 | See what was tried and failed | [`docs/dead-ends.md`](docs/dead-ends.md) |
 | Know the tools used | [`docs/tools.md`](docs/tools.md) |
 | Know the firmware / project sources | [`docs/sources.md`](docs/sources.md) |
+| Check the official REST spec (no WebRTC) | [`docs/openapi.yaml`](docs/openapi.yaml) |
 | Understand licensing & IP boundaries | [`NOTICE.md`](NOTICE.md) |
 
 ## Repository layout
@@ -43,6 +44,7 @@ protocol from the ARM firmware and reimplements it so you can:
 │   ├── reverse-engineering.md how to reproduce the RE (Ghidra, VMAs, techniques)
 │   ├── tools.md              every tool used
 │   ├── sources.md            firmware image + third-party projects referenced
+│   ├── openapi.yaml           Prusa's official Camera API spec (v0.22.0, REST only — no WebRTC)
 │   ├── dead-ends.md          errors, red herrings, corrected assumptions
 │   ├── next-steps.md         prioritised open work
 │   ├── camerainfo-verification.md  checklist that pinned the CameraInfo struct

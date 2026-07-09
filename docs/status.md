@@ -19,11 +19,75 @@ The blocker is a hard backend gate, not a protocol bug we can fix.
 **[confirmed]** Our tokens (`origin: OTHER` and `origin: WEB`) are absent from
 `camera-service-api.prusa3d.com` (direct lookup → 404), and the signaling server rejects every
 viewer for them (`client_authentication` → ACK `5`), so no WebRTC offer is ever relayed.
-**[assumption]** that registration in that service is the exact gate, and that an `origin: LINK`
-token from the printer's QR pairing — the one origin we never obtained to test — is what would
-register and unblock it. This is the leading hypothesis (the other two origins are ruled out;
-Prusa's public Camera API OpenAPI describes `LINK` as printer-side registration), but it was
-never directly verified.
+
+**[confirmed 2026-07-09, revised]** The `origin: LINK` hypothesis (below) is **dropped as the
+leading lead** — it was chasing the wrong origin. Two official Prusa documents settle this:
+
+1. The official Buddy3D quick-start manual ("Buddy3D Camera for Prusa Core One", v1.00) describes
+   the *actual* pairing flow for a genuine camera: Connect web UI → pick a printer → **Camera tab
+   → "Add WiFi Camera"** → enter the target Wi-Fi's credentials → **"Generate QR Code"** → put the
+   camera in pairing mode (hold RESET 1 s) → aim the camera's own lens at that QR from ~50 cm. The
+   QR carries Wi-Fi credentials plus a registration token; the camera reads it optically and
+   registers itself. Per the OpenAPI spec's own wording for the `origin` parameter — *"Use OTHER
+   for camera registration via api. WEB is used when registering camera via web qr code"* — this
+   flow is `api`-style registration, i.e. **`origin: OTHER`**. That is the same origin our
+   impersonator already uses.
+2. A separate, unrelated Prusa guide ("Camera setup for PrusaLink / Prusa Connect") documents
+   `origin: LINK`: it's for a CSI/USB webcam wired directly into the Raspberry Pi that runs
+   PrusaLink (i3-series MK2.5/MK3/MK3S+, or natively on MK4/MK3.9/XL), switched on via a **"Link
+   camera to Connect"** toggle in PrusaLink's own web UI. This is a different product line
+   entirely — plain webcam snapshot linking, no Socket.IO/protobuf/WebRTC signaling of any kind is
+   mentioned anywhere in that guide.
+
+**Net effect:** a genuine Buddy3D camera and our impersonator register with the *same* origin
+(`OTHER`). Origin was never the differentiator, so `origin: LINK` was very likely never going to
+unblock WebRTC for a Buddy3D-style camera even if we obtained one. See `dead-ends.md` for the
+full correction and `next-steps.md` for the revised priority order.
+
+**[new, unconfirmed]** Prusa's own blog post announcing Buddy3D/Prusa-App camera-control updates
+(2025) describes live streaming as a **staged rollout**: the initial release was **local-network
+only**, with cloud/remote streaming — quote: *"we'll use the encrypted WebRTC protocol"* —
+explicitly announced as landing **later in 2025**. This is a plausible, more mundane alternative
+explanation for the same observed symptoms (ACK `5`, 404 in the registry): cloud WebRTC may simply
+not have been (or may still not be) broadly enabled server-side, independent of any
+spoofing-detection mechanism. This reframes, but doesn't replace, the remaining open leads (MAC/
+OUI check, direct `camera-service-api` registration) — see `next-steps.md`.
+
+### 2026-07-09 (later) — origin and network-reputation ruled out by live experiment
+
+Two hypotheses were fully closed today with controlled, live tests (not just documentation
+reading):
+
+1. **`origin: WEB` vs `OTHER`, isolated.** The account's actual deployed camera turned out to be
+   `origin: WEB` all along (the "Camera > Token" web-UI flow defaults to `WEB` unless `OTHER` is
+   explicitly requested — nobody had verified which one was live). Registered a **fresh** camera
+   via `POST /app/printers/{uuid}/camera?origin=OTHER`, pointed the impersonator at it (fully
+   correct protocol, `registered: true`), and got **identical results**: `client_authentication` →
+   ACK `5`, `GET camera-service-api.../v1/cameras/<token>` → `404`. Origin is conclusively not the
+   gate — this supersedes the earlier, weaker claim that both origins had been tried (that older
+   test predates the 2026-07-06 `/c/info` schema fix and was likely comparing apples to oranges).
+   The impersonator now runs the `OTHER`-origin token going forward (more representative of a real
+   camera); the old `WEB`-origin config is backed up on the Pi.
+2. **Source-IP / network reputation.** Replayed the exact same `client_authentication` handshake
+   for the new token from a second machine on a completely different network (different ASN, not
+   the home residential connection) — **identical ACK `5`**. Rules out WAF/geo/ASN-reputation
+   blocking as an explanation.
+
+**Also investigated and ruled out as a comparison point:** the account has a second, genuine Prusa
+camera — an ESP32-Cam running Prusa's own open-source
+[`Prusa-Firmware-ESP32-Cam`](https://github.com/prusa3d/Prusa-Firmware-ESP32-Cam) firmware,
+`origin: OTHER`, on a different printer. Initially looked like a huge lead (a *working* camera on
+the same account to diff against), but its live view turned out to be periodic snapshots only, not
+WebRTC — confirmed from its own README, that firmware never implements Socket.IO/WebRTC signaling
+at all (`features: []`, `capabilities: []` in `/c/info`). So it doesn't test the WebRTC gate one
+way or the other; it's simply a different, snapshot-only integration tier of the same public
+Camera API.
+
+**Net effect:** every gate hypothesis that could be tested purely from software/account-level
+control has now been tried and failed to explain the block. What's left: a real-hardware allowlist
+keyed on something we haven't identified (MAC/OUI, `next-steps.md` P.2, still untested), or a
+backend feature-rollout gate genuinely not yet enabled for this account/camera class — see
+`next-steps.md` for the current priority order.
 
 Everything protocol-level that we *can* influence from software has been corrected to match a
 real camera; none of it changes this outcome.
@@ -39,8 +103,8 @@ real camera; none of it changes this outcome.
 | Camera info / metadata (`/c/info`) | ✅ Working | 200; name, firmware, model, Wi-Fi shown in app **[confirmed]** |
 | Appears online & paired, survives reboot | ✅ Working | web + mobile app; `Restart=always` **[confirmed]** |
 | Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC **[confirmed]** |
-| Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]** |
-| Live WebRTC stream in the app | ❌ Blocked | viewer auth rejected (ACK `5`) + camera 404 in registry **[confirmed]**; LINK/QR as the unblock is **[assumption]** |
+| Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]**; likely just reflects the same registry-membership gap below, not an `origin` mismatch — genuine cameras are `origin: OTHER` too **[assumption]** |
+| Live WebRTC stream in the app | ❌ Blocked | viewer auth rejected (ACK `5`) + camera 404 in registry **[confirmed]**; root cause still open — `origin: LINK` as the unblock is **ruled out as the leading lead 2026-07-09** (see Bottom line) |
 | "Kamera-Kommunikation fehlgeschlagen" warning | ⚠️ Persistent | side-effect of the same gate **[confirmed]** |
 
 ---
@@ -76,13 +140,15 @@ camera-side gate: `FUN_000b87b4` silently drops any offer unless `webrtc_mode` (
 `webrtc_status` (`+0x13e`) are both set, and those are only set when the server sends
 `set_webrtc_mode`.
 
-**Inferred, not verified:** that `camera-service-api` registration is the precise gate, and
-that `origin: LINK` tokens (minted by the printer's "Add Buddy camera" QR pairing) are the ones
-registered there and would pass. We never obtained a LINK token to test this leg — it is the
-best-supported hypothesis, resting on (a) both other origins failing identically, and (b)
-Prusa's public Camera API OpenAPI describing `LINK` as printer-side registration.
-See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md), and
-[`next-steps.md`](next-steps.md) Step 1 for the untested LINK path.
+**Inferred, not verified:** that `camera-service-api` registration is the precise gate. What
+gates entry into that registry is now the open question — **not** `origin`, since genuine Buddy3D
+cameras register as `origin: OTHER` too (confirmed from the official pairing manual — see Bottom
+line). Two live leads: (a) a real-hardware allowlist keyed on something we haven't identified
+(MAC/OUI is the cheapest untested candidate — `next-steps.md` P.2), or (b) cloud WebRTC streaming
+is a staged rollout not yet broadly enabled server-side, unrelated to any per-camera check (Prusa's
+own 2025 blog post on the Buddy3D/App update describes exactly this staged local-then-cloud
+rollout). See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md), and
+[`next-steps.md`](next-steps.md) for the revised priority order.
 
 ### The evidence chain
 
@@ -104,8 +170,13 @@ See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md), 
 | TLS certificates / mTLS / keypairs gate pairing | Ruled out | none exist anywhere in the pairing flow |
 | STUN / ICE hole-punching is the problem | Not reachable | never gets past signaling; no offer is ever made |
 | Wrong Socket.IO field encoding | Real but not the cause | all fields corrected to match a real camera; behaviour unchanged |
-| A missing serial / hardware ID on the wire | **Not excluded** | no serial appears in the *mapped* channels (auth, `/c/info`, identified status fields), but ~90 `CameraInfoMessage` fields are still un-named — a serial or HW-id could be among them. See the hardware-identity hypothesis in [`next-steps.md`](next-steps.md). |
+| A missing **unique factory serial** on the wire | **Ruled out (2026-07-09)** | Traced the `CameraInfoMessage` extended-status sub-block at offsets `0x0b8`-`0x0cc` (headless Ghidra, `FUN_000a01dc` + xref chase — see `protocol.md`'s `extended_status` section). One offset (`0x0c4`) *is* hardware-derived — a model-name string read from the real SPI HW-version chip (`/sys/class/spi_master/spi2/spi2.0/version`) via a small fixed range table — but it's a small-cardinality **model/variant** string (`"Buddy3D-C1"` etc.), not a unique per-device value. An exhaustive `.rodata` substring search for `"serial"`/`"Serial"`/`"SERIAL"`/`"otp"`/`"OTP"`/`"SN:"`/`"factory"` found **zero hits** anywhere in the binary — no distinct factory-serial/OTP getter exists. `journal/findings.md` §7.2's "Serial Number (SN) — OTP memory" row is unconfirmed community/inference, not a traced fact; treat it as superseded pending a citation. |
 | The local check is "RTSP-shaped" | Ruled out | warning identical with local RTSP up or down |
+| `origin: LINK` is the WebRTC unblock for a Buddy3D-style camera | **Downgraded (2026-07-09)** | The official pairing manual shows genuine Buddy3D cameras register as `origin: OTHER` (same as us) via Connect's "Add WiFi Camera" QR wizard. `LINK` belongs to a separate, unrelated product — CSI/USB webcams wired into a Raspberry Pi running PrusaLink, toggled on via a "Link camera to Connect" button, no WebRTC/Socket.IO involved at all. See `dead-ends.md`. |
+| `origin` (`WEB` vs `OTHER`) is the WebRTC gate | **Ruled out — confirmed by live experiment (2026-07-09)** | Registered a fresh `origin: OTHER` token, redeployed the fully-correct-protocol impersonator against it (`registered: true`) — identical ACK `5` + registry `404` as the pre-existing `origin: WEB` token. Also corrects an earlier, weaker claim: `origin: WEB` is **not** restricted to the browser-webcam client — our impersonator ran the full Socket.IO/protobuf protocol successfully on a `WEB`-origin token for the whole project up to this point (auth ACK `1`, `/c/info` 200, snapshots all worked). `origin` appears to be account-side metadata, not a protocol-level access restriction. |
+| Source-IP / network reputation (WAF, geo, ASN, residential-IP blocking) is the WebRTC gate | **Ruled out — confirmed by live experiment (2026-07-09)** | Replayed the identical `client_authentication` handshake from a second machine on a completely different network (non-residential, different ASN) — same ACK `5`. |
+| MAC/OUI (a guessed Realtek `00:E0:4C` reference prefix) is the WebRTC gate | **Ruled out for this OUI, not the mechanism (2026-07-09)** | Spoofed `wlan0` to `00:E0:4C:xx:xx:xx`, recomputed `MD5(MAC)` fingerprint, registered a fresh token to bind cleanly — identical ACK `5` + `404`. Caveat: no confirmed genuine Buddy3D MAC was ever found to test against; this only rules out the specific guessed OUI, not MAC-checking in general. |
+| mitmproxy would show the real app's `connect.prusa3d.com`/`camera-service-api` traffic | **Blocked, not just untried (2026-07-09)** | Proxy + cert trust confirmed working (other domains decrypted cleanly), but zero requests to any Prusa Camera API domain appeared despite confirmed time on the camera view — consistent with certificate pinning on that traffic specifically. |
 
 ---
 
@@ -147,7 +218,10 @@ All corrected and matched against a real camera / the buddy3d-proxy captures. Fu
 
 **Hardware:** Raspberry Pi Zero 2 W, Debian 13 (trixie), OV5647 (Pi Cam v1, 1920×1080). App in
 `~/prusa-cam/` (venv `--system-site-packages`). Paired to a Prusa CORE One. Live token in
-`~/prusa-cam/config.ini` (secret; not in repo).
+`~/prusa-cam/config.ini` (secret; not in repo). **2026-07-09:** switched to a freshly-registered
+`origin: OTHER` camera (id `573240`, see the origin-ruled-out experiment above) — the prior
+`origin: WEB` camera (id `572286`) is deregistered from active use but still exists on the
+account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 
 **Services (systemd, `enabled`, survive reboot):**
 
@@ -177,17 +251,22 @@ the `/c/info` HTTP channel is what actually populates the UI. **[assumption]**
 ## Open / unresolved
 
 - **Byte-perfect `CameraInfoMessage` map** — the 464-byte struct is reconstructed and offsets
-  are computable, but ~90 fields remain generically named. Fast path: GhidrAssistMCP
-  `get_code` on `0xa01dc`, then `struct field_xrefs`/`rename_field` per offset.
-  Helpers in [`../research/`](../research/).
+  are computable, but most fields remain generically named. `0x0b8`-`0x0cc` (the "field 5.2"
+  sub-block) was traced 2026-07-09 — see `protocol.md`'s `extended_status` section. Fast path
+  for the rest: GhidrAssistMCP `get_code` on `0xa01dc` if the GUI/MCP session is running (it
+  wasn't this session — see `next-steps.md` P.1 for the headless fallback that was used
+  instead), then `struct field_xrefs`/`rename_field` per offset. Helpers in
+  [`../research/`](../research/).
 - **`webrtc.py` end-to-end** — offer/answer/ICE + `rpicam-vid` H.264 pipeline is implemented but
   **never exercised against a real offer** (no offer ever arrives). Treat as unverified.
 - **Direct registration** — whether `camera-service-api.prusa3d.com` exposes a registration
   endpoint (e.g. `POST /v1/cameras` with a bearer JWT) that would place our camera in the
   registry. Unexplored.
-- **LINK-origin token / QR format** — the printer's QR pairing produces the only registered
-  token type. Format/parameters unknown (firmware `AT+TOKEN=<token>` suggests the QR is just a
-  token string).
+- **Real Buddy3D pairing QR format** — the official manual confirms the QR generated by Connect's
+  "Add WiFi Camera" wizard carries Wi-Fi credentials plus a registration token (both scanned
+  optically by the camera itself); exact encoding/format is still unconfirmed (firmware
+  `AT+TOKEN=<token>` suggests at least the token portion is a plain string). Low priority — we
+  already have a working token-acquisition path via the plain "Camera > Token" screen.
 
 Corrected/superseded understanding (field-5 vs field-4, flat `/c/info`, `Niceboy` model, etc.)
 is catalogued in [`dead-ends.md`](dead-ends.md) — consult it before trusting older notes.
@@ -196,10 +275,57 @@ is catalogued in [`dead-ends.md`](dead-ends.md) — consult it before trusting o
 
 ## Recommended next steps (by likely payoff)
 
-1. **Get an `origin: LINK` token** via the printer's "Add Buddy camera" QR flow, and test the
-   impersonator with it — this is the only known way past the registration gate.
+**2026-07-09 update:** the hardware-identity hypothesis (P.1 in `next-steps.md`) is now closed —
+no unique, un-forgeable identifier was found on the `CameraInfoMessage` wire (see the "ruled
+out" table above and `protocol.md`). One concrete, cheap correctness fix fell out of the
+investigation: send the real firmware's model-name string (`"Buddy3D-C1"`) at the newly-traced
+`extended_status` offset `0x0c4` instead of the impersonator's invented `"Pi Zero 2 W"`.
+**Applied 2026-07-09** (`pi-impersonator/signaling.py`: `2: 'Pi Zero 2 W'` → `2: MODEL`),
+deployed to the Pi, verified on the wire (`status` event's field 5 now shows `Buddy3D-C1`) and
+end-to-end (`/c/info` 200, auth ACK `1`, stable connection). This alone did not (and wasn't
+expected to) trigger a `webrtc` event.
+
+**2026-07-09 update #2:** the `origin: LINK` token-registry hypothesis is downgraded — genuine
+Buddy3D cameras also register as `origin: OTHER` (see Bottom line), so getting a LINK token was
+very likely never going to help. The PrusaLink/Step 1 plan in `next-steps.md` is kept only as a
+low-priority, separate curiosity, not the leading lead.
+
+**2026-07-09 update #3:** live-tested and ruled out both `origin` and source-IP/network-reputation
+as the gate (see "origin and network-reputation ruled out by live experiment" above).
+
+**2026-07-09 update #4:** MAC/OUI test executed live — also a negative result, and mitmproxy
+turned out to be **blocked entirely**, not just untried:
+
+- **MAC/OUI (P.2):** spoofed the Pi's `wlan0` to a guessed Realtek reference OUI (`00:E0:4C`,
+  matching the RTL8188FU chip a community teardown found inside a real Buddy3D unit — no confirmed
+  real-device MAC was found anywhere to test against directly), recomputed the fingerprint
+  (`MD5(MAC)`, per P.3), registered a fresh token so it bound cleanly to the new identity, and
+  redeployed. Identical ACK `5` + registry `404`. **Caveat:** rules out *this specific guessed*
+  OUI only, not MAC-checking as a mechanism in general — no confirmed genuine MAC was ever
+  available to test with. (Also incidentally confirmed the server validates fingerprint against
+  what was recorded at a token's first use: reusing the *existing* `OTHER` token with a *changed*
+  fingerprint got `403`, not `200` — a real, previously-undocumented behavior.)
+- **mitmproxy (Step 2):** phone proxy + cert trust both confirmed working (`sentry.prusa3d.com`
+  and Firebase traffic decrypted cleanly), but across the whole session — including confirmed time
+  spent on the Core One's camera view — **zero requests to `connect.prusa3d.com`,
+  `camera-service-api.prusa3d.com`, or `camera-signaling.prusa3d.com`** were ever captured. That
+  combination (working interception elsewhere, total silence for exactly the domains that matter)
+  points to **certificate pinning** on the app's core API traffic. Seeing it would need
+  jailbreak-level tooling (SSL Kill Switch / Frida), a much bigger escalation than attempted today.
+
+**Net effect:** every gate hypothesis reachable from software-only testing (origin, source-IP
+reputation, guessed MAC/OUI) has now been tried and failed to explain the block, and the one
+remaining low-effort diagnostic (mitmproxy) is blocked by pinning. What's left needs either real
+Buddy3D hardware to compare against, or significantly more invasive phone tooling:
+
+1. **Check firmware/rollout timing** — the 2025 Prusa blog post describing staged local-then-cloud
+   WebRTC rollout doesn't give an exact date or firmware-version cutoff; worth checking whether
+   3.1.5 (ours) predates or postdates general cloud-WebRTC availability, e.g. via changelog/OTA
+   metadata or forum reports from real Buddy3D owners about when live-view started working.
 2. **Probe `camera-service-api` for a direct registration path** (JWT-authenticated POST) that
-   could register our camera without the QR flow.
-3. **MITM the app ↔ Prusa cloud** to confirm exactly what the backend checks before the error —
-   the mechanism is already known, so this is confirmation, not discovery.
-4. **If a real `webrtc` offer ever arrives**, verify `webrtc.py` end-to-end (currently untested).
+   could register our camera without any QR flow.
+3. **SSL-unpinning on a jailbroken device**, if one becomes available — the only way left to see
+   the real app's actual `connect.prusa3d.com`/`camera-service-api` traffic.
+4. **Get real Buddy3D hardware** to compare directly (the ESP32Cam on the account doesn't count —
+   it never implements WebRTC at all, see above).
+5. **If a real `webrtc` offer ever arrives**, verify `webrtc.py` end-to-end (currently untested).

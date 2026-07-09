@@ -1,16 +1,32 @@
 # Next Steps Plan — Prusa Buddy3D Camera Impersonator
 
-**Created:** 2026-07-07  
+**Created:** 2026-07-07. **Revised 2026-07-09** after reading Prusa's official Buddy3D pairing
+manual and PrusaLink camera guide — see `status.md`'s Bottom line for the full story.
 **Context:** Camera impersonator works (snapshots, Socket.IO auth, `/c/info`, RTSP) but the
 mobile app never sends WebRTC offers and shows "Kamera-Kommunikation Fehlgeschlagen".
-Two leads are open: (a) a backend **registration/registry gate** on the token
-(Steps 1–2), and (b) the **hardware-identity hypothesis** below — that eligibility depends
-solely on data the camera itself supplies. Do these in order — each tier's results inform
-whether the next is worth attempting.
+Two leads are open: (a) a backend **registration/registry gate** on the token — **Step 2
+(mitmproxy) is now the priority, not Step 1** (`origin: LINK` was downgraded once we confirmed
+genuine Buddy3D cameras also register as `origin: OTHER`) — and (b) the **hardware-identity
+hypothesis** below, now narrowed to the MAC/OUI test (P.2) since the wire-level serial search
+(P.1) came back negative. Do these in order — each tier's results inform whether the next is
+worth attempting.
 
 ---
 
 ## Priority — Hardware-identity hypothesis (does the camera's own data gate WebRTC?)
+
+**Verdict (2026-07-09): closed — no unique identifier found on the `CameraInfoMessage` wire.**
+P.1 traced the remaining extended-status sub-block; the answer is "a hardware-derived value is
+sent, but it's a small, guessable model string, not an unforgeable serial." Full evidence in
+`protocol.md`'s `extended_status` section and `status.md`'s "ruled out" table.
+
+**P.2 (MAC/OUI) is now the top priority (2026-07-09, updated later the same day).** `origin:
+LINK` was downgraded, then **both `origin` (WEB vs OTHER) and source-IP/network-reputation were
+live-tested and conclusively ruled out** — see `status.md`'s "origin and network-reputation ruled
+out by live experiment" section. A fresh, fully-correct-protocol `origin: OTHER` token got the
+identical ACK `5` from two different networks. That leaves MAC/OUI as the last untested
+"real-hardware allowlist" candidate reachable purely from software — see `status.md`'s
+"Recommended next steps" for the full current priority order (P.2 first, then mitmproxy).
 
 **Why this is a lead:** there is no user setting to enable/disable WebRTC, cameras are not tied
 to a user account (they can be resold), and pairing is QR-based — so WebRTC eligibility likely
@@ -20,61 +36,93 @@ the firmware computes), an **invented HW string** (`NB.1.1.0` / `Pi Zero 2 W`), 
 `CameraInfoMessage` fields are un-mapped**. Provenance breakdown: see the "Current deployment
 state" table in [`status.md`](status.md). Field-5 sub-field mechanics overlap with Step 5 below.
 
-### P.1 — Map the remaining `CameraInfoMessage` fields (is a serial / HW-id transmitted?)
+### P.1 — Map the remaining `CameraInfoMessage` fields (is a serial / HW-id transmitted?) — DONE 2026-07-09
 
 Cheapest and most decisive — answers "does the camera put its serial on the wire at all?".
 
-- [ ] **P.1.1** Decompile the identity getters and find their callers:
-  ```
-  mcp__ghidrassist__get_code(0x72534, format=decompiler)   # ReadHwVersionFromCamera
-  ```
-  Also locate the **serial/OTP getter** (reads `/sys/class/spi_master/spi2/spi2.0/version`,
-  see findings §7.2) and any function reading the factory serial.
-- [ ] **P.1.2** On the reconstructed struct (`auto_structs/CameraInfoMessage`, encoder at
-  `0xa01dc`), run `struct field_xrefs` on each un-named `field_0xNN` writer — flag any that
-  call the serial/HW getter. Focus on the field-5 **hardware sub-block** (the "2 ints + string"
-  HW block near `field5.2`), the most likely home for a serial.
-- [ ] **P.1.3** Record the verdict in [`status.md`](status.md):
-  - **Serial IS written to a status field** → a valid factory serial is required; we cannot
-    supply one → this *confirms* a hardware-identity gate.
-  - **No serial anywhere in the struct** → hardware-ID-in-`status` is ruled out; weight shifts
-    to MAC/fingerprint (P.2/P.3) or the token-registry gate (Steps 1–2).
+**Environment note:** `mcp__ghidrassist__*` (live Ghidra GUI MCP) was not running/configured
+this session (`127.0.0.1:8080` refused, no `.mcp.json`, no Ghidra process). Used the headless
+`analyzeHeadless` fallback instead (`docs/reverse-engineering.md`'s documented technique) —
+slower per query (~1-2 min vs. seconds) but the on-disk project already carries every
+rename/struct-typing from prior GUI sessions, so results are equivalent. Four short scripts
+(`/tmp/IdentityFieldTrace{,2,3,4}.java`), full logs in `/tmp/identity_trace*_output.log`.
 
-### P.2 — MAC / OUI test (does the backend check the MAC or its vendor prefix?)
+- [x] **P.1.1** Decompiled the identity getter at VMA `0x72534` (not yet named
+  `ReadHwVersionFromCamera` in this project — still `FUN_00072534`). Confirmed: it `fopen`s the
+  real `/sys/class/spi_master/spi2/spi2.0/version` SPI chip, reads + byte-swaps a `u32`, and on
+  success calls `FUN_000723f0(this, hw_version_int)`, which walks a fixed range table mapping
+  the numeric HW-version code to one of a small set of model-name strings (`"Buddy3D-C1"` etc. —
+  this *is* the `checkHwVersion`/model-selector logic already referenced in `protocol.md`).
+  **No separate factory-serial/OTP getter exists**: exhaustive `.rodata` substring search for
+  `"serial"`, `"Serial"`, `"SERIAL"`, `"otp"`, `"OTP"`, `"SN:"`, `"factory"` returned zero hits
+  anywhere in the binary. `journal/findings.md` §7.2's "Serial Number (SN) — OTP memory" row has
+  no citation and no traced getter backs it up this session — treat as unconfirmed/superseded.
+- [x] **P.1.2** On `FUN_000a01dc` (the `CameraInfoMessage` encoder — not struct-typed in this
+  headless project, but the same 464-byte stack layout as `research/camera_info_struct.c`,
+  confirmed via the `memset(auStack_3e0, 0, 0x1d0)` call), traced offsets `0x0b8`-`0x0cc` (the
+  block right before the already-known `5.4` video-mode flag at `0x0d0` — this is what P.1.2 was
+  calling the "field 5.2 hardware sub-block"). Actual shape: **not** "2 ints + string" — it's
+  three `(mode=const, value)` pairs. Offset `0x0c4`'s value *does* trace back to
+  `FUN_00072534` — indirectly, via a shared device-info singleton's `+0x20` string field
+  (`FUN_00071ce0()` → 86 call sites across the binary, including the CameraInfoMessage encoder,
+  `/c/info` JSON builder, snapshot upload, and the features-list builder — confirming it's the
+  general camera-identity object, not something CameraInfoMessage-specific). The other two
+  values (`0x0bc` = compile-time literal string, `0x0cc` = a different singleton's `+0x2c`
+  field) do **not** trace to any identity getter. Full call chain and offset table now in
+  `protocol.md`'s `extended_status` section.
+- [x] **P.1.3** Verdict recorded in [`status.md`](status.md) (see the "ruled out" table): **no
+  serial anywhere in the struct** — the one hardware-derived value found (`0x0c4`) is a small,
+  guessable model-variant string, not a unique per-device identifier. Hardware-ID-in-`status`
+  as an *unforgeable* gate is ruled out. Weight shifts to the token-registry gate (Step 1/2,
+  already `status.md`'s #1 recommendation) rather than P.2/P.3 below (see the note at the top of
+  this Priority section).
 
-- [ ] **P.2.1** Find a genuine Niceboy/Prusa camera **OUI** (IEEE OUI lookup, or the community
-  project `tlchandler/Improved-Buddy3D-...`).
-- [ ] **P.2.2** Temporarily spoof the Pi's `wlan0` MAC to that OUI:
+### P.2 — MAC / OUI test (does the backend check the MAC or its vendor prefix?) — DONE 2026-07-09
+
+**Result: negative for the OUI tested, inconclusive for the mechanism in general.** No confirmed
+genuine Buddy3D MAC was ever found (checked the community GitHub repo and Prusa forums — one user
+even reported the camera ships with no MAC label at all). Used the best available proxy instead:
+a community teardown confirmed the WiFi chip is a **Realtek RTL8188FU**, and `00:E0:4C` is
+Realtek's common default/reference OUI for that chip family. Spoofed `wlan0` to
+`00:E0:4C:86:17:ff`, recomputed `MD5(MAC)` as the fingerprint (P.3, done as part of this test),
+registered a **fresh token** (reusing the existing token with just a changed fingerprint got
+`403` — the server validates fingerprint against what was recorded at first use, a new
+previously-undocumented finding), and redeployed. `client_authentication` → ACK `5`,
+registry lookup → `404`, identical to every other test. See `status.md`'s "ruled out" table.
+If a confirmed genuine MAC ever surfaces, this is worth re-running against it specifically —
+`00:E0:4C` was an educated guess, not a verified real-device value.
+
+- [x] **P.2.1** Find a genuine Niceboy/Prusa camera **OUI** — no confirmed one found; used the
+  Realtek RTL8188FU chip's common reference OUI (`00:E0:4C`) as the best available proxy instead.
+- [x] **P.2.2** Temporarily spoof the Pi's `wlan0` MAC to that OUI:
   ```bash
   sudo ip link set wlan0 down
   sudo ip link set wlan0 address <NICEBOY_OUI>:XX:XX:XX
   sudo ip link set wlan0 up
   ```
-- [ ] **P.2.3** Recompute the fingerprint (P.3), update `config.ini`, restart `prusa-cam`, then
+- [x] **P.2.3** Recompute the fingerprint (P.3), update `config.ini`, restart `prusa-cam`, then
   re-run `/c/info` + the viewer-flow test. Note whether viewer ACK `5` or the
-  `/v1/cameras/<token>` 404 changes.
-  - **Caveat:** the registry gate is keyed on the *token* (origin fixed at creation), so MAC/OUI
-    changes may not move it. A negative result here mainly rules an OUI check *out* as an
-    *additional* gate; it does not by itself re-register the camera.
+  `/v1/cameras/<token>` 404 changes. **Done — no change either way.**
+  - **Confirmed (not just a caveat anymore):** the registry gate is keyed on the *token*
+    (origin fixed at creation) — reusing the existing token with just a changed fingerprint got
+    `403 Forbidden` (server validates fingerprint against what it recorded at first use), so a
+    **fresh token** was required to test MAC/OUI in isolation. Done — see `status.md`.
 
-### P.3 — Make the fingerprint firmware-faithful (`MD5(MAC)`)
+### P.3 — Make the fingerprint firmware-faithful (`MD5(MAC)`) — DONE 2026-07-09 (as part of P.2)
 
 Today `fingerprint` is read verbatim from `config.ini` and is not tied to the MAC we send — a
 mismatch could itself fail a check. The firmware computes `MD5(MAC)`
 (`lp_fingerprint_generation_tool.cpp`: MAC via `iw dev` → MD5, random fallback).
 
-- [ ] **P.3.1** Compute it instead of reading a static value (in `main.py`):
-  ```python
-  import hashlib
-  mac = open('/sys/class/net/wlan0/address').read().strip()
-  fingerprint = hashlib.md5(mac.encode()).hexdigest()
-  ```
-  Keep the `config.ini` value as an optional override.
-- [ ] **P.3.2** **Careful:** if the current token was registered against the *old* fingerprint,
-  changing it may re-key/disassociate the camera. Test with a spare token, and verify
-  `camera_authentication` still ACKs `1` afterward.
+- [x] **P.3.1** Compute it instead of reading a static value (in `main.py`) — done manually for
+  the P.2 test (`MD5(new_mac)` via a one-off Python one-liner, not wired into `main.py` itself
+  yet). The `main.py` code change described here (auto-compute at runtime, `config.ini` as
+  override) is still open if a permanent fix is wanted — low priority since the live test already
+  answered the empirical question this existed to support.
+- [x] **P.3.2** Confirmed the "careful" concern was real: changing fingerprint against the
+  *existing* token broke it (`403`). Worked around by registering a fresh token instead — see P.2.
 
-**Order:** P.1 first (decisive, no risk), then P.2 + P.3 as quick empirical tests.
+**Order:** P.1 first (decisive, no risk), then P.2 + P.3 as quick empirical tests. All three done.
 
 ---
 
@@ -104,11 +152,33 @@ mismatch could itself fail a check. The firmware computes `MD5(MAC)`
 
 ---
 
-## Step 1 — PrusaLink printer API (get `origin: LINK`)
+## Step 1 — PrusaLink printer API (get `origin: LINK`) — DEPRIORITIZED 2026-07-09
 
-The Prusa CORE One runs PrusaLink which exposes a local HTTP API. If it has a camera
-registration endpoint, posting our token through it may cause the backend to assign
-`origin: LINK` — the only remaining origin path not yet tried.
+**This is very likely the wrong target — read before spending time here.** The original theory
+was "`origin: LINK` is what a genuine Buddy3D camera gets, and that's what unlocks WebRTC." Two
+official Prusa documents now contradict the premise:
+
+- The official Buddy3D quick-start manual shows genuine cameras pairing via Connect's **"Add WiFi
+  Camera"** wizard (Camera tab → generate a QR with Wi-Fi credentials → camera scans it with its
+  own lens). Per the OpenAPI spec's description of the `origin` param (*"Use OTHER for camera
+  registration via api. WEB is used when registering camera via web qr code"*), that flow is
+  **`origin: OTHER`** — the same origin our impersonator already uses.
+- A separate guide ("Camera setup for PrusaLink / Prusa Connect") confirms `origin: LINK` belongs
+  to a *different, unrelated* product: a CSI/USB webcam wired directly into the Raspberry Pi
+  running PrusaLink, switched on via a "Link camera to Connect" toggle in PrusaLink's own web UI.
+  Nothing in that guide mentions WebRTC, Socket.IO, or live streaming of any kind — it reads like
+  plain snapshot-style camera linking, a different feature entirely from what Buddy3D cameras do.
+
+So even a successful `origin: LINK` token likely wouldn't exercise the Buddy3D Socket.IO/WebRTC
+protocol at all. Full writeup in `status.md`'s Bottom line and `dead-ends.md`. **Do Step 2
+(mitmproxy) first** — it's now the higher-value move. The steps below are kept for reference in
+case PrusaLink turns out to be relevant for an unrelated reason, but are no longer the leading
+lead.
+
+**2026-07-09 (earlier note, superseded by the above):** confirmed from the public OpenAPI spec
+(`docs/openapi.yaml`, v0.22.0) that the only documented user/app registration endpoint
+(`POST /app/printers/{uuid}/camera`) accepts `origin: WEB|OTHER` only — `LINK` cannot come from
+there.
 
 - [ ] **1.1** Find the printer's local IP address.
   - Check your router's DHCP table, or
@@ -174,11 +244,34 @@ registration endpoint, posting our token through it may cause the backend to ass
 
 ---
 
-## Step 2 — mitmproxy on phone (cloud-side interception)
+## Step 2 — mitmproxy on phone (cloud-side interception) — ATTEMPTED 2026-07-09, BLOCKED BY CERT PINNING
 
-Goal: see what `camera-service-api.prusa3d.com` returns when the app tries to initiate
-WebRTC for our camera. This will either confirm origin gating definitively or reveal a
-different reason.
+**Result: blocked, not just untried.** Set up mitmweb, configured the phone's Wi-Fi proxy,
+installed and trusted the certificate (verified working — `sentry.prusa3d.com` and Firebase
+traffic decrypted cleanly), then confirmed time spent on the Core One's camera view in the app.
+Across the whole capture, **zero requests ever appeared** for `connect.prusa3d.com`,
+`camera-service-api.prusa3d.com`, or `camera-signaling.prusa3d.com` — every other domain the app
+touched came through fine. That combination (interception working in general, total silence for
+exactly the domains that matter) points to **certificate pinning** on the app's core API traffic.
+Bypassing that needs jailbreak-level tooling (SSL Kill Switch / Frida / objection on a jailbroken
+device) — a much bigger escalation than this step originally assumed. Not pursued further today;
+see `status.md`'s "Recommended next steps" for what that leaves open. The steps below are kept for
+reference in case jailbreak tooling becomes available later.
+
+Original goal: see what `camera-service-api.prusa3d.com` returns when the app tries to initiate
+WebRTC for our camera. Origin gating and network-reputation are **ruled out by direct experiment**
+(see `status.md`'s "origin and network-reputation ruled out by live experiment") — the two live
+hypotheses this was meant to distinguish:
+
+- **Real-hardware allowlist**: response indicates a specific per-camera check failed (e.g. an
+  explicit "not a registered device" / "unverified hardware" error, or the request/token itself
+  is rejected in a way that implies identity verification).
+- **Staged feature rollout**: response indicates the feature/endpoint isn't generally available
+  yet (e.g. a version check, a "coming soon"-style message, a flag/entitlement check, or — per
+  Prusa's own 2025 blog post about the Buddy3D/App update — evidence that cloud WebRTC access is
+  still being rolled out rather than universally on). A real Buddy3D camera on an account showing
+  the *same* rejection would be strong evidence for this branch over the allowlist one, if it can
+  be arranged.
 
 - [ ] **2.1** Install mitmproxy on Mac:
   ```bash
@@ -561,26 +654,29 @@ backend publishes that gate WebRTC in the app.
 ## Summary / dependency graph
 
 ```
-Step 0 (SSH fix) ──────────────────────────────────┐
+[2026-07-09, done] origin (WEB vs OTHER) ruled out — live experiment
+[2026-07-09, done] source-IP/network reputation ruled out — live experiment from 2nd network
+[2026-07-09, done] MAC/OUI (guessed Realtek prefix) ruled out — live experiment
+[2026-07-09, blocked] Step 2 (mitmproxy) — certificate pinning on the app's core API traffic
                                                     │
-Step 1 (PrusaLink / origin: LINK) ─────────────────┤
-        │                                           │
-        └─ If origin changes → test immediately    │
                                                     ▼
-Step 2 (mitmproxy) ─────────────────────── reveals exact gate
+                              Every software-only lead is now either negative or blocked.
+                              What's left needs real hardware or jailbreak-level phone tooling:
         │
-        └─ If origin confirmed as gate → done researching,
-           deploy Step 3 and wait for real hardware access
-        │
-        └─ If different error → use response to guide Step 5
+        ├─ Firmware/rollout-timing research (item 1 in status.md's next steps)
+        ├─ Direct camera-service-api registration probe (item 2)
+        ├─ SSL-unpinning on a jailbroken device, if available (item 3)
+        └─ Real Buddy3D hardware to compare directly (item 4)
 
-Step 4 (logging) ─── deploy in parallel with any of the above,
-                      prerequisite for interpreting all test results
+Step 0 (SSH fix) ─── already resolved, kept for reference
+Step 1 (PrusaLink / origin: LINK) ─── DEPRIORITIZED, reference only
+                                       (see Step 1's 2026-07-09 note)
 
+Step 4 (logging) ─── still useful background hygiene, independent of the above
 Step 3 (webrtc handler) ─── needed before any end-to-end WebRTC test
-Step 5 (status fields) ──── low priority unless Step 2 reveals a status field as the gate
-Step 6 (MQTT) ──────────── low priority unless Step 2 shows app reads MQTT before offering
+Step 5 (status fields) ──── low priority, no longer expected to reveal the gate
+Step 6 (MQTT) ──────────── low priority, no longer expected to reveal the gate
 ```
 
-**Minimum useful state:** Steps 0 + 4 deployed, Step 2 done. From there you know whether
-any more software work can help or whether you need real hardware.
+**Minimum useful state (as of 2026-07-09):** reached — every cheap, software-only lead has been
+tried. From here, further progress needs either real Buddy3D hardware or a jailbroken phone.

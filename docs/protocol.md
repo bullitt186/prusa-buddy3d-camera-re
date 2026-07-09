@@ -2,6 +2,42 @@
 
 Firmware 3.1.5, Protocol Schema 4.4. Reversed from `lp_app` ARM binary via Ghidra.
 
+REST endpoints below (registration, `/c/snapshot`, `/c/info`) are cross-checked against Prusa's
+official Camera API OpenAPI spec (v0.22.0, saved at [`openapi.yaml`](openapi.yaml)) and the
+`camera_registration`/`camera_communication` doc pages — see [`sources.md`](sources.md). That
+spec does **not** cover Socket.IO or WebRTC (Sections 3–6, 10 below); those remain firmware-only
+knowledge, reversed from `lp_app`.
+
+---
+
+## 0. Registration (app-side — the camera never calls this)
+
+Before any of the camera-side flow below can run, a token has to exist. That happens through an
+**app/browser** call, not the camera:
+
+```http
+POST /app/printers/{printer_uuid}/camera?origin=WEB|OTHER HTTP/1.1
+Host: connect.prusa3d.com
+Cookie: SESSID=<user session>
+```
+
+- `origin` defaults to `WEB` (Connect's separate browser-webcam feature: a phone/laptop's own
+  camera becomes the feed via `getUserMedia()`/browser WebRTC — unrelated to the Buddy3D firmware
+  protocol) and can be set to `OTHER` ("registration via api" per the spec's own wording). **Both
+  genuine Buddy3D cameras and third-party API integrations (ESP32Cam etc.) register as `origin:
+  OTHER`** — confirmed 2026-07-09 from the official pairing manual (Connect → Camera tab → "Add
+  WiFi Camera" → camera scans a generated QR with its own lens); see `dead-ends.md`.
+- **Confirmed from the spec: `WEB`/`OTHER` is the full enum for this endpoint — `LINK` is not a
+  selectable value here.** `LINK` is minted by a separate, unrelated flow: PrusaLink's own
+  "Link camera to Connect" toggle, for CSI/USB webcams wired directly into a Raspberry Pi running
+  PrusaLink — a different product from the Buddy3D camera, with no WebRTC involved. See
+  `status.md` and `next-steps.md` Step 1 (deprioritized).
+- Response `201` returns a `camera_response` object containing the new `token` (exactly 20
+  alphanumeric characters) and `origin`.
+- The camera's role starts *after* this: it receives the token out-of-band (typed in or scanned
+  via QR) and uses it for `fingerprint`+`token` auth (§2) and the `Token`/`Fingerprint` HTTP
+  headers (§7–8). The camera has no way to self-register or change its own `origin`.
+
 ---
 
 ## 1. Transport
@@ -179,9 +215,12 @@ Incoming SDP offers/ICE candidates from server. See Section 10 for full field ta
 `GET camera-service-api.prusa3d.com/v1/cameras/<token>` — so viewers cannot connect and the
 camera never receives any relayed events.
 
-**Inferred (untested):** that this `camera-service-api` registry is the exact gate, and that
-`origin: LINK` tokens (printer QR pairing) are registered there and pass. No LINK token was ever
-obtained to verify this — it is the leading hypothesis, not a confirmed fact.
+**Inferred (untested):** that this `camera-service-api` registry is the exact gate. **Revised
+2026-07-09:** `origin: LINK` is very likely not the answer — the official pairing manual shows
+genuine Buddy3D cameras register as `origin: OTHER` too (same as `WEB`/`OTHER` above), via
+Connect's "Add WiFi Camera" QR wizard; `LINK` belongs to an unrelated PrusaLink RPi-webcam
+product. What actually gates registry membership (a real-hardware allowlist vs. a staged feature
+rollout) is open — see `status.md`'s Bottom line and `next-steps.md` for the current leads.
 
 ---
 
@@ -271,6 +310,7 @@ Confirmed always-present optional fields in `SendCameraInfoMessage`:
 | `0x06c` | `4` | `network_info` |
 | `0x070` | `4.1` | current network block |
 | `0x0b4` | `5` | `extended_status` |
+| `0x0b8`-`0x0cc` | `5.1`-`5.3` (offset order, exact tags unconfirmed) | 3× `(mode=1, value)` pairs — see below |
 | `0x0d0` | `5.4` | video/timelapse mode/storage block |
 | `0x0f0` | `5.6` | RTSP mode/status/url block |
 | `0x104` | `5.7` | log-level/status block |
@@ -285,6 +325,41 @@ name, field 10 as firmware, and field 9 as `available_resolutions`. Descriptor +
 accessor tracing disproves those guesses: field 4 is network info, field 5 is extended
 status, field 8 is `http.token`, field 9 is system telemetry, and field 10 is a
 conditional request-id-like string.
+
+**`extended_status` offsets `0x0b8`-`0x0cc` (the block immediately before `5.4`) — traced
+2026-07-09, headless Ghidra (`FUN_000a01dc` decompile + xref chase, no live GUI session
+available this run):**
+
+Three `(mode, value)` pairs, each `mode` = the shared constant `DAT_000a0ce4` (same value
+written three times):
+
+| Offset | Source | Value |
+|---|---|---|
+| `0x0b8` | constant | `DAT_000a0ce4` |
+| `0x0bc` | `FUN_0003726c()` | **compile-time literal string** — not identity/hardware-derived at all |
+| `0x0c0` | constant | `DAT_000a0ce4` (same as `0x0b8`) |
+| `0x0c4` | `FUN_0007272c(FUN_00071ce0())` → reads `+0x20` of the shared device-info singleton | **model-name string** (one of `"Buddy3D-C1"`/`"Buddy3D-POE"`/`"Buddy3D."` — see §7.1 in `journal/findings.md`) |
+| `0x0c8` | constant | `DAT_000a0ce4` (same as `0x0b8`) |
+| `0x0cc` | `FUN_0009e4a4(FUN_0005b2f8(FUN_0005a8d4()))` → reads `+0x2c` of a *different* singleton | unidentified string; not traced further (low priority — see `status.md`) |
+
+The `0x0c4` model-name string is populated once, lazily, the first time `FUN_00071ce0()`'s
+singleton is touched (guard function `FUN_0007460c` → `FUN_00073638` → `FUN_00072534`, which
+`fopen`s the real `/sys/class/spi_master/spi2/spi2.0/version` SPI chip, byte-swaps the u32 it
+reads, then `FUN_000723f0` walks a fixed range table mapping that numeric HW-version code to
+one of a small, fixed set of model-name strings (`checkHwVersion`, already referenced in the
+model-selection note above this table). **This confirms the field carries a hardware-derived
+value, but it is a small-cardinality *model/variant* string shared by every unit of that
+hardware revision — not a unique per-device factory serial.** No distinct factory-serial / OTP
+getter or string (`"serial"`, `"Serial"`, `"SERIAL"`, `"otp"`, `"OTP"`, `"SN:"`, `"factory"`)
+was found anywhere in `.rodata` this session — an exhaustive substring search came back empty.
+See the "hardware-identity hypothesis" verdict in `status.md` and `next-steps.md` P.1 for the
+full reasoning and implication (the value is guessable/reproducible without real hardware, so
+this alone doesn't explain the registration gate).
+
+The `FUN_00071ce0()` singleton accessor has 86 call sites across the binary — including
+`do_update_camera_attr` (`/c/info` JSON builder), the snapshot-upload function, and the
+features-list builder — confirming it's the shared camera-identity/device-info object used
+throughout, not something CameraInfoMessage-specific.
 
 ### WebRTCMessage — inbound offer field list
 
@@ -369,6 +444,11 @@ Headers are `Token` and `Fingerprint` (short names, no prefix).
 
 Default interval: 10 seconds.
 
+Note: the official OpenAPI spec documents success as `204 No Content`; live testing against the
+real backend observed `200` instead (see `status.md`). Doesn't affect the impersonator — it only
+logs the status code, it doesn't branch on it — but flagged here in case the discrepancy matters
+for future debugging.
+
 ---
 
 ## 8. HTTP Camera Info Upload
@@ -432,14 +512,24 @@ JSON **arrays**, not CSV strings (that assumption was the root cause of every ea
 Notes:
 - Only one entry in `available_resolutions` in the real firmware's build logic (just
   the current resolution), not three — untested whether more are accepted.
-- `capabilities` is specifically `["trigger_scheme"]` per the decompile, not empty.
+- `capabilities` is specifically `["trigger_scheme"]` per the decompile, not empty. The
+  OpenAPI spec's `camera_capabilities` enum also allows `imaging`, `resolution`, `focus` —
+  firmware 3.1.5 never sends them (possibly reserved for other camera hardware/future use).
 - The decompile shows `"manufacturer": "Niceboy"` and `model` comes from the hardware
   variant selector (`ReadHwVersionFromCamera` / `checkHwVersion`). Most serial ranges
   map to `"Buddy3D-C1"`; no-version/default fallback maps to `"Buddy3D."`.
 - Server response echoes back extra server-assigned fields not in the request:
   `id`, `rotation`, `sort_order`, `origin` (seen as `"OTHER"` for this impersonator —
   real hardware may report something else here), `registered`, `team_id`,
-  `printer_uuid`.
+  `printer_uuid`. **`rotation` is not in the OpenAPI `camera_response` schema at all** —
+  either an undocumented field the live backend added since the spec was last updated, or
+  the spec (v0.22.0) is simply incomplete here.
+- **`features` (the top-level array in this request body) has no corresponding field in the
+  OpenAPI `camera_request` schema either** — that schema only defines `config`, `options`,
+  `capabilities`. We send it anyway because it was traced directly out of firmware
+  (`do_update_camera_attr`, VMA `0x00061bbc`) and a live request with it returns `200`; the
+  spec is the less authoritative source here (it explicitly doesn't cover newer additions like
+  WebRTC, so it's plausible `features` postdates it too).
 
 ---
 
