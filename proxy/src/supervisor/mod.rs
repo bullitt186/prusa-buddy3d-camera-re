@@ -1,0 +1,708 @@
+//! Supervisor: owns the WebRTC lifecycle. First viewer triggers connect; last
+//! viewer + idle timeout triggers tear-down.
+//!
+//! This module exposes the state machine and viewer-count plumbing. The
+//! WebRTC bring-up is provided by an injected factory (`StreamFactory`) so
+//! tests can substitute a stub.
+
+pub mod webrtc_factory;
+
+use crate::rtsp::sdp::H264Params;
+use crate::rtsp::server::{SourceError, StreamSource, Subscription, ViewerEvent};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, OnceCell};
+use webrtc::rtp::packet::Packet as RtpPacket;
+
+/// Fires once when the underlying session ends on its own (signaling drop,
+/// WebRTC ICE failure, peer-connection close from the camera side). Does NOT
+/// fire when the session is torn down via `StopHandle::Drop`.
+pub type SessionEnded = oneshot::Receiver<()>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Idle,
+    Connecting,
+    Streaming,
+}
+
+/// What the supervisor needs to bring up an actual stream. Tests provide
+/// a mock that returns canned RTP packets; production wires through to the
+/// real WebRTC + signaling stack.
+#[async_trait::async_trait]
+pub trait StreamFactory: Send + Sync + 'static {
+    /// Bring up a new WebRTC + signaling session. Returns the negotiated H.264
+    /// params and a broadcast sender that the factory keeps populating with
+    /// inbound RTP packets until told to stop. The returned `StopHandle` is
+    /// dropped to tear the session down.
+    async fn connect(
+        &self,
+        rtp_tx: broadcast::Sender<RtpPacket>,
+    ) -> Result<(H264Params, StopHandle, SessionEnded), SourceError>;
+}
+
+/// Drop to stop the underlying WebRTC + signaling session.
+pub struct StopHandle {
+    /// Held to keep the session task alive; dropping this signals shutdown.
+    /// Implementations typically include a `oneshot::Sender<()>` here.
+    #[allow(dead_code)]
+    pub kill: Box<dyn Send + Sync>,
+}
+
+pub struct Supervisor {
+    inner: Arc<SupervisorInner>,
+}
+
+struct SupervisorInner {
+    factory: Arc<dyn StreamFactory>,
+    camera_name: String,
+    rtsp_path: String,
+    idle_timeout: Duration,
+    viewer_count: AtomicI32,
+    /// Set when a session is up; reset when torn down.
+    state: Mutex<SessionState>,
+    /// Channel the RTSP server's Subscription Drop sends to.
+    viewer_tx: mpsc::UnboundedSender<ViewerEvent>,
+    pub wss_reconnects_total: std::sync::atomic::AtomicU64,
+    pub last_error_at: Mutex<Option<std::time::Instant>>,
+    pub session_started_at: Mutex<Option<std::time::Instant>>,
+    /// When `Some`, the watchdog observes this watch and exits cleanly once
+    /// it flips to `true` — used by the auth orchestrator to signal that
+    /// further reconnect attempts will keep failing with `LoginRejected`.
+    failed_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Last published state. The MQTT state-watcher subscribes to this to
+    /// publish only on transitions, not on steady-state polls.
+    state_watch: tokio::sync::watch::Sender<State>,
+}
+
+struct SessionState {
+    state: State,
+    /// Broadcast channel for outbound RTP. Set when Streaming, None otherwise.
+    rtp_tx: Option<broadcast::Sender<RtpPacket>>,
+    /// Handle to the live session; drop to tear down.
+    stop: Option<StopHandle>,
+    /// H.264 params from the most recent successful negotiation. Cached so
+    /// reconnects don't change the SDP we serve.
+    h264: OnceCell<H264Params>,
+}
+
+impl Supervisor {
+    pub fn new(
+        factory: Arc<dyn StreamFactory>,
+        camera_name: String,
+        rtsp_path: String,
+        idle_timeout: Duration,
+        failed_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Arc<Self> {
+        let (viewer_tx, viewer_rx) = mpsc::unbounded_channel();
+        let (state_watch, _) = tokio::sync::watch::channel(State::Idle);
+        let inner = Arc::new(SupervisorInner {
+            factory,
+            camera_name,
+            rtsp_path,
+            idle_timeout,
+            viewer_count: AtomicI32::new(0),
+            state: Mutex::new(SessionState {
+                state: State::Idle,
+                rtp_tx: None,
+                stop: None,
+                h264: OnceCell::new(),
+            }),
+            viewer_tx,
+            wss_reconnects_total: std::sync::atomic::AtomicU64::new(0),
+            last_error_at: Mutex::new(None),
+            session_started_at: Mutex::new(None),
+            failed_rx,
+            state_watch,
+        });
+
+        // Spawn the viewer-event loop (handles idle timer + tear-down).
+        let inner_for_loop = inner.clone();
+        tokio::spawn(viewer_event_loop(inner_for_loop, viewer_rx));
+
+        Arc::new(Self { inner })
+    }
+
+    /// Cheap, lock-free read of operational counters for the metrics emitter.
+    /// Locks the small `last_error_at` / `session_started_at` mutexes briefly.
+    pub async fn snapshot(&self) -> SupervisorSnapshot {
+        let state = self.inner.state.lock().await;
+        let session_started_at = *self.inner.session_started_at.lock().await;
+        let last_error_at = *self.inner.last_error_at.lock().await;
+        SupervisorSnapshot {
+            state: state.state,
+            viewers: self.inner.viewer_count.load(Ordering::SeqCst).max(0) as u32,
+            wss_reconnects_total: self.inner.wss_reconnects_total.load(Ordering::SeqCst),
+            session_uptime_secs: session_started_at.map(|t| t.elapsed().as_secs()),
+            last_error_age_secs: last_error_at.map(|t| t.elapsed().as_secs()),
+        }
+    }
+
+    /// Returns a fresh broadcast receiver for the current session's RTP
+    /// stream, or `None` if no session is active. Does NOT increment the
+    /// viewer count — intended for passive consumers like the snapshot
+    /// worker, which must not keep the session warm by itself.
+    pub async fn subscribe_rtp(&self) -> Option<tokio::sync::broadcast::Receiver<RtpPacket>> {
+        let state = self.inner.state.lock().await;
+        state.rtp_tx.as_ref().map(|tx| tx.subscribe())
+    }
+
+    /// Returns a watch receiver that fires whenever the supervisor's state
+    /// changes. The MQTT state publisher subscribes to this.
+    pub fn state_changes(&self) -> tokio::sync::watch::Receiver<State> {
+        self.inner.state_watch.subscribe()
+    }
+
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SupervisorSnapshot {
+    pub state: State,
+    pub viewers: u32,
+    pub wss_reconnects_total: u64,
+    pub session_uptime_secs: Option<u64>,
+    pub last_error_age_secs: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl StreamSource for Supervisor {
+    async fn subscribe(&self) -> Result<Subscription, SourceError> {
+        // Increment optimistically; we'll undo on failure.
+        self.inner.viewer_count.fetch_add(1, Ordering::SeqCst);
+        let _ = self.inner.viewer_tx.send(ViewerEvent::Attached);
+
+        // Acquire (or reacquire) the session.
+        {
+            let mut state = self.inner.state.lock().await;
+            match state.state {
+                State::Idle => {
+                    state.state = State::Connecting;
+                    let _ = self.inner.state_watch.send(State::Connecting);
+                    // Drop the lock while we connect — we don't want to block other
+                    // viewers' subscribe() calls if they race.
+                    drop(state);
+
+                    let (h264_params, stop, broadcast_tx, ended) = match connect_session(&self.inner).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            // Reset to Idle so any viewers waiting in the
+                            // Connecting arm below see the failure and bail
+                            // out instead of hanging on an empty h264 cell.
+                            let mut s = self.inner.state.lock().await;
+                            if matches!(s.state, State::Connecting) {
+                                s.state = State::Idle;
+                                let _ = self.inner.state_watch.send(State::Idle);
+                            }
+                            drop(s);
+                            // Roll back the viewer count via the event loop —
+                            // it owns the canonical fetch_sub.
+                            let _ = self.inner.viewer_tx.send(ViewerEvent::Detached);
+                            *self.inner.last_error_at.lock().await = Some(std::time::Instant::now());
+                            return Err(e);
+                        }
+                    };
+                    *self.inner.session_started_at.lock().await = Some(std::time::Instant::now());
+
+                    let mut state = self.inner.state.lock().await;
+                    state.state = State::Streaming;
+                    let _ = self.inner.state_watch.send(State::Streaming);
+                    state.rtp_tx = Some(broadcast_tx.clone());
+                    state.stop = Some(stop);
+                    let _ = state.h264.set(h264_params);
+                    drop(state);
+
+                    // Spawn the watchdog that handles spontaneous session death.
+                    let watchdog_inner = self.inner.clone();
+                    let watchdog_tx = broadcast_tx.clone();
+                    tokio::spawn(reconnect_watchdog(watchdog_inner, ended, watchdog_tx));
+                }
+                State::Connecting => {
+                    // Another viewer is bringing the session up. Wait for the
+                    // state to transition rather than racing to read an empty
+                    // h264 cell.
+                    drop(state);
+                    let mut watch = self.inner.state_watch.subscribe();
+                    loop {
+                        let current = *watch.borrow_and_update();
+                        match current {
+                            State::Streaming => break,
+                            State::Idle => {
+                                let _ = self.inner.viewer_tx.send(ViewerEvent::Detached);
+                                return Err(SourceError::Unavailable(
+                                    "session connect failed".into(),
+                                ));
+                            }
+                            State::Connecting => {
+                                if watch.changed().await.is_err() {
+                                    let _ = self.inner.viewer_tx.send(ViewerEvent::Detached);
+                                    return Err(SourceError::Unavailable(
+                                        "supervisor shut down".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                State::Streaming => {
+                    // Session is up; fall through to read h264 below.
+                }
+            }
+            // state guard dropped here.
+        }
+
+        // At this point a session exists; subscribe to it.
+        let state = self.inner.state.lock().await;
+        let h264 = state
+            .h264
+            .get()
+            .cloned()
+            .expect("h264 params set after connect");
+        let rtp_tx = state.rtp_tx.as_ref().expect("rtp_tx set in Streaming");
+        let rtp_rx = rtp_tx.subscribe();
+        Ok(Subscription {
+            h264,
+            rtp: rtp_rx,
+            on_drop: self.inner.viewer_tx.clone(),
+        })
+    }
+
+    fn camera_name(&self) -> &str {
+        &self.inner.camera_name
+    }
+    fn rtsp_path(&self) -> &str {
+        &self.inner.rtsp_path
+    }
+}
+
+async fn connect_session(
+    inner: &Arc<SupervisorInner>,
+) -> Result<(H264Params, StopHandle, broadcast::Sender<RtpPacket>, SessionEnded), SourceError> {
+    let (broadcast_tx, _) = broadcast::channel::<RtpPacket>(256);
+    let (h264, stop, ended) = inner.factory.connect(broadcast_tx.clone()).await?;
+    Ok((h264, stop, broadcast_tx, ended))
+}
+
+async fn reconnect_watchdog(
+    inner: Arc<SupervisorInner>,
+    first_ended: SessionEnded,
+    broadcast_tx: broadcast::Sender<RtpPacket>,
+) {
+    let mut backoff = crate::backoff::ExpBackoff::new();
+    let mut ended = first_ended;
+
+    'outer: loop {
+        // Block until the current session ends. If recv errors, the sender
+        // was dropped — StopHandle::Drop fired (orderly tear-down), so exit.
+        if ended.await.is_err() {
+            return;
+        }
+
+        // No viewers? Don't reconnect — supervisor will go Idle on its own.
+        if inner.viewer_count.load(Ordering::SeqCst) <= 0 {
+            return;
+        }
+
+        // Retry loop: keep trying until success OR all viewers leave.
+        loop {
+            let delay = backoff.next_delay();
+            tracing::warn!(
+                attempt = backoff.attempt(),
+                delay_ms = delay.as_millis() as u64,
+                "session ended; backing off before reconnect"
+            );
+            tokio::time::sleep(delay).await;
+
+            // If teardown happened during the sleep (viewers left and idle timer fired),
+            // state will be Idle. A fresh subscribe() will have spawned its own watchdog;
+            // this stale one should exit cleanly.
+            {
+                let state = inner.state.lock().await;
+                if !matches!(state.state, State::Streaming | State::Connecting) {
+                    return;
+                }
+            }
+
+            if inner.viewer_count.load(Ordering::SeqCst) <= 0 {
+                return;
+            }
+
+            // If auth has latched into the failed state, further connect()
+            // attempts will burn rate-limit permits returning LoginRejected
+            // forever. Bail out — /healthz already reflects the failure.
+            if let Some(rx) = inner.failed_rx.as_ref() {
+                if *rx.borrow() {
+                    tracing::info!("auth failed; watchdog exiting");
+                    return;
+                }
+            }
+
+            match inner.factory.connect(broadcast_tx.clone()).await {
+                Ok((_h264, stop, new_ended)) => {
+                    let mut state = inner.state.lock().await;
+                    // Defensive: if teardown ran between our sleep and our connect,
+                    // a fresh subscribe() will own the new session. Drop ours and exit.
+                    if matches!(state.state, State::Idle) {
+                        return;
+                    }
+                    state.stop = Some(stop);
+                    state.state = State::Streaming;
+                    let _ = inner.state_watch.send(State::Streaming);
+                    drop(state);
+                    *inner.session_started_at.lock().await = Some(std::time::Instant::now());
+                    inner.wss_reconnects_total.fetch_add(1, Ordering::SeqCst);
+                    backoff.reset();
+                    ended = new_ended;
+                    continue 'outer;
+                }
+                Err(e) => {
+                    *inner.last_error_at.lock().await = Some(std::time::Instant::now());
+                    tracing::warn!(error = %e, "reconnect attempt failed; will retry");
+                    // Loop again — next iteration applies the next backoff delay.
+                }
+            }
+        }
+    }
+}
+
+async fn viewer_event_loop(
+    inner: Arc<SupervisorInner>,
+    mut rx: mpsc::UnboundedReceiver<ViewerEvent>,
+) {
+    let mut idle_timer: Option<tokio::task::JoinHandle<()>> = None;
+    while let Some(ev) = rx.recv().await {
+        let count = match ev {
+            ViewerEvent::Attached => {
+                if let Some(h) = idle_timer.take() {
+                    h.abort();
+                }
+                inner.viewer_count.load(Ordering::SeqCst)
+            }
+            ViewerEvent::Detached => {
+                let after = inner.viewer_count.fetch_sub(1, Ordering::SeqCst) - 1;
+                tracing::debug!(viewers = after, "viewer detached");
+                if after <= 0 {
+                    // Start the idle timer.
+                    let inner_for_timer = inner.clone();
+                    let timeout = inner.idle_timeout;
+                    idle_timer = Some(tokio::spawn(async move {
+                        tokio::time::sleep(timeout).await;
+                        teardown_session(&inner_for_timer).await;
+                    }));
+                }
+                after
+            }
+        };
+        tracing::debug!(viewers = count, "viewer event");
+    }
+}
+
+async fn teardown_session(inner: &Arc<SupervisorInner>) {
+    let mut state = inner.state.lock().await;
+    if inner.viewer_count.load(Ordering::SeqCst) > 0 {
+        return; // Someone reconnected; cancel the tear-down.
+    }
+    if matches!(state.state, State::Streaming | State::Connecting) {
+        tracing::info!("idle timeout reached; tearing down webrtc session");
+        state.stop = None; // Drop = stop signal.
+        state.rtp_tx = None;
+        state.state = State::Idle;
+        let _ = inner.state_watch.send(State::Idle);
+        // Reset the h264 cell so next connect can set fresh params.
+        state.h264 = OnceCell::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A factory that records how many times it was asked to connect, and
+    /// returns canned H.264 params + a stub stop handle.
+    struct StubFactory {
+        connects: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamFactory for StubFactory {
+        async fn connect(
+            &self,
+            _rtp_tx: broadcast::Sender<RtpPacket>,
+        ) -> Result<(H264Params, StopHandle, SessionEnded), SourceError> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            let (_tx, rx) = oneshot::channel();
+            Ok((
+                H264Params {
+                    profile_level_id: "42c01e".into(),
+                    sprop_parameter_sets: "Z0L,aM4".into(),
+                    packetization_mode: 1,
+                    payload_type: 96,
+                },
+                StopHandle {
+                    kill: Box::new(()),
+                },
+                rx,
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn first_subscribe_brings_up_session() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory {
+            connects: connects.clone(),
+        });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        let _sub = sup.subscribe().await.unwrap();
+        assert_eq!(connects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn second_subscribe_reuses_session() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory {
+            connects: connects.clone(),
+        });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        let _sub1 = sup.subscribe().await.unwrap();
+        let _sub2 = sup.subscribe().await.unwrap();
+        assert_eq!(connects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn idle_timer_tears_down_after_last_viewer_drops() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory {
+            connects: connects.clone(),
+        });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(5),
+            None,
+        );
+        let sub = sup.subscribe().await.unwrap();
+        drop(sub);
+        // Allow detach event to be processed.
+        tokio::task::yield_now().await;
+        // Advance past idle timeout.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        // Now subscribing again should bring up a NEW session.
+        let _sub2 = sup.subscribe().await.unwrap();
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+    }
+
+    struct EndingFactory {
+        connects: Arc<AtomicUsize>,
+        /// Holds the FIRST connect's ended-tx so the test can fire it.
+        fire_after: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamFactory for EndingFactory {
+        async fn connect(
+            &self,
+            _rtp_tx: broadcast::Sender<RtpPacket>,
+        ) -> Result<(H264Params, StopHandle, SessionEnded), SourceError> {
+            let n = self.connects.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel();
+            // Only the FIRST connect's ended-tx is published; subsequent connects
+            // return a dangling rx so the watchdog blocks forever.
+            if n == 0 {
+                *self.fire_after.lock().await = Some(tx);
+            }
+            Ok((
+                H264Params {
+                    profile_level_id: "42c01e".into(),
+                    sprop_parameter_sets: "Z0L,aM4".into(),
+                    packetization_mode: 1,
+                    payload_type: 96,
+                },
+                StopHandle {
+                    kill: Box::new(()),
+                },
+                rx,
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watchdog_reconnects_after_session_ends() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let fire = Arc::new(Mutex::new(None));
+        let factory = Arc::new(EndingFactory {
+            connects: connects.clone(),
+            fire_after: fire.clone(),
+        });
+        let sup = Supervisor::new(factory, "Cam".into(), "cam".into(), Duration::from_secs(60), None);
+        let _sub = sup.subscribe().await.unwrap();
+        // Let the watchdog task be polled and reach `ended.await`.
+        tokio::task::yield_now().await;
+        // Trigger spontaneous session end.
+        fire.lock().await.take().unwrap().send(()).unwrap();
+        // Let the watchdog see the ended-channel and reach `sleep().await`.
+        tokio::task::yield_now().await;
+        // Backoff first delay is ~1s with jitter; advance well past the cap.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // Give the watchdog cycles to wake from sleep and call connect().
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn reattach_within_idle_window_keeps_session() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory {
+            connects: connects.clone(),
+        });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        let sub = sup.subscribe().await.unwrap();
+        drop(sub);
+        tokio::task::yield_now().await;
+        // Advance only 10 seconds (under the 60s timeout).
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        // Reattach should reuse the existing session.
+        let _sub2 = sup.subscribe().await.unwrap();
+        assert_eq!(connects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn subscribe_rtp_returns_none_when_idle() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory { connects });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        assert!(sup.subscribe_rtp().await.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn subscribe_rtp_returns_some_while_streaming() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory { connects });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        let _sub = sup.subscribe().await.unwrap();
+        assert!(sup.subscribe_rtp().await.is_some());
+    }
+
+    /// Factory whose first connect blocks on a gate, then returns Err. Used to
+    /// reproduce the race where a second viewer arrives while the first is
+    /// still in the Connecting state.
+    struct GatedFailingFactory {
+        connects: Arc<AtomicUsize>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamFactory for GatedFailingFactory {
+        async fn connect(
+            &self,
+            _rtp_tx: broadcast::Sender<RtpPacket>,
+        ) -> Result<(H264Params, StopHandle, SessionEnded), SourceError> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            self.gate.notified().await;
+            Err(SourceError::Unavailable("camera offline".into()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn second_subscribe_during_failing_connect_does_not_panic() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let factory = Arc::new(GatedFailingFactory {
+            connects: connects.clone(),
+            gate: gate.clone(),
+        });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+
+        let sup1 = sup.clone();
+        let h1 = tokio::spawn(async move { sup1.subscribe().await });
+        // Let the first subscribe acquire the lock and reach the gated connect.
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        let sup2 = sup.clone();
+        let h2 = tokio::spawn(async move { sup2.subscribe().await });
+        // Let the second subscribe observe State::Connecting and start waiting.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        // Release the gate so connect_session returns Err.
+        gate.notify_one();
+
+        let r1 = h1.await.expect("subscribe #1 task panicked");
+        let r2 = h2.await.expect("subscribe #2 task panicked");
+        assert!(r1.is_err(), "first subscribe should propagate connect error");
+        assert!(r2.is_err(), "second subscribe should fail too, not panic");
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            1,
+            "only one connect attempt should have been made"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn state_changes_fires_on_transitions() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StubFactory { connects });
+        let sup = Supervisor::new(
+            factory,
+            "Cam".into(),
+            "cam".into(),
+            Duration::from_secs(60),
+            None,
+        );
+        let mut rx = sup.state_changes();
+        let _sub = sup.subscribe().await.unwrap();
+        rx.changed().await.unwrap();
+        let mut last = *rx.borrow();
+        if last != State::Streaming {
+            rx.changed().await.unwrap();
+            last = *rx.borrow();
+        }
+        assert_eq!(last, State::Streaming);
+    }
+}

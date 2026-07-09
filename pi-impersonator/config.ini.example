@@ -1,0 +1,19 @@
+; Copy to config.ini and fill in. config.ini is git-ignored (holds a live secret).
+;
+; token       - camera registration token from Prusa Connect
+;               (Web UI or app > Camera > Token, or the "add camera" QR screen).
+;               This is the credential that authenticates this device AS the camera.
+; fingerprint - a stable 32-hex-char device id you invent once and keep constant.
+;               Any random 128-bit hex string works; the camera reuses the same one.
+
+[identity]
+token = <REGISTRATION_TOKEN>
+fingerprint = 00000000000000000000000000000000
+
+[camera]
+width = 1920
+height = 1080
+
+[upload]
+interval = 10
+server = webcam.connect.prusa3d.com

@@ -1,0 +1,40 @@
+# ── Secrets / live credentials — never commit ────────────────────────────
+config.ini
+.env
+*.env
+!*.env.example
+tokens.json
+*token*.conf
+
+# ── Firmware & decompilation artifacts — excluded for IP reasons ──────────
+# (see docs/sources.md — the firmware is referenced, never redistributed)
+*.img
+*.gzf
+lp_app*
+*.bin
+oem_extracted/
+ghidrassist_*.db
+
+# ── Reverse-engineering capture data (may contain account tokens) ─────────
+*.har
+api/
+
+# ── Screenshots (excluded: contain live tokens + private imagery) ─────────
+*.png
+*.jpg
+*.jpeg
+
+# ── Rust build output ─────────────────────────────────────────────────────
+target/
+**/target/
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ── Tooling / OS ──────────────────────────────────────────────────────────
+.DS_Store
+.codegraph/
+.codex/
