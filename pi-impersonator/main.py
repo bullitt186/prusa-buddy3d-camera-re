@@ -2,6 +2,7 @@ import asyncio
 import configparser
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -86,7 +87,8 @@ def extract_request_id(msg):
 
 def load_config():
     cfg = configparser.ConfigParser()
-    cfg.read('/home/pi/prusa-cam/config.ini')
+    # config.ini sits next to this script — deploy-path independent
+    cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini'))
     return cfg
 
 def get_network_info():

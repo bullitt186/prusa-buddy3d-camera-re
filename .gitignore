@@ -4,6 +4,12 @@ config.ini
 *.env
 !*.env.example
 tokens.json
+
+# ── Personal agent runbooks (real host/network details) ───────────────────
+# Keep the redacted *.example.md templates; ignore the filled-in local copies.
+.agent/*
+!.agent/*.example.md
+*.local.md
 *token*.conf
 
 # ── Firmware & decompilation artifacts — excluded for IP reasons ──────────
@@ -37,4 +43,5 @@ venv/
 # ── Tooling / OS ──────────────────────────────────────────────────────────
 .DS_Store
 .codegraph/
-.codex/
+.codex/*
+!.codex/config.toml
