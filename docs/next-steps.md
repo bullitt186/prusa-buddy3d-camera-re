@@ -3,8 +3,78 @@
 **Created:** 2026-07-07  
 **Context:** Camera impersonator works (snapshots, Socket.IO auth, `/c/info`, RTSP) but the
 mobile app never sends WebRTC offers and shows "Kamera-Kommunikation Fehlgeschlagen".
-All evidence points to a server-side gate. Do these in order — each tier's results
-inform whether the next tier is worth attempting.
+Two leads are open: (a) a backend **registration/registry gate** on the token
+(Steps 1–2), and (b) the **hardware-identity hypothesis** below — that eligibility depends
+solely on data the camera itself supplies. Do these in order — each tier's results inform
+whether the next is worth attempting.
+
+---
+
+## Priority — Hardware-identity hypothesis (does the camera's own data gate WebRTC?)
+
+**Why this is a lead:** there is no user setting to enable/disable WebRTC, cameras are not tied
+to a user account (they can be resold), and pairing is QR-based — so WebRTC eligibility likely
+depends only on what the camera *reports about itself* (serial / MAC / HW identity, or a specific
+field combination). Today we send a **Pi-OUI MAC**, a **static fingerprint** (not `MD5(MAC)` as
+the firmware computes), an **invented HW string** (`NB.1.1.0` / `Pi Zero 2 W`), and **~90
+`CameraInfoMessage` fields are un-mapped**. Provenance breakdown: see the "Current deployment
+state" table in [`status.md`](status.md). Field-5 sub-field mechanics overlap with Step 5 below.
+
+### P.1 — Map the remaining `CameraInfoMessage` fields (is a serial / HW-id transmitted?)
+
+Cheapest and most decisive — answers "does the camera put its serial on the wire at all?".
+
+- [ ] **P.1.1** Decompile the identity getters and find their callers:
+  ```
+  mcp__ghidrassist__get_code(0x72534, format=decompiler)   # ReadHwVersionFromCamera
+  ```
+  Also locate the **serial/OTP getter** (reads `/sys/class/spi_master/spi2/spi2.0/version`,
+  see findings §7.2) and any function reading the factory serial.
+- [ ] **P.1.2** On the reconstructed struct (`auto_structs/CameraInfoMessage`, encoder at
+  `0xa01dc`), run `struct field_xrefs` on each un-named `field_0xNN` writer — flag any that
+  call the serial/HW getter. Focus on the field-5 **hardware sub-block** (the "2 ints + string"
+  HW block near `field5.2`), the most likely home for a serial.
+- [ ] **P.1.3** Record the verdict in [`status.md`](status.md):
+  - **Serial IS written to a status field** → a valid factory serial is required; we cannot
+    supply one → this *confirms* a hardware-identity gate.
+  - **No serial anywhere in the struct** → hardware-ID-in-`status` is ruled out; weight shifts
+    to MAC/fingerprint (P.2/P.3) or the token-registry gate (Steps 1–2).
+
+### P.2 — MAC / OUI test (does the backend check the MAC or its vendor prefix?)
+
+- [ ] **P.2.1** Find a genuine Niceboy/Prusa camera **OUI** (IEEE OUI lookup, or the community
+  project `tlchandler/Improved-Buddy3D-...`).
+- [ ] **P.2.2** Temporarily spoof the Pi's `wlan0` MAC to that OUI:
+  ```bash
+  sudo ip link set wlan0 down
+  sudo ip link set wlan0 address <NICEBOY_OUI>:XX:XX:XX
+  sudo ip link set wlan0 up
+  ```
+- [ ] **P.2.3** Recompute the fingerprint (P.3), update `config.ini`, restart `prusa-cam`, then
+  re-run `/c/info` + the viewer-flow test. Note whether viewer ACK `5` or the
+  `/v1/cameras/<token>` 404 changes.
+  - **Caveat:** the registry gate is keyed on the *token* (origin fixed at creation), so MAC/OUI
+    changes may not move it. A negative result here mainly rules an OUI check *out* as an
+    *additional* gate; it does not by itself re-register the camera.
+
+### P.3 — Make the fingerprint firmware-faithful (`MD5(MAC)`)
+
+Today `fingerprint` is read verbatim from `config.ini` and is not tied to the MAC we send — a
+mismatch could itself fail a check. The firmware computes `MD5(MAC)`
+(`lp_fingerprint_generation_tool.cpp`: MAC via `iw dev` → MD5, random fallback).
+
+- [ ] **P.3.1** Compute it instead of reading a static value (in `main.py`):
+  ```python
+  import hashlib
+  mac = open('/sys/class/net/wlan0/address').read().strip()
+  fingerprint = hashlib.md5(mac.encode()).hexdigest()
+  ```
+  Keep the `config.ini` value as an optional override.
+- [ ] **P.3.2** **Careful:** if the current token was registered against the *old* fingerprint,
+  changing it may re-key/disassociate the camera. Test with a spare token, and verify
+  `camera_authentication` still ACKs `1` afterward.
+
+**Order:** P.1 first (decisive, no risk), then P.2 + P.3 as quick empirical tests.
 
 ---
 

@@ -104,7 +104,7 @@ See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md), 
 | TLS certificates / mTLS / keypairs gate pairing | Ruled out | none exist anywhere in the pairing flow |
 | STUN / ICE hole-punching is the problem | Not reachable | never gets past signaling; no offer is ever made |
 | Wrong Socket.IO field encoding | Real but not the cause | all fields corrected to match a real camera; behaviour unchanged |
-| A missing serial number on the wire | Ruled out as a lever | no serial is transmitted in any message; gating is by token registration |
+| A missing serial / hardware ID on the wire | **Not excluded** | no serial appears in the *mapped* channels (auth, `/c/info`, identified status fields), but ~90 `CameraInfoMessage` fields are still un-named — a serial or HW-id could be among them. See the hardware-identity hypothesis in [`next-steps.md`](next-steps.md). |
 | The local check is "RTSP-shaped" | Ruled out | warning identical with local RTSP up or down |
 
 ---
@@ -135,8 +135,11 @@ All corrected and matched against a real camera / the buddy3d-proxy captures. Fu
 - **Field semantics fixed from buddy3d-proxy captures:** `status` field 10 = Socket.IO sid;
   `features` field 7 = MD5 of the features JSON (used as WebRTC `peer_id`); Socket.IO CONNECT
   must carry `auth={token}` and `Origin: https://connect.prusa3d.com`.
-- **No security to forge** — auth is `fingerprint = MD5(MAC)` + `token`; no certs; MAC OUI is
-  not validated server-side.
+- **No cryptographic secret to forge** — auth is `fingerprint = MD5(MAC)` + `token`; no certs
+  or keypairs anywhere in the pairing flow. Whether the backend validates the MAC/OUI or the
+  fingerprint against a registry of genuine cameras is **untested** (see hardware-identity
+  hypothesis in [`next-steps.md`](next-steps.md)). Note the impersonator sends a Pi-OUI MAC and
+  a static fingerprint that is not recomputed from that MAC.
 
 ---
 
