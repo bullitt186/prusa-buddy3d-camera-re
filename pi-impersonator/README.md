@@ -22,12 +22,25 @@ failing end-to-end) is in [`../docs/status.md`](../docs/status.md). The protocol
 | `local_http.py` | Local HTTP endpoint (port 80) |
 | `features.py` | Camera feature/capability advertisement |
 
+## Architecture (three services)
+
+```
+rpicam-source.service   rpicam-vid → H264 over TCP :8888   (raw camera)
+        │
+prusa-rtsp.service      rtsp_server.py → rtsp://<pi>:8554/live   (GStreamer RTSP)
+        │
+prusa-cam.service       main.py → Prusa Connect: /c/info, snapshots, signaling, WebRTC
+```
+
+`main.py` can start/stop `prusa-rtsp.service` on command from Prusa. Ready-to-install unit
+files are in [`systemd/`](systemd/).
+
 ## Prerequisites
 
 - Raspberry Pi (tested: **Pi Zero 2 W**) with a camera module, Raspberry Pi OS Lite 64-bit.
 - A camera **registration token** from Prusa Connect (Web UI or app → Camera → *Token* / the
   "add camera" QR screen). This is what authenticates the device as the camera.
-- System packages for GStreamer + PyGObject:
+- System packages for GStreamer + PyGObject + camera:
   ```bash
   sudo apt update
   sudo apt install -y python3-gi python3-gst-1.0 gstreamer1.0-tools \
@@ -41,9 +54,10 @@ failing end-to-end) is in [`../docs/status.md`](../docs/status.md). The protocol
 scp -r pi-impersonator/ pi@<PI_IP>:~/prusa-cam
 cd ~/prusa-cam   # on the Pi
 
-# 2. venv MUST see system GStreamer/PyGObject bindings
+# 2. venv MUST see system GStreamer/PyGObject bindings (gi comes from the system)
 python3 -m venv venv --system-site-packages
-./venv/bin/pip install aiohttp aioice   # + any other imports your build needs
+./venv/bin/pip install aiohttp "python-socketio[client]" python-engineio \
+    simple-websocket requests cryptography pycryptodomex
 
 # 3. Configure (real secrets stay out of git)
 cp config.ini.example config.ini
@@ -57,36 +71,21 @@ Manual:
 ./venv/bin/python main.py
 ```
 
-As a service (two units — the RTSP server is separate so `main.py` can start/stop it on
-command from Prusa):
-
-```ini
-# /etc/systemd/system/prusa-cam.service
-[Unit]
-Description=Prusa Camera Impersonator
-After=network-online.target
-Wants=network-online.target
-[Service]
-AmbientCapabilities=CAP_NET_BIND_SERVICE   # bind :80 without root
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/prusa-cam
-ExecStart=/home/pi/prusa-cam/venv/bin/python main.py
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-```
+As services — install all three units from [`systemd/`](systemd/):
 
 ```bash
+sudo cp systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now prusa-cam.service
+sudo systemctl enable --now rpicam-source.service prusa-rtsp.service prusa-cam.service
 journalctl -fu prusa-cam.service         # watch it register + upload
 ```
 
-`main.py` also invokes `sudo systemctl start/stop prusa-rtsp.service` — create a companion unit
-that runs `rtsp_server.py` (or fold it into your setup), and grant the `pi` user a sudoers
-rule for just those two `systemctl` calls if you keep them separate.
+Because `main.py` toggles `prusa-rtsp.service` via `sudo systemctl`, give the `pi` user a
+sudoers rule scoped to just that:
+
+```
+pi ALL=(root) NOPASSWD: /bin/systemctl start prusa-rtsp.service, /bin/systemctl stop prusa-rtsp.service
+```
 
 ## Verify
 

@@ -1,0 +1,15 @@
+# Persistent H264 camera source. Publishes the Pi camera as an H264 TCP stream
+# that the RTSP server pulls from. Adjust width/height/framerate to taste.
+[Unit]
+Description=Persistent H264 camera source (TCP)
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+ExecStart=/usr/bin/rpicam-vid --codec h264 -t 0 --width 1280 --height 720 --framerate 30 --inline --listen -o tcp://0.0.0.0:8888
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

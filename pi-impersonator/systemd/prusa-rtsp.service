@@ -1,0 +1,17 @@
+# GStreamer RTSP server (rtsp_server.py) -> rtsp://<pi>:8554/live.
+# Pulls from the rpicam-source TCP stream. main.py starts/stops this on demand.
+[Unit]
+Description=Local RTSP server for Prusa camera
+After=network.target rpicam-source.service
+Requires=rpicam-source.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/prusa-cam
+ExecStart=/home/pi/prusa-cam/venv/bin/python rtsp_server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
