@@ -141,18 +141,32 @@ async fn main() -> anyhow::Result<()> {
 
             // Discover the printer + camera so we can grab the camera's
             // persistent token (the signaling server uses it as a permission key).
+            // Respects PRUSA_PRINTER_UUID / PRUSA_CAMERA_ID when set, otherwise
+            // falls back to the first printer/camera visible on the account.
             let printers = list_printers(&prusa, &endpoints.connect_base, &token)
                 .await
                 .context("list printers")?;
-            let printer = printers
-                .first()
-                .context("no printers visible to this account")?;
+            let printer = match &cfg.prusa_printer_uuid {
+                Some(uuid) => printers
+                    .iter()
+                    .find(|p| &p.uuid == uuid)
+                    .with_context(|| format!("printer {uuid} not visible to this account"))?,
+                None => printers
+                    .first()
+                    .context("no printers visible to this account")?,
+            };
             let cams = list_cameras(&prusa, &endpoints.connect_base, &token, &printer.uuid)
                 .await
                 .with_context(|| format!("list cameras for printer {}", printer.uuid))?;
-            let camera = cams
-                .first()
-                .context("no cameras visible on this printer")?;
+            let camera = match &cfg.prusa_camera_id {
+                Some(id) => {
+                    let id: u64 = id.parse().context("PRUSA_CAMERA_ID must be numeric")?;
+                    cams.iter()
+                        .find(|c| c.id == id)
+                        .with_context(|| format!("camera {id} not found on printer {}", printer.uuid))?
+                }
+                None => cams.first().context("no cameras visible on this printer")?,
+            };
             tracing::info!(
                 camera.id = camera.id,
                 camera.name = camera.name.as_deref().unwrap_or("(unnamed)"),
