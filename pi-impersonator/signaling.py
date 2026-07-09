@@ -245,7 +245,7 @@ class PrusaSignaling:
 
         extended_status = encode_message({
             1: FIRMWARE_VERSION,
-            2: 'Pi Zero 2 W',
+            2: MODEL,
             3: 'Buddy3D Camera',
             4: encode_message({
                 1: 2,

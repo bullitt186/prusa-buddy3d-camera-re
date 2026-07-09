@@ -31,12 +31,16 @@ struct CameraInfoMessage {
   byte gap7_0x98[28];
   byte has_field5_extended_status; // 0x0b4
   byte gap8_0xb5[3];
-  uint field_0x0b8; // 0x0b8
-  uint field_0x0bc; // 0x0bc
-  uint field_0x0c0; // 0x0c0
-  uint field_0x0c4; // 0x0c4
-  uint field_0x0c8; // 0x0c8
-  uint field_0x0cc; // 0x0cc
+  // 0x0b8-0x0cc: three (mode=const, value) pairs, traced 2026-07-09 (see protocol.md
+  // "extended_status" section). 0xc4 is a hardware-derived model-name string
+  // ("Buddy3D-C1" etc, from the real SPI HW-version chip via a range-table lookup);
+  // 0xbc is a compile-time literal string; 0xcc reads a different, untraced singleton.
+  uint field5_1_mode; // 0x0b8 -- constant (DAT_000a0ce4)
+  uint field5_1_value; // 0x0bc -- FUN_0003726c(): compile-time literal string
+  uint field5_2_mode; // 0x0c0 -- constant (DAT_000a0ce4)
+  uint field5_2_model_name; // 0x0c4 -- HW-version-derived model string, see above
+  uint field5_3_mode; // 0x0c8 -- constant (DAT_000a0ce4)
+  uint field5_3_value; // 0x0cc -- untraced second singleton, +0x2c string field
   byte has_field5_video_mode; // 0x0d0
   byte gap9_0xd1[3];
   uint field_0x0d4; // 0x0d4
