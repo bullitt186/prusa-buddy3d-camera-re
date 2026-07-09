@@ -172,12 +172,16 @@ Incoming SDP offers/ICE candidates from server. See Section 10 for full field ta
 9. Receive H.264 video via WebRTC
 ```
 
-### Server-side gate (confirmed 2026-07-07)
+### Server-side gate
 
-The signaling server validates `client_authentication` against
-`camera-service-api.prusa3d.com`. Only cameras registered there (origin: LINK, paired
-via printer QR code) pass validation. Tokens with origin OTHER or WEB get ACK `5`
-(rejected) — viewers cannot connect, and the camera never receives any relayed events.
+**Confirmed (tested 2026-07-07):** the viewer's `client_authentication` gets ACK `5`
+(rejected) for tokens with origin `OTHER` and `WEB`, and those tokens return 404 from
+`GET camera-service-api.prusa3d.com/v1/cameras/<token>` — so viewers cannot connect and the
+camera never receives any relayed events.
+
+**Inferred (untested):** that this `camera-service-api` registry is the exact gate, and that
+`origin: LINK` tokens (printer QR pairing) are registered there and pass. No LINK token was ever
+obtained to verify this — it is the leading hypothesis, not a confirmed fact.
 
 ---
 

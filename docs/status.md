@@ -15,11 +15,15 @@ Evidence markers: **[confirmed]** = verified live against the real backend or fi
 A Raspberry Pi can fully impersonate the camera for **snapshots, identity, and metadata**,
 and serve a **local RTSP** live view. It **cannot** deliver the app's live WebRTC stream.
 
-The blocker is a hard backend gate, not a protocol bug we can fix: **live streaming requires
-the camera to be registered in `camera-service-api.prusa3d.com`, which only happens for
-`origin: LINK` tokens created by the printer's QR-code pairing flow.** Our tokens
-(`origin: OTHER` and `origin: WEB`) are not in that registry, so the signaling server rejects
-every viewer and never relays a WebRTC offer to the camera. **[confirmed]**
+The blocker is a hard backend gate, not a protocol bug we can fix.
+**[confirmed]** Our tokens (`origin: OTHER` and `origin: WEB`) are absent from
+`camera-service-api.prusa3d.com` (direct lookup → 404), and the signaling server rejects every
+viewer for them (`client_authentication` → ACK `5`), so no WebRTC offer is ever relayed.
+**[assumption]** that registration in that service is the exact gate, and that an `origin: LINK`
+token from the printer's QR pairing — the one origin we never obtained to test — is what would
+register and unblock it. This is the leading hypothesis (the other two origins are ruled out;
+Prusa's public Camera API OpenAPI describes `LINK` as printer-side registration), but it was
+never directly verified.
 
 Everything protocol-level that we *can* influence from software has been corrected to match a
 real camera; none of it changes this outcome.
@@ -36,7 +40,7 @@ real camera; none of it changes this outcome.
 | Appears online & paired, survives reboot | ✅ Working | web + mobile app; `Restart=always` **[confirmed]** |
 | Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC **[confirmed]** |
 | Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]** |
-| Live WebRTC stream in the app | ❌ Blocked | camera-service-api registration gate (below) **[confirmed]** |
+| Live WebRTC stream in the app | ❌ Blocked | viewer auth rejected (ACK `5`) + camera 404 in registry **[confirmed]**; LINK/QR as the unblock is **[assumption]** |
 | "Kamera-Kommunikation fehlgeschlagen" warning | ⚠️ Persistent | side-effect of the same gate **[confirmed]** |
 
 ---
@@ -62,18 +66,23 @@ real camera; none of it changes this outcome.
 
 ## The core blocker: live WebRTC streaming
 
-### Root cause (confirmed)
+### Root cause
 
-The signaling server validates the **viewer's** `client_authentication` against
-`camera-service-api.prusa3d.com`. A direct lookup
-`GET camera-service-api.prusa3d.com/v1/cameras/<token>` returns **404** for our tokens — the
-camera does not exist in that registry. Only `origin: LINK` tokens (minted by the printer's
-"Add Buddy camera" QR pairing) are registered there. As a result the server returns viewer
-ACK `5` (rejected) and never relays a `webrtc` offer to the camera. The firmware confirms the
-matching camera-side gate: `FUN_000b87b4` silently drops any offer unless `webrtc_mode`
-(`+0x13d`) and `webrtc_status` (`+0x13e`) are both set, and those are only set when the server
-sends `set_webrtc_mode` — which it withholds from unregistered cameras.
-See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md).
+**Confirmed by direct test:** the viewer handshake `client_authentication` is rejected with
+ACK `5` for both our tokens (`OTHER` and `WEB`), and a direct lookup
+`GET camera-service-api.prusa3d.com/v1/cameras/<token>` returns **404** — the camera is not in
+that registry. So the server never relays a `webrtc` offer. The firmware shows the matching
+camera-side gate: `FUN_000b87b4` silently drops any offer unless `webrtc_mode` (`+0x13d`) and
+`webrtc_status` (`+0x13e`) are both set, and those are only set when the server sends
+`set_webrtc_mode`.
+
+**Inferred, not verified:** that `camera-service-api` registration is the precise gate, and
+that `origin: LINK` tokens (minted by the printer's "Add Buddy camera" QR pairing) are the ones
+registered there and would pass. We never obtained a LINK token to test this leg — it is the
+best-supported hypothesis, resting on (a) both other origins failing identically, and (b)
+Prusa's public Camera API OpenAPI describing `LINK` as printer-side registration.
+See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](protocol.md), and
+[`next-steps.md`](next-steps.md) Step 1 for the untested LINK path.
 
 ### The evidence chain
 
