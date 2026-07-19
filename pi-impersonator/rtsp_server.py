@@ -11,8 +11,7 @@ server.set_service('8554')
 factory = GstRtspServer.RTSPMediaFactory()
 factory.set_launch(
     '( tcpclientsrc host=127.0.0.1 port=8888 do-timestamp=true '
-    '! queue max-size-buffers=1 leaky=downstream '
-    '! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 )'
+    '! h264parse config-interval=-1 ! rtph264pay name=pay0 pt=96 )'
 )
 factory.set_shared(True)
 factory.set_latency(0)  # drop the default 200ms server-side jitter buffer
