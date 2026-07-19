@@ -79,7 +79,7 @@ writing `/etc/prusa-cam/quality.env` and restarting `rpicam-source`.
 | `webrtc.py` | WebRTC offer/answer via GStreamer `webrtcbin` |
 | `upload.py` | HTTP uploads → `webcam.connect.prusa3d.com` |
 | `proto.py` | Minimal protobuf encode/decode (nanopb wire format) |
-| `camera.py` | JPEG capture via `rpicam-jpeg` (stdout → bytes, no disk writes) |
+| `camera.py` | JPEG snapshot via `gst-launch-1.0` reading from `stream_mux.py` on port 8888 (avoids fighting `rpicam-vid` for the sensor — libcamera is single-consumer) |
 | `rtsp_server.py` | GStreamer `GstRtspServer` → `rtsp://0.0.0.0:8554/live` |
 | `local_http.py` | Local HTTP on port 80 |
 | `features.py` | Camera feature/capability advertisement |
@@ -174,7 +174,7 @@ Local RTSP: `vlc rtsp://<PI_IP>:8554/live`
 Measured end-to-end (from this setup):
 
 - **Server-side first-frame: ~70 ms** (warm, after the first client connect)
-- **Cold join: ~2.5 s** (one-time — rpicam-vid acquires the sensor on first client in `--listen` mode)
+- **Cold join: ~2.5 s** (one-time on first boot — `stream_mux.py` needs to accumulate the first IDR bootstrap block before it serves new clients; subsequent connections are instant)
 - **What you see in VLC: ~1 s** — this is VLC's `network-caching` default (1000 ms), not the Pi.
   Use `vlc --network-caching=100 rtsp://…` to see the true ~70 ms server latency.
 
