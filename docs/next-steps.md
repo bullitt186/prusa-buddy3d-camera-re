@@ -509,34 +509,14 @@ can observe what's happening without blind spots.
   log.info(f"/c/info → {resp.status_code}, origin={resp.json().get('origin','?')}, registered={resp.json().get('registered','?')}")
   ```
 
-### 4c — Log rotation and access
+### 4c — Log rotation and access — ~~DROPPED~~ (superseded 2026-07-14)
 
-- [ ] **4c.1** Create log directory on Pi:
-  ```bash
-  sudo mkdir -p /var/log/prusa-cam
-  sudo chown pi:pi /var/log/prusa-cam
-  ```
-
-- [ ] **4c.2** Add logrotate config:
-  ```bash
-  cat << 'EOF' | sudo tee /etc/logrotate.d/prusa-cam
-  /var/log/prusa-cam/*.log {
-      daily
-      rotate 7
-      compress
-      missingok
-      notifempty
-      copytruncate
-  }
-  EOF
-  ```
-
-- [ ] **4c.3** Verify logs are being written after restart:
-  ```bash
-  sudo systemctl restart prusa-cam.service
-  sleep 5
-  tail -20 /var/log/prusa-cam/signaling.log
-  ```
+**No longer applicable.** For power-loss robustness the file log was removed entirely:
+`main.py` now logs stdout-only at INFO → journald with `Storage=volatile` (RAM). There is no
+`/var/log/prusa-cam/*.log` to rotate, so a logrotate config and the log dir are obsolete. Read
+logs with `journalctl -u prusa-cam` (in RAM, cleared on reboot; flip journald to `persistent`
+via the overlay maintenance flow when you need them to survive a reboot for debugging). See the
+power-loss robustness section in `status.md` and `.agent/pi-ops.md`.
   **Pass:** Timestamped lines including `Socket.IO connected`, `SIO OUT [status]`, etc.
 
 - [ ] **4c.4** Quick log monitor alias (add to `~/.bashrc` on Pi):
@@ -658,13 +638,14 @@ backend publishes that gate WebRTC in the app.
 [2026-07-09, done] source-IP/network reputation ruled out — live experiment from 2nd network
 [2026-07-09, done] MAC/OUI (guessed Realtek prefix) ruled out — live experiment
 [2026-07-09, blocked] Step 2 (mitmproxy) — certificate pinning on the app's core API traffic
+[2026-07-09, done] camera-service-api probed directly (root/list/POST/OPTIONS/health/docs) —
+                    no hidden endpoint, no informative error, ESP32Cam also absent from registry
                                                     │
                                                     ▼
                               Every software-only lead is now either negative or blocked.
                               What's left needs real hardware or jailbreak-level phone tooling:
         │
-        ├─ Firmware/rollout-timing research (item 1 in status.md's next steps)
-        ├─ Direct camera-service-api registration probe (item 2)
+        ├─ Firmware/rollout-timing research (item 2 in status.md's next steps)
         ├─ SSL-unpinning on a jailbroken device, if available (item 3)
         └─ Real Buddy3D hardware to compare directly (item 4)
 

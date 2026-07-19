@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import subprocess
+import quality
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
@@ -49,10 +50,14 @@ class PrusaWebRTC:
 
         self._teardown()
 
-        # Start rpicam-vid subprocess
+        # Start rpicam-vid subprocess at the current quality tier (parity with the RTSP
+        # source). --rotation 180 matches the physical (inverted) camera mount; --intra 30
+        # and --flush cut join/steady-state latency.
+        _, w, h = quality.read_current()
         self._proc = subprocess.Popen(
             ['rpicam-vid', '--codec', 'h264', '-t', '0',
-             '--width', '1280', '--height', '720', '--framerate', '30',
+             '--width', str(w), '--height', str(h), '--framerate', '30',
+             '--rotation', '180', '--intra', '30', '--flush',
              '--inline', '--profile', 'baseline', '--level', '3.1',
              '-o', '-'],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL

@@ -12,20 +12,35 @@ from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
 from proto import encode_message, decode_message
+import quality
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
+    # power-cycles with the printer, so we avoid continuous writes that a cut could corrupt.
+    level=logging.INFO,
     format='%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s | %(message)s',
     datefmt='%H:%M:%S',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('/var/log/prusa-cam/main.log', mode='a'),
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger('prusa-cam')
 
 streaming = False
 current_quality = 3
+
+
+def apply_quality(q):
+    """Reconfigure the live encoder to tier q (1=SD/2=HD/3=FHD) and restart the source.
+
+    Persists the resolution for rpicam-source's EnvironmentFile, then restarts it and
+    the RTSP republisher (whose tcpclientsrc must reconnect). ~2s stream blip, like the
+    real camera on a quality change. Returns (width, height).
+    """
+    w, h = quality.write_current(q)
+    subprocess.run(
+        ['sudo', 'systemctl', 'restart', 'rpicam-source.service', 'prusa-rtsp.service'],
+        capture_output=True,
+    )
+    return w, h
 
 def rtsp_streaming():
     # ponytail: /proc/net/tcp check — no subprocess, detects active RTSP client
@@ -176,7 +191,7 @@ async def main():
     webrtc.start()
 
     async def handle_event(event, data):
-        global streaming
+        global streaming, current_quality
         if event == 'webrtc' and isinstance(data, bytes):
             msg = decode_message(data)
             request_id = msg.get(1, '')
@@ -226,8 +241,9 @@ async def main():
             vq = msg.get('video_quality') or msg.get(4)
             if vq and str(vq).lower() in ('sd', 'hd', 'fhd'):
                 qmap = {'sd': 1, 'hd': 2, 'fhd': 3}
-                current_quality = qmap.get(str(vq).lower(), current_quality)
-                log.info(f'Config: video_quality → {vq} (enum {current_quality})')
+                current_quality = qmap[str(vq).lower()]
+                w, h = apply_quality(current_quality)
+                log.info(f'Config: video_quality → {vq} (enum {current_quality}, {w}x{h})')
             lc = msg.get('light_control') or msg.get(6)
             if lc:
                 log.info(f'Config: light_control → {lc!r} (Pi has no IR, ignored)')
@@ -254,9 +270,10 @@ async def main():
             val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
             qmap = {5: 'HD', 6: 'FHD', 7: 'SD'}
             qenum = {5: 2, 6: 3, 7: 1}
-            if val in qmap:
+            if val in qenum:
                 current_quality = qenum[val]
-                log.info(f'{event}: quality → {qmap[val]} (enum {current_quality}; live reconfigure not supported)')
+                w, h = apply_quality(current_quality)
+                log.info(f'{event}: quality → {qmap[val]} (enum {current_quality}, {w}x{h})')
             else:
                 log.warning(f'{event}: unknown quality byte {val!r}')
         elif event == 'timelapse_get_file_list':

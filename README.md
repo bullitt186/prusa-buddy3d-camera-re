@@ -12,10 +12,10 @@ protocol from the ARM firmware and reimplements it so you can:
 - **Proxy** an already-registered camera's cloud WebRTC stream to a local RTSP URL and
   send control commands (reboot, resolution, IR mode). → [`proxy/`](proxy/)
 
-> **Status:** partially working against the live Prusa backend. Local RTSP, auth, and the
-> corrected `/c/info` upload are confirmed; full end-to-end cloud playback in the Prusa app
-> is not yet green. See [`docs/status.md`](docs/status.md) for the exact confirmed-vs-pending
-> line.
+> **Status:** the Pi impersonator is **fully working for local use** — it registers, uploads
+> snapshots, streams RTSP, and handles video-quality tier-switching. Full cloud WebRTC playback
+> in the Prusa app is blocked by a backend gate (the camera isn't in Prusa's camera registry).
+> See [`docs/status.md`](docs/status.md) for the exact confirmed-vs-pending line.
 
 ## Start here
 
@@ -23,7 +23,7 @@ protocol from the ARM firmware and reimplements it so you can:
 |---|---|
 | Know what actually works vs. what's still theory | [`docs/status.md`](docs/status.md) ⭐ |
 | Understand the wire protocol (the spec) | [`docs/protocol.md`](docs/protocol.md) |
-| Run the Pi camera impersonator | [`pi-impersonator/README.md`](pi-impersonator/README.md) |
+| **Set up the Pi impersonator (one command)** | [`pi-impersonator/README.md`](pi-impersonator/README.md) ⭐ |
 | Run the local RTSP proxy / control tool | [`proxy/README.md`](proxy/README.md) |
 | Reproduce or extend the RE work | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
 | See what was tried and failed | [`docs/dead-ends.md`](docs/dead-ends.md) |
@@ -50,6 +50,10 @@ protocol from the ARM firmware and reimplements it so you can:
 │   ├── camerainfo-verification.md  checklist that pinned the CameraInfo struct
 │   └── journal/              raw research journal (archive; contains superseded claims)
 ├── pi-impersonator/          Python impersonator that runs on the Pi (primary impl)
+│   ├── bootstrap.sh          one-command fresh-Pi provisioning (run from your machine)
+│   ├── deploy.sh             overlay-aware deploy (dev: fast rsync; prod: maintenance dance)
+│   ├── config.ini.example    config template (copy → config.ini, fill in token — never commit)
+│   └── systemd/              ready-to-install unit files
 ├── proxy/                    Rust cloud-stream proxy + camera control tool
 ├── config/                   config templates (real secrets stay out of git)
 └── research/                 RE helper scripts (struct generator, OTA script)

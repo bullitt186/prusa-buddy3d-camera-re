@@ -1,5 +1,8 @@
-# Persistent H264 camera source. Publishes the Pi camera as an H264 TCP stream
-# that the RTSP server pulls from. Adjust width/height/framerate to taste.
+# Persistent H264 camera source. rpicam-vid writes to stdout; stream_mux.py multiplexes
+# that stream to any number of TCP clients on port 8888 (RTSP server, snapshot code, etc.)
+# Resolution is driven by the VideoQuality tier:
+# main.py writes /etc/prusa-cam/quality.env (CAM_WIDTH/CAM_HEIGHT) and restarts this unit.
+# --rotation 180: camera module is mounted inverted. --intra 30 --flush: lower latency.
 [Unit]
 Description=Persistent H264 camera source (TCP)
 After=network.target
@@ -7,7 +10,9 @@ After=network.target
 [Service]
 Type=simple
 User=pi
-ExecStart=/usr/bin/rpicam-vid --codec h264 -t 0 --width 1280 --height 720 --framerate 30 --inline --listen -o tcp://0.0.0.0:8888
+Environment=CAM_WIDTH=1920 CAM_HEIGHT=1080
+EnvironmentFile=-/etc/prusa-cam/quality.env
+ExecStart=/bin/bash -c '/usr/bin/rpicam-vid --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --intra 30 --flush --inline -o - | /home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/stream_mux.py'
 Restart=always
 RestartSec=2
 

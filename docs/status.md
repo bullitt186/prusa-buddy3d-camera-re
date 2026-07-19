@@ -81,7 +81,22 @@ the same account to diff against), but its live view turned out to be periodic s
 WebRTC — confirmed from its own README, that firmware never implements Socket.IO/WebRTC signaling
 at all (`features: []`, `capabilities: []` in `/c/info`). So it doesn't test the WebRTC gate one
 way or the other; it's simply a different, snapshot-only integration tier of the same public
-Camera API.
+Camera API. **Confirmed 2026-07-09:** this ESP32Cam is *also* absent from the
+`camera-service-api` registry (`404`, same as ours) — consistent with that registry being scoped
+to WebRTC-capable enrollment specifically, not "every camera on the account."
+
+### 2026-07-09 (later still) — `camera-service-api` surface probed directly, no hidden path found
+
+Probed `camera-service-api.prusa3d.com` beyond the one known endpoint: root (`GET /`, no auth) →
+`200 {"app":"camera-service-api","version":"0.6.7","healthy":true}` — the only endpoint that
+responds with anything other than a uniform 404. Every other guess (`/v1/cameras` list, `/v1/camera`
+singular, `POST /v1/cameras`, `POST /v1/cameras/<token>/register`, `/health`, `/v1/health`,
+`/openapi.json`, `/docs`, `/v1/`) returned the identical `404 Resource not found` body regardless
+of auth style (account Bearer token vs. device Token/Fingerprint headers) or HTTP method.
+`OPTIONS /v1/cameras/<token>` → `204` (the route pattern exists, as expected — this is just CORS
+preflight, not new information). No hidden registration path, no informative error, no version- or
+feature-flag hint anywhere in the responses. This was the cheapest remaining software-only probe
+and it came back clean/negative like everything else today.
 
 **Net effect:** every gate hypothesis that could be tested purely from software/account-level
 control has now been tried and failed to explain the block. What's left: a real-hardware allowlist
@@ -102,7 +117,8 @@ real camera; none of it changes this outcome.
 | Camera identity / auth (Socket.IO) | ✅ Working | `camera_authentication` → ACK `1` **[confirmed]** |
 | Camera info / metadata (`/c/info`) | ✅ Working | 200; name, firmware, model, Wi-Fi shown in app **[confirmed]** |
 | Appears online & paired, survives reboot | ✅ Working | web + mobile app; `Restart=always` **[confirmed]** |
-| Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC **[confirmed]** |
+| Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC, 1080p, `--rotation 180` **[confirmed]** |
+| Dynamic video-quality tier-switching | ✅ Working | app `change_video_size`/`configuration` → live SD/HD/FHD reconfigure of the RTSP source **[confirmed 2026-07-14]** |
 | Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]**; likely just reflects the same registry-membership gap below, not an `origin` mismatch — genuine cameras are `origin: OTHER` too **[assumption]** |
 | Live WebRTC stream in the app | ❌ Blocked | viewer auth rejected (ACK `5`) + camera 404 in registry **[confirmed]**; root cause still open — `origin: LINK` as the unblock is **ruled out as the leading lead 2026-07-09** (see Bottom line) |
 | "Kamera-Kommunikation fehlgeschlagen" warning | ⚠️ Persistent | side-effect of the same gate **[confirmed]** |
@@ -122,7 +138,31 @@ real camera; none of it changes this outcome.
   [`protocol.md` §8](protocol.md).
 - **Local RTSP** — `rpicam-vid` (userspace HW H.264) → TCP → GStreamer `GstRtspServer`.
   Continuous video (needs `do-timestamp=true` on `tcpclientsrc`). Single upstream client;
-  see [RTSP notes in `protocol.md` §12](protocol.md).
+  see [RTSP notes in `protocol.md` §12](protocol.md). Default **1080p @ 30 fps**, `--rotation 180`
+  (camera mounted inverted).
+- **Dynamic video-quality tier-switching** — the app's `change_video_size`/`save_video_size`
+  (byte 5=HD/6=FHD/7=SD) and `configuration` (`sd`/`hd`/`fhd`) commands now live-reconfigure the
+  encoder. `main.py apply_quality()` writes the tier to `/etc/prusa-cam/quality.env` (read by
+  `rpicam-source`'s `EnvironmentFile`) and restarts the source — a ~2 s blip, like the real
+  camera. Resolutions per `quality.py`: SD 640×480 / HD 1280×720 / FHD 1920×1080. The WebRTC
+  path (`webrtc.py`) reads the same tier at spawn. Snapshots stay FHD. **[confirmed 2026-07-14]**
+
+### Streaming latency (measured 2026-07-14, [confirmed])
+
+Headless measurement (ffmpeg from a LAN host, time-to-first-frame over RTSP):
+
+- **Warm join ≈ 70 ms** — server-side delivery is fast; `rpicam-vid` emits a keyframe on each
+  new client connect (`--inline`), so first-frame time is ~70 ms whether or not a viewer was
+  just connected.
+- **Cold join ≈ 2.5 s (one-time)** — when the camera is idle (no viewers), the first connection
+  waits on OV5647 acquisition; `rpicam-vid --listen` only grabs the sensor when a client arrives.
+- **Tuning applied** (kept — safe, negligible cost): `--intra 30 --flush` on the encoder,
+  `factory.set_latency(0)` and a bounded `queue max-size-buffers=1 leaky=downstream` in
+  `rtsp_server.py`. These reduce steady-state jitter accumulation and mid-stream loss-recovery
+  latency; they did **not** move the warm-join metric (rpicam keyframes on connect gate it, not GOP).
+- **The >1 s a viewer perceives is client-side buffering**, not the Pi. VLC's default
+  `network-caching` is 1000 ms — set it low (e.g. `vlc --network-caching=100 rtsp://<pi>:8554/live`)
+  to see the true ~70 ms server latency. This is not a server bug to keep chasing.
 - **Online/paired state** — camera shows online in web and app, correct metadata, auto-recovers
   on crash/reboot via three `enabled` systemd services.
 
@@ -216,7 +256,8 @@ All corrected and matched against a real camera / the buddy3d-proxy captures. Fu
 
 ## Current deployment state
 
-**Hardware:** Raspberry Pi Zero 2 W, Debian 13 (trixie), OV5647 (Pi Cam v1, 1920×1080). App in
+**Hardware:** Raspberry Pi Zero 2 W, Debian 13 (trixie), OV5647 (Pi Cam v1, 1920×1080, mounted
+inverted → `--rotation 180` on all capture paths). App in
 `~/prusa-cam/` (venv `--system-site-packages`). Paired to a Prusa CORE One. Live token in
 `~/prusa-cam/config.ini` (secret; not in repo). **2026-07-09:** switched to a freshly-registered
 `origin: OTHER` camera (id `573240`, see the origin-ruled-out experiment above) — the prior
@@ -228,7 +269,7 @@ account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 | Service | Role |
 |---|---|
 | `prusa-cam.service` | `main.py` — `/c/info`, snapshot loop, Socket.IO signaling, WebRTC answer logic |
-| `rpicam-source.service` | `rpicam-vid --listen` → H.264 over TCP :8888 (single client) |
+| `rpicam-source.service` | `rpicam-vid --listen` → H.264 over TCP :8888 (single client); resolution from `EnvironmentFile=/etc/prusa-cam/quality.env` (tier-switchable), `--rotation 180 --intra 30 --flush` |
 | `prusa-rtsp.service` | GStreamer RTSP → `rtsp://<pi>:8554/live`, pulls from rpicam-source |
 
 **What the impersonator currently sends (latest valid state):** corrected `/c/info`;
@@ -245,6 +286,29 @@ longer races snapshot uploads.
 **Note on ACKs:** only `camera_authentication` is ever ACKed; `status`/`features`/
 `protobuf_version` are not (appears normal). ACKs therefore can't confirm field correctness —
 the `/c/info` HTTP channel is what actually populates the UI. **[assumption]**
+
+### Power-loss robustness (the Pi power-cycles with the printer, no clean shutdown)
+
+Design to make an abrupt cut a non-event, layered:
+
+1. **No continuous SD writes** — `main.py` logs stdout-only at INFO (dropped the
+   `/var/log/prusa-cam/main.log` `FileHandler`); journald `Storage=volatile` (RAM). **[done]**
+2. **Crash-safe rare writes** — `quality.py write_current()` fsyncs the temp file + directory
+   before/after the atomic rename; `read_current()` already falls back to FHD on a corrupt file.
+   **[done]**
+3. **FS/boot hardening** — ext4 `fsck.repair=yes`, `noatime`, zram swap (already); `/boot/firmware`
+   → `ro`. **[partial]**
+4. **Read-only overlayfs root** — writes → tmpfs, discarded on reboot, so the SD can't be
+   corrupted at runtime. Needs `overlayroot`+`initramfs-tools`+`auto_initramfs=1` on this minimal
+   Debian. Deploy is then overlay-aware via `pi-impersonator/deploy.sh`. **[pending]**
+5. Hardware UPS/GPIO clean-shutdown — optional, documented only.
+
+⚠️ **2026-07-14 incident:** an abrupt-shutdown *test* via `sysrq b` (unsynced reset) corrupted
+the rootfs and left the Pi unbootable (no initramfs → bad root mount halts boot before Wi-Fi);
+recovery = SD fsck or reflash (see `.agent/pi-ops.md`). Lesson recorded there: **never
+hard-reset this headless Pi to test** — verify overlay/robustness structurally instead. The
+incident is itself the argument for step 4. Layers 1–2 are committed; steps 3–4 resume once the
+Pi is recovered.
 
 ---
 
@@ -318,12 +382,13 @@ reputation, guessed MAC/OUI) has now been tried and failed to explain the block,
 remaining low-effort diagnostic (mitmproxy) is blocked by pinning. What's left needs either real
 Buddy3D hardware to compare against, or significantly more invasive phone tooling:
 
-1. **Check firmware/rollout timing** — the 2025 Prusa blog post describing staged local-then-cloud
+1. ~~**Probe `camera-service-api` for a direct registration path**~~ — **done 2026-07-09, negative.**
+   No hidden endpoint, no informative error; see "camera-service-api surface probed directly"
+   above. Also confirmed the genuine ESP32Cam is absent from this registry too.
+2. **Check firmware/rollout timing** — the 2025 Prusa blog post describing staged local-then-cloud
    WebRTC rollout doesn't give an exact date or firmware-version cutoff; worth checking whether
    3.1.5 (ours) predates or postdates general cloud-WebRTC availability, e.g. via changelog/OTA
    metadata or forum reports from real Buddy3D owners about when live-view started working.
-2. **Probe `camera-service-api` for a direct registration path** (JWT-authenticated POST) that
-   could register our camera without any QR flow.
 3. **SSL-unpinning on a jailbroken device**, if one becomes available — the only way left to see
    the real app's actual `connect.prusa3d.com`/`camera-service-api` traffic.
 4. **Get real Buddy3D hardware** to compare directly (the ESP32Cam on the account doesn't count —

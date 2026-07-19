@@ -611,11 +611,15 @@ in the `status` message field `5.11`).
 
 ## 11. Video Quality
 
-| Protobuf Enum | Resolution | Config Value | String |
+| Protobuf Enum | Resolution | Config Value (`change_video_size` byte) | String |
 |---------------|------------|-------------|--------|
-| 1 | 640x480 | 5 | SD |
-| 2 | 1280x720 | 6 | HD |
-| 3 | 1920x1080 | 7 | FHD |
+| 1 | 640x480 | 7 | SD |
+| 2 | 1280x720 | 5 | HD |
+| 3 | 1920x1080 | 6 | FHD |
+
+Config Value is the single byte carried by the `change_video_size`/`save_video_size` events
+(5=HD, 6=FHD, 7=SD) — matches the impersonator's handler in `main.py`. (Earlier revisions of
+this table listed 5=SD/6=HD/7=FHD, which was wrong.)
 
 ---
 
