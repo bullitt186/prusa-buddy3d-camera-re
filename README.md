@@ -29,7 +29,7 @@ protocol from the ARM firmware and reimplements it so you can:
 | See what was tried and failed | [`docs/dead-ends.md`](docs/dead-ends.md) |
 | Know the tools used | [`docs/tools.md`](docs/tools.md) |
 | Know the firmware / project sources | [`docs/sources.md`](docs/sources.md) |
-| Check the official REST spec (no WebRTC) | [`docs/openapi.yaml`](docs/openapi.yaml) |
+| Check the official REST spec (no WebRTC) | [`docs/openapi.yaml`](docs/openapi.yaml) — pointer to Prusa's source |
 | Understand licensing & IP boundaries | [`NOTICE.md`](NOTICE.md) |
 
 ## Repository layout

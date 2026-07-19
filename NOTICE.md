@@ -1,26 +1,16 @@
 # Licensing, IP & Legal Notice
 
-## Licensing decision: intentionally **no license** (all rights reserved)
+## License: MIT
 
-This repository ships **without an open-source license file**. Under default copyright that
-means "all rights reserved" — the safest posture while the repo is **private**.
+This repository is released under the **MIT License** — see [`LICENSE`](LICENSE).
 
-Why not a permissive license yet:
+The license covers all original work: the impersonator code (`pi-impersonator/`), the proxy
+(`proxy/`), RE helper scripts (`research/`), and the protocol documentation (`docs/`). The
+protocol documentation is the result of independent reverse engineering for interoperability
+and contains no Prusa source code (EU Software Directive 2009/24/EC Art. 6 / US fair use).
 
-- The documentation describes Prusa's **proprietary** cloud protocol. Reverse engineering for
-  interoperability is broadly permissible (e.g. EU Software Directive 2009/24/EC Art. 6, and
-  US fair-use precedent), but *granting others redistribution rights* over a derived protocol
-  spec is a separate, murkier question.
-- The repo is private and there is **no commercial interest**, so no license is needed for the
-  author's own use. A license can always be added later; it cannot easily be walked back.
-
-### If you later make it public
-
-The author's **own original code** (`pi-impersonator/`, `proxy/`, `research/`) and the
-prose docs can be released — recommended: **MIT** (or Apache-2.0 for its patent grant) — by
-adding a `LICENSE` file and a header note that the protocol documentation is the result of
-independent reverse engineering for interoperability and contains no Prusa source code.
-Keep the firmware-exclusion below in force regardless.
+**Not covered:** `docs/openapi.yaml` is Prusa Research's published Camera API spec — it has
+been replaced with a pointer to `https://connect.prusa3d.com/docs/cameras/openapi/`.
 
 ## Prusa intellectual property
 
