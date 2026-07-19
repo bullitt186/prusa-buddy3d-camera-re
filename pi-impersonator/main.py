@@ -13,6 +13,7 @@ from local_http import start_local_http
 from webrtc import PrusaWebRTC
 from proto import encode_message, decode_message
 import quality
+import local_http
 
 logging.basicConfig(
     # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
@@ -126,6 +127,7 @@ async def snapshot_loop(cfg):
         if not streaming and not rtsp_streaming():
             try:
                 jpeg = capture_jpeg(width, height)
+                local_http.last_jpeg = jpeg
                 t0 = time.monotonic()
                 status = await upload_snapshot(jpeg, token, fingerprint, server)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
