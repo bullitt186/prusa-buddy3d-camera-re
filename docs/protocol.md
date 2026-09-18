@@ -489,9 +489,10 @@ Headers are `Token` and `Fingerprint` (short names, no prefix).
 Default interval: 10 seconds.
 
 Note: the official OpenAPI spec documents success as `204 No Content`; live testing against the
-real backend observed `200` instead (see `status.md`). Doesn't affect the impersonator — it only
-logs the status code, it doesn't branch on it — but flagged here in case the discrepancy matters
-for future debugging.
+real backend observed `200` instead (see `status.md`). Firmware `FUN_0005c568` accepts both
+`"200"` and `"204"` and has a dedicated `"403"` branch that logs `Upload image BLOCKED by server!`
+(`lp_app.strings:8304`); any other response is logged as a failed status code. The impersonator
+classifies the same way (`pi-impersonator/http_result.py`).
 
 ---
 
@@ -574,6 +575,16 @@ Notes:
   (`do_update_camera_attr`, VMA `0x00061bbc`) and a live request with it returns `200`; the
   spec is the less authoritative source here (it explicitly doesn't cover newer additions like
   WebRTC, so it's plausible `features` postdates it too).
+
+### HTTP result classes and `/c/info` refresh
+
+Firmware distinguishes only the codes it branches on. `FUN_0005c568` (snapshot) accepts `"200"`/
+`"204"`, treats `"403"` as blocked, and logs every other code as a failure; `FUN_00062d74`
+(`/c/info`) clears its dirty flag only for `"200"`. The recovered one-second service loop
+(`FUN_00063bfc`) re-sends `/c/info` on a 10-second countdown while its dirty flag is set. The
+impersonator maps these to `success`/`redirect`/`blocked`(403)/`client_error`/`server_error` plus
+`timeout`/`connection_error`, retries only transient classes, and does not auto-follow redirects
+(firmware shows no redirect handling).
 
 ---
 

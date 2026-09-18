@@ -39,6 +39,50 @@ class SnapshotUploadExpect100Tests(unittest.TestCase):
         self.assertTrue(expect100_calls, 'upload_snapshot must pass expect100=True (GAP-HTTP-01)')
 
 
+def _function(tree, name):
+    return next(
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+    )
+
+
+def _calls_client_session(function):
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == 'ClientSession':
+            return True
+        if isinstance(func, ast.Name) and func.id == 'ClientSession':
+            return True
+    return False
+
+
+class SessionReuseTests(unittest.TestCase):
+    """GAP-HTTP-03: upload helpers must reuse the shared session, not build one."""
+
+    def test_upload_helpers_do_not_construct_a_session(self):
+        tree = ast.parse(UPLOAD_PY.read_text())
+        for name in ('upload_snapshot', 'upload_info'):
+            with self.subTest(function=name):
+                self.assertFalse(
+                    _calls_client_session(_function(tree, name)),
+                    f'{name} must accept a session (GAP-HTTP-03)',
+                )
+
+    def test_make_session_is_the_single_factory(self):
+        tree = ast.parse(UPLOAD_PY.read_text())
+        self.assertTrue(_calls_client_session(_function(tree, 'make_session')))
+
+    def test_main_does_not_construct_its_own_session(self):
+        main_py = PI_DIR / 'main.py'
+        tree = ast.parse(main_py.read_text())
+        self.assertFalse(
+            _calls_client_session(tree),
+            'main.py must use upload.make_session(), not aiohttp.ClientSession directly',
+        )
+
+
 class SnapshotJpegQualityTests(unittest.TestCase):
     """GAP-SNAPSHOT-03: the capture pipeline encodes JPEG at quality 95."""
 

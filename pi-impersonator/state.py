@@ -81,6 +81,9 @@ class CameraState:
             return False
         self.snapshot_interval = seconds
         self.snapshot_interval_changed.set()
+        # GAP-INFO-01: a cadence change is a published attribute, so the
+        # /c/info service loop must republish it.
+        self.mark_info_dirty()
         return True
 
     def set_camera_name(self, name):

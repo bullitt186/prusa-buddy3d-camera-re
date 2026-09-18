@@ -698,7 +698,7 @@ closing the gap.
 
 ### GAP-INFO-01 — Refresh and retry `/c/info`
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented; live verification pending**
 - **Firmware behavior:** retries attribute upload and marks it dirty after relevant configuration or
   state changes. The recovered service loop retries on a countdown until successful. **[confirmed]**
 - **Current behavior:** performs one `/c/info` upload during process startup and never refreshes it.
@@ -710,6 +710,13 @@ closing the gap.
   results in a subsequent successful `/c/info` containing the new value.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L179-L188),
   [`upload.py`](../pi-impersonator/upload.py#L18-L53)
+- **Implementation (staged, commit pending):** pure decisions in
+  [`info_service.py`](../pi-impersonator/info_service.py) reproduce the firmware
+  dirty/countdown loop (`next_info_action`, reload to 10 on failure); `main.info_service_loop`
+  ticks every second and marks dirty on camera-name, quality, snapshot-interval, and RTSP/WebRTC
+  mode changes. Retry is bounded by `http_result.MAX_INFO_RETRIES` (the task contract's finite
+  bound; firmware itself retries indefinitely). Tests: `test_pi_info_service.py`
+  (`NextInfoActionTests`, `DirtyAfterResultTests`, `ServiceLoopRecoveryTests`).
 
 ### GAP-CAP-01 — Stop overpromising unsupported features, or implement their wire behavior
 
@@ -829,12 +836,17 @@ closing the gap.
 
 ### GAP-SNAPSHOT-04 — Match snapshot scheduling and concurrent-stream behavior
 
-- [ ] **P2 · Open or deliberate Pi limitation**
+- [~] **P2 · Scheduling half implemented; concurrent-stream half open**
 - **Firmware behavior:** coordinated hardware channels allow snapshot service state to be controlled
   independently from RTSP/WebRTC. **[confirmed at service/state level]**
 - **Current behavior:** periodic snapshots are skipped while an RTSP mux connection or the global
   WebRTC flag is active; sleep begins after capture/upload, so request duration is added to the
   nominal interval.
+- **Implementation (staged, commit pending):** the scheduling half uses a monotonic start-to-start
+  deadline ([`scheduling.py`](../pi-impersonator/scheduling.py) `next_deadline`) so capture/upload
+  duration no longer inflates the cadence and an interval change catches up immediately; the
+  RTSP/WebRTC pause is intentionally retained until one shared camera source exists. Tests:
+  `test_pi_scheduling.py`.
 - **Connect impact:** snapshots appear stale during local viewing and, with the current WebRTC
   lifecycle bug, indefinitely after one offer.
 - **Implementation:** once all outputs share one source, capture JPEG frames without pausing for
@@ -858,7 +870,7 @@ closing the gap.
 
 ### GAP-HTTP-02 — Handle HTTP result classes and throttling
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** distinguishes successful, blocked/throttled, redirected, and failed upload
   paths and changes service/retry behavior accordingly. **[confirmed]**
 - **Current behavior:** returns/logs only the status code for snapshots; `/c/info` returns raw body;
@@ -869,10 +881,18 @@ closing the gap.
   redirects, and implement bounded retry/backoff/throttle behavior.
 - **Acceptance:** mocked 2xx, 3xx, 4xx-blocked, 5xx, timeout, and TLS failures take the documented
   path without leaking token/fingerprint.
+- **Implementation (staged, commit pending):** [`http_result.py`](../pi-impersonator/http_result.py)
+  classifies `success`/`redirect`/`blocked`/`client_error`/`server_error`/`timeout`/
+  `connection_error` and bounds transient retries. Direct evidence resolves the blocked class to
+  exactly `403`: snapshot handler `FUN_0005c568` compares the response text to `"200"`, `"204"`,
+  `"403"` and logs `Upload image BLOCKED by server!` (lp_app.strings:8304); `/c/info`
+  `FUN_00062d74` accepts only `"200"`. Redirects are classified but not auto-followed because
+  firmware shows no redirect handling. Tests: `test_pi_http_result.py`. Log paths redact
+  token/fingerprint via `main.redact_secrets`.
 
 ### GAP-INFO-02 — Keep `/c/info` dynamic values consistent
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** publishes the current configured name, resolution, network values, model,
   firmware, manufacturer, trigger scheme, options, capabilities, and feature list. **[confirmed]**
 - **Current behavior:** name and dimensions come from startup config while live quality has separate
@@ -882,6 +902,10 @@ closing the gap.
   handlers.
 - **Acceptance:** one state fixture produces mutually consistent `/c/info`, status, and encoder
   settings.
+- **Implementation (staged, commit pending):** [`info_body.py`](../pi-impersonator/info_body.py)
+  builds the JSON body from `CameraState` (`state.resolution()`/`state.camera_name`), and
+  `upload.upload_info(session, state, ...)` no longer takes independent width/height/name.
+  Tests: `test_pi_info_body.py` (body/status name and resolution consistency).
 
 ### GAP-AUTH-01 — Require successful authentication ACK
 
@@ -1071,7 +1095,7 @@ closing the gap.
 
 ### GAP-HTTP-03 — Reuse HTTP connections
 
-- [ ] **P3 · Open**
+- [~] **P3 · Implemented; live verification pending**
 - **Firmware behavior:** long-running services reuse their HTTP/curl context and maintain service
   state. **[confirmed at architecture level]**
 - **Current behavior:** creates a new `aiohttp.ClientSession` for each info and snapshot request.
@@ -1080,6 +1104,12 @@ closing the gap.
 - **Implementation:** own one session for the application lifetime with bounded timeouts and clean
   shutdown.
 - **Acceptance:** repeated uploads reuse connections and recover after server-side close.
+- **Implementation (staged, commit pending):** `upload.make_session()` builds the single
+  `aiohttp.ClientSession` with bounded `ClientTimeout`; `main` creates it once and passes it to
+  `upload_snapshot`, `upload_info`, the info service loop, snapshots, and OTA, closing it in a
+  `finally`. `upload_snapshot`/`upload_info` never construct a session. Tests:
+  `test_pi_capture_http.py::SessionReuseTests` (AST assertion). Live connection-reuse/close
+  recovery still requires the Pi.
 
 ### GAP-SIO-01 — Firmware-style error and progress messages
 
