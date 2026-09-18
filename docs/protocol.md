@@ -184,7 +184,28 @@ Note: `sd`, `hd`, `fhd` are **NOT** standalone Socket.IO event names — they ar
 
 ### `trigger`
 
-Commands sent by server. Decoded protobuf contains a trigger type field.
+Commands sent by server. Decoded protobuf contains a trigger type field. The recovered 3.1.6
+descriptor `0x3f6f14` (dispatcher `FUN_000a963c`) gives the exact field map; firmware performs
+**only** the requested action(s), so an absent field produces no response:
+
+| Tag | Type | Meaning |
+|---|---|---|
+| 1 | uvarint | Get status |
+| 2 | uvarint | Get features |
+| 3 | uvarint | Get snapshot |
+| 4 | uvarint | Snapshot upload: `1`=enable, `2`=disable |
+| 5 | uvarint | Timelapse: `1`=enable, `2`=disable |
+| 8 | uvarint | Start firmware update |
+| 9 | uvarint | Reboot device |
+| 10 | uvarint | RTSP: `1`=start, `2`=stop |
+| 11 | string | `request_id` / correlation |
+| 12 | uvarint | Get protocol information → send `protobuf_version` |
+| 13 | string | Second string; semantics unresolved — decode and log only |
+| 14 | uvarint | Timelapse make video: `1`=make, `2`=unsupported |
+| 15 | uvarint | Timelapse file list: `1`=get, `2`=unsupported |
+
+A request field is acted on only for its documented value; other values are ignored and logged.
+`status`, `features`, and `protobuf_version` correlate on tag 11 when present.
 
 | Trigger | Internal Action |
 |---------|----------------|

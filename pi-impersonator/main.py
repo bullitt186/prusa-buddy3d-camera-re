@@ -33,6 +33,7 @@ from proto import (
 import quality
 import quality_control
 import rtsp_control
+import trigger
 import webrtc_control
 import local_http
 
@@ -126,19 +127,6 @@ def summarize_info_response(body, token, fingerprint):
         'capabilities': payload.get('capabilities'),
     }
     return redact_secrets(summary, token, fingerprint)
-
-def extract_request_id(msg):
-    for field in (10, 3, 1):
-        value = msg.get(field)
-        if isinstance(value, str) and len(value) >= 8:
-            return value
-    for value in msg.values():
-        if isinstance(value, bytes):
-            nested = decode_message(value)
-            nested_id = extract_request_id(nested)
-            if nested_id:
-                return nested_id
-    return None
 
 def load_config():
     cfg = configparser.ConfigParser()
@@ -408,6 +396,54 @@ async def main():
         # A stopped service has no peer; do not leave snapshots paused forever.
         state.streaming = False
 
+    async def dispatch_trigger_action(action, request_id):
+        """Perform exactly one planned trigger action (GAP-TRIGGER-01).
+
+        Actions are selected by ``trigger.trigger_actions`` from the recovered
+        descriptor; this function only executes them. ``fw_update``/``reboot``/
+        ``timelapse_*`` are recognized but intentionally unimplemented and must
+        not perform an unrelated action or fake success.
+        """
+        if action == trigger.STATUS:
+            await sig.send_status(request_id=request_id)
+        elif action == trigger.FEATURES:
+            await sig.send_features(request_id=request_id)
+        elif action == trigger.PROTOCOL_INFO:
+            await sig.send_protobuf_version(request_id=request_id)
+        elif action == trigger.SNAPSHOT:
+            # Immediate get-snapshot is independent of the periodic
+            # snapshot_upload_enabled switch (GAP-SNAPSHOT-02); it keeps the
+            # existing WebRTC pause only.
+            if state.streaming:
+                log.info('Trigger snapshot skipped: WebRTC stream active')
+                return
+            try:
+                jpeg = capture_jpeg(*state.resolution())
+                await upload_snapshot(session, jpeg, token, fingerprint, server)
+            except Exception as e:
+                log.error(
+                    f'Trigger snapshot error: {redact_secrets(str(e), token, fingerprint)}'
+                )
+        elif action in (trigger.SNAPSHOT_ENABLE, trigger.SNAPSHOT_DISABLE):
+            trigger.apply_snapshot_upload(action, state)
+            log.info(f'Trigger: snapshot_upload_enabled={state.snapshot_upload_enabled}')
+        elif action in (trigger.RTSP_START, trigger.RTSP_STOP):
+            mode = (rtsp_control.RTSP_ENABLED if action == trigger.RTSP_START
+                    else rtsp_control.RTSP_DISABLED)
+            rtsp_control.apply_mode(
+                mode, state,
+                start_service=rtsp_service_start,
+                stop_service=rtsp_service_stop,
+                query_service=rtsp_service_active,
+                persist=rtsp_control.write_mode,
+            )
+            log.info(f'Trigger {action}: mode={state.rtsp_mode} running={state.rtsp_running}')
+        else:
+            log.warning(
+                f'Trigger action {action!r} recognized but not implemented on the '
+                f'Pi impersonator; no action performed'
+            )
+
     async def handle_event(event, data):
         if event == 'webrtc' and isinstance(data, bytes):
             msg = decode_camera_webrtc_message(data)
@@ -443,22 +479,20 @@ async def main():
             else:
                 log.warning(f'Ignoring unknown camera-side WebRTC message type {msg_type}')
         elif event == 'trigger' and isinstance(data, bytes):
-            msg = decode_message(data)
-            request_id = extract_request_id(msg)
-            log.info(f'Trigger received decoded={redact_secrets(msg, token, fingerprint)!r} request_id={request_id[:16] + "..." if request_id else None}')
-            if request_id:
-                await sig.send_status(request_id=request_id)
-                await asyncio.sleep(0.2)
-                await sig.send_protobuf_version(request_id=request_id)
-                await asyncio.sleep(0.2)
-                await sig.send_features(request_id=request_id)
-            log.info('Trigger received, uploading snapshot')
-            if not state.streaming:
-                try:
-                    jpeg = capture_jpeg(*state.resolution())
-                    await upload_snapshot(session, jpeg, token, fingerprint, server)
-                except Exception as e:
-                    log.error(f'Trigger snapshot error: {e}')
+            decoded = trigger.decode_trigger(data)
+            request_id = decoded.request_id or None
+            log.info(
+                f'Trigger received decoded={redact_secrets(dict(decoded), token, fingerprint)!r} '
+                f'request_id={request_id[:16] + "..." if request_id else None}'
+            )
+            # Tag 13 is decoded and logged above but has no recovered semantics;
+            # never act on it (GAP-TRIGGER-01).
+            actions = trigger.trigger_actions(decoded)
+            if not actions:
+                log.warning('Trigger: no recognized action; nothing dispatched')
+                return
+            for action in actions:
+                await dispatch_trigger_action(action, request_id)
         elif event == 'configuration' and isinstance(data, bytes):
             try:
                 msg = json.loads(data)

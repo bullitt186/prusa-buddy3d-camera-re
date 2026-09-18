@@ -45,6 +45,12 @@ class PrusaSignaling:
         @self.sio.on('trigger')
         async def on_trigger(data):
             self._log_inbound_event('trigger', data)
+            # Ack limitation (GAP-TRIGGER-01): this handler signature carries
+            # only the payload, not a Socket.IO ack callback, so the
+            # firmware-style trigger result code cannot be returned here. main's
+            # dispatcher logs each dispatched action instead; wire an ack only
+            # after confirming the installed python-socketio passes a callback.
+            log.debug('trigger: no ack callback available; result code not returned')
             if self._event_handler:
                 await self._event_handler('trigger', data)
 

@@ -66,7 +66,7 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Snapshot upload | Working | Endpoint and identity headers match; capture quality, scheduling, and control behavior differ. |
 | Socket.IO authentication | Working | Wire message authenticates, but ACK validation is too permissive. |
 | Initial metadata messages | Mostly matched | Core envelopes work; dynamic status and request correlation are incomplete. |
-| Trigger handling | Not matched | Commands are not decoded individually; every trigger causes the same response sequence and snapshot. |
+| Trigger handling | Partial | Recovered descriptor `0x3f6f14` now decodes each trigger and dispatches only the requested action; policy actions (OTA/reboot/timelapse) and `client_trigger` result codes remain unimplemented. |
 | Configuration handling | Partial | Quality partly works; most settings are logged or ignored. |
 | RTSP | Partial | Local stream works but port, startup state, and command semantics differ. |
 | WebRTC | Wire envelope matched; behavior incomplete | Connect ICE/TURN settings, lifecycle, camera sharing, and connection reporting are missing. |
@@ -441,7 +441,7 @@ These are explicit recovery prerequisites, not permission to guess:
 
 | Area | Known exactly | Still required before implementation |
 |---|---|---|
-| Trigger dispatcher | Complete semantic action list and action strings | Exact trigger protobuf descriptor, enum/tag mapping, and per-action response subtype |
+| Trigger dispatcher | Complete semantic action list, action strings, and recovered descriptor `0x3f6f14` (tags 1–5, 8–15; `trigger.py` `decode_trigger`/`trigger_actions`) | Per-action `client_trigger` result subtype |
 | Configuration | Complete field/value/action table above | Exact on-wire tag numbers and presence rules |
 | Status | Top-level fields, struct size, many getters/translations, request correlation | Golden nested descriptor mapping for every claimed value |
 | ICE config | Parent WebRTC field 12, required semantics, TURN/STUN parameters | Nested protobuf subfield tags/cardinality |
@@ -458,7 +458,7 @@ closing the gap.
 
 | Gap | Primary firmware evidence | Remaining ambiguity, if any |
 |---|---|---|
-| `GAP-TRIGGER-01` | `FW-TRIGGER-STRINGS`; `client_trigger` string at `lp_app.strings:10503` | Trigger descriptor and enum are required before coding |
+| `GAP-TRIGGER-01` | `FW-TRIGGER-STRINGS`; recovered descriptor `0x3f6f14` in `trigger.py`; `client_trigger` string at `lp_app.strings:10503` | Per-action result subtype (`client_trigger`) required |
 | `GAP-CONFIG-01` | `FW-CONFIG` and the exact dispatch table above | On-wire tag descriptor required |
 | `GAP-WEBRTC-01` | WebRTC contract above; `FW-WEBRTC-GATE:54-101` copies ICE/session data | Nested `IceConfig` descriptor required |
 | `GAP-WEBRTC-02` | `FW-SNAPSHOT:62-77`; `FW-WEBRTC-GATE:79-101` | Pi sharing architecture is implementation-specific |
@@ -469,7 +469,7 @@ closing the gap.
 | `GAP-STATUS-01` | `FW-STATUS`, translation table above | Some nested tag annotations still require fixture |
 | `GAP-STATUS-02` | `FW-STATUS:413-418`; `FW-PB-VERSION:60-65` | Initial SID versus requested correlation needs fixture |
 | `GAP-SNAPSHOT-01` | `FW-CONFIG:260-277`; `FW-INFO-LOOP:64-94` | Exact timer scaling constant should be named, not guessed |
-| `GAP-SNAPSHOT-02` | `FW-TRIGGER-STRINGS:11249,11534`; snapshot service loop `FW-INFO-LOOP:64-94` | Trigger enum required |
+| `GAP-SNAPSHOT-02` | `FW-TRIGGER-STRINGS:11249,11534`; snapshot service loop `FW-INFO-LOOP:64-94`; recovered descriptor `0x3f6f14` tags 4/5 | Live cadence verification |
 | `GAP-INFO-01` | `FW-INFO-BUILD`; `FW-INFO-LOOP:42-61` | None for retry/dirty behavior |
 | `GAP-CAP-01` | `FW-FEATURES`; feature builder call `FW-INFO-BUILD:213-227` | Capability-removal effect needs live Connect test |
 | `GAP-QUALITY-01` | `FW-QUALITY-PB`, `FW-QUALITY-DIRECT`, `FW-QUALITY-DIMS` | None; mapping is exact |
@@ -516,7 +516,21 @@ closing the gap.
   result/error message.
 - **Acceptance:** fixture tests for every recovered trigger prove that only its intended action is
   called and the correct response event/payload is emitted.
-- **Code:** [`main.py`](../pi-impersonator/main.py#L234-L250)
+- **Code:** [`main.py`](../pi-impersonator/main.py#L234-L250),
+  [`trigger.py`](../pi-impersonator/trigger.py)
+- **Implementation (staged, commit pending):** [`trigger.py`](../pi-impersonator/trigger.py)
+  decodes the recovered descriptor `0x3f6f14` (`decode_trigger`, returning a tag-keyed
+  `TriggerMessage` with a normalized tag-11 `request_id`) and produces an ordered action plan
+  (`trigger_actions`) that fires only the exact documented `(tag, value)` pairs. `main.py`'s
+  trigger handler now performs only the planned actions: `status`/`features`/`protocol_info`
+  (correlated on tag 11), immediate `snapshot`, snapshot upload enable/disable, and RTSP
+  start/stop through `rtsp_control.apply_mode` with persistence. The policy actions `fw_update`,
+  `reboot`, and `timelapse_enable/disable/make/file_list` are recognized and logged as not
+  implemented; they no longer cause an unrelated response or a fake success. Tag 13 is decoded
+  and logged only. Tests: `test_pi_trigger.py`. Remaining: per-action `client_trigger`
+  result/error codes (GAP-SIO-01) and the policy decisions for OTA/reboot/timelapse
+  (GAP-OTA-01/GAP-DEVICE-01/GAP-TIMELAPSE-01). Trigger result acks are not sent because the
+  installed `python-socketio` trigger handler signature carries no ack callback.
 
 ### GAP-CONFIG-01 — Replace guessed configuration decoding with the recovered schema
 
@@ -702,6 +716,14 @@ closing the gap.
   in status while preserving immediate snapshot behavior.
 - **Acceptance:** disable stops periodic uploads, get-snapshot still performs its defined action, and
   enable resumes the configured cadence.
+- **Implementation (staged, commit pending):** recovered trigger tags 4/5 values `1`/`2` now map to
+  `snapshot_enable`/`snapshot_disable` and are applied through
+  [`trigger.py`](../pi-impersonator/trigger.py) `apply_snapshot_upload`, which sets the shared
+  `state.snapshot_upload_enabled` that `periodic_snapshot_allowed` already reads. Immediate
+  get-snapshot is independent of that switch and keeps only the existing WebRTC pause. Status has
+  no recovered field for this flag, so none is emitted rather than inventing one. Tests:
+  `test_pi_trigger.py` (`SnapshotControlTests`). Live cadence verification on the Pi remains
+  pending.
 
 ### GAP-INFO-01 — Refresh and retry `/c/info`
 
