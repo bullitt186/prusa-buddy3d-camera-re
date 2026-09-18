@@ -11,7 +11,11 @@ async def handle_snapshot(request):
     if not jpeg:
         try:
             from camera import capture_jpeg
-            jpeg = capture_jpeg(1920, 1080)
+            from quality import read_current
+            # Review fix 5: one state drives snapshots — use the shared quality
+            # resolution instead of a hardcoded 1920x1080.
+            _, width, height = read_current()
+            jpeg = capture_jpeg(width, height)
         except Exception as e:
             log.error(f'local /snapshot.jpg cold-start capture: {e}')
             return web.Response(status=503, text='Camera unavailable')

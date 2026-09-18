@@ -16,7 +16,7 @@ def capture_jpeg(width=1920, height=1080):
              '!', 'h264parse',
              '!', 'openh264dec',
              '!', 'videoconvert',
-             '!', 'jpegenc', 'quality=85',
+             '!', 'jpegenc', 'quality=95',  # GAP-SNAPSHOT-03: firmware JPEG quality is 95
              '!', 'multifilesink', f'location={pattern}'],
             capture_output=True, timeout=7
         )

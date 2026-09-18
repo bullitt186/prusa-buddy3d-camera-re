@@ -5,13 +5,16 @@
 ;               This is the credential that authenticates this device AS the camera.
 ; fingerprint - generated automatically from wlan0 exactly like firmware 3.1.6:
 ;               md5("AA:BB:CC:DD:EE:FF").hexdigest(). Do not configure it here.
+;
+; [upload] interval - snapshot upload interval in seconds, 10..600 (default 10).
+;                     Out-of-range or non-integer values fall back to 10 with a warning.
+;
+; Resolution is NOT configured here: it follows the persisted video-quality tier
+; (/etc/prusa-cam/quality.env), which Connect changes via quality commands
+; (SD 640x480 / HD 1280x720 / FHD 1920x1080), exactly like firmware 3.1.6.
 
 [identity]
 token = <REGISTRATION_TOKEN>
-
-[camera]
-width = 1920
-height = 1080
 
 [upload]
 interval = 10

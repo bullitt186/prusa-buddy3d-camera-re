@@ -11,7 +11,8 @@ async def upload_snapshot(jpeg_bytes, token, fingerprint, server='webcam.connect
         async with session.put(
             f'https://{server}/c/snapshot',
             headers=headers,
-            data=jpeg_bytes
+            data=jpeg_bytes,
+            expect100=True,  # GAP-HTTP-01: firmware sends Expect: 100-continue
         ) as resp:
             return resp.status
 

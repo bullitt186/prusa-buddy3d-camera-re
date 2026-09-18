@@ -12,6 +12,7 @@ from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
 from identity import fingerprint_from_mac, normalize_wifi_mac
+from state import CameraState, ENUM_TO_RAW, snapshot_interval_from_config
 from proto import (
     WEBRTC_ANSWER,
     WEBRTC_CANDIDATE,
@@ -23,6 +24,7 @@ from proto import (
     encode_message,
 )
 import quality
+import quality_control
 import local_http
 
 logging.basicConfig(
@@ -35,23 +37,41 @@ logging.basicConfig(
 )
 log = logging.getLogger('prusa-cam')
 
-streaming = False
-current_quality = 3
+# One shared runtime state object: command handlers mutate it, and status,
+# /c/info, snapshots and the encoder all read the same values (GAP-QUALITY-03,
+# GAP-STATUS-01, GAP-CONTROL-01, GAP-SNAPSHOT-01/02).
+state = CameraState()
+
+# GAP-QUALITY-02: the firmware registration callback that assigns the nonzero
+# persistence flag to the indirectly-registered Socket.IO events has NOT been
+# recovered. Do not map the flag by event name yet; both default to no-persist so
+# an unknown/failed path can never falsely persist. This gap remains partially open.
+QUALITY_EVENT_PERSIST = {'change_video_size': False, 'save_video_size': False}
 
 
-def apply_quality(q):
-    """Reconfigure the live encoder to tier q (1=SD/2=HD/3=FHD) and restart the source.
+def apply_live_quality(raw_byte):
+    """Reconfigure the live encoder for a raw quality byte.
 
-    Persists the resolution for rpicam-source's EnvironmentFile, then restarts it and
-    the RTSP republisher (whose tcpclientsrc must reconnect). ~2s stream blip, like the
-    real camera on a quality change. Returns (width, height).
+    GAP-QUALITY-01: raw 5/6/7 -> protobuf enum 1/2/3 -> SD/HD/FHD.
+    GAP-QUALITY-02: live-only path; state updates only after the live change
+    (write + restart) succeeds. Review fix 1: a failed restart restores the
+    previous live override so the encoder cannot later run the failed tier.
     """
-    w, h = quality.write_current(q)
-    subprocess.run(
-        ['sudo', 'systemctl', 'restart', 'rpicam-source.service', 'prusa-rtsp.service'],
-        capture_output=True,
-    )
-    return w, h
+    return quality_control.apply_live_quality(raw_byte, state, quality_control.restart_services)
+
+
+def persist_quality(qenum):
+    """Persist tier `qenum` for rpicam-source's boot EnvironmentFile (GAP-QUALITY-02)."""
+    quality_control.persist_quality(qenum)
+
+
+def handle_quality(raw_byte, persist):
+    """Shared GAP-QUALITY-02 handler: always live-apply; persist only on flag.
+
+    The control flow lives in stdlib-only ``quality_control`` so it is testable
+    without ``gi``/``aiohttp``/systemd.
+    """
+    return quality_control.handle_quality(raw_byte, persist, apply_live_quality, persist_quality)
 
 def rtsp_streaming():
     # ponytail: /proc/net/tcp check — no subprocess, detects active RTSP client
@@ -126,14 +146,22 @@ def get_network_info():
     ssid = next((l.split(':', 1)[1] for l in ssid_out.splitlines() if l.startswith('yes:')), '')
     return mac, ip, ssid
 
-async def snapshot_loop(cfg, token, fingerprint):
-    width = cfg.getint('camera', 'width')
-    height = cfg.getint('camera', 'height')
-    interval = cfg.getint('upload', 'interval')
-    server = cfg['upload']['server']
+async def wait_for_interval_or_change():
+    """Sleep for the current cadence, waking early when it changes (GAP-SNAPSHOT-01)."""
+    try:
+        await asyncio.wait_for(
+            state.snapshot_interval_changed.wait(),
+            timeout=state.snapshot_interval,
+        )
+    except asyncio.TimeoutError:
+        return
+    state.snapshot_interval_changed.clear()
 
+
+async def snapshot_loop(token, fingerprint, server):
     while True:
-        if not streaming and not rtsp_streaming():
+        if state.periodic_snapshot_allowed(rtsp_streaming()):
+            width, height = state.resolution()
             try:
                 jpeg = capture_jpeg(width, height)
                 local_http.last_jpeg = jpeg
@@ -143,9 +171,11 @@ async def snapshot_loop(cfg, token, fingerprint):
                 log.info(f'Snapshot: {status} ({len(jpeg)} bytes, {elapsed_ms}ms)')
             except Exception as e:
                 log.error(f'Snapshot error: {e}')
+        elif not state.snapshot_upload_enabled:
+            log.debug('snapshot loop paused (upload disabled)')
         else:
             log.debug('snapshot loop paused (streaming active)')
-        await asyncio.sleep(interval)
+        await wait_for_interval_or_change()
 
 async def ota_checkin(token, fingerprint):
     import aiohttp
@@ -169,17 +199,37 @@ async def ota_checkin(token, fingerprint):
 
 
 async def main():
-    global streaming
     cfg = load_config()
     token = cfg['identity']['token']
-    width = cfg.getint('camera', 'width')
-    height = cfg.getint('camera', 'height')
     server = cfg['upload']['server']
+
+    # GAP-QUALITY-03: start from the persisted tier and publish it everywhere.
+    qenum, _, _ = quality.read_current()
+    state.set_quality(qenum)
+    width, height = state.resolution()
+    log.info(f'Loaded persisted quality enum {qenum} ({width}x{height})')
+
+    # Review fix 3: the old snapshot loop read cfg['upload']['interval']; seed the
+    # shared state so a configured interval is honored (validated 10..600).
+    interval_raw = cfg.get('upload', 'interval', fallback='10')
+    interval = snapshot_interval_from_config(interval_raw)
+    if interval is None:
+        log.warning(
+            f'config upload.interval {interval_raw!r} invalid (must be 10..600); '
+            f'using {state.snapshot_interval}s'
+        )
+    else:
+        state.set_snapshot_interval(interval)
+        # Startup seed: no snapshot loop is waiting yet, so clear the wake event.
+        state.snapshot_interval_changed.clear()
+        log.info(f'Loaded snapshot interval {state.snapshot_interval}s from config')
 
     mac, ip, ssid = get_network_info()
     fingerprint = fingerprint_from_mac(mac)
     log.info('Using firmware-style fingerprint derived from the normalized wlan0 MAC')
-    status, body = await upload_info(token, fingerprint, mac, ip, ssid, server, width, height)
+    status, body = await upload_info(token, fingerprint, mac, ip, ssid, server,
+                                     width=width, height=height,
+                                     camera_name=state.camera_name)
     log.info(f'/c/info upload: {status}')
     summary = summarize_info_response(body, token, fingerprint)
     origin = summary.get('origin') if isinstance(summary, dict) else None
@@ -187,7 +237,7 @@ async def main():
     log.info(f'/c/info response: origin={origin!r} registered={registered!r} summary={summary!r}')
     await ota_checkin(token, fingerprint)
 
-    sig = PrusaSignaling(fingerprint, token, mac=mac, ip=ip, ssid=ssid)
+    sig = PrusaSignaling(fingerprint, token, state, mac=mac, ip=ip, ssid=ssid)
     loop = asyncio.get_event_loop()
 
     async def on_webrtc_answer(request_id, sdp_text):
@@ -203,7 +253,6 @@ async def main():
     webrtc.start()
 
     async def handle_event(event, data):
-        global streaming, current_quality
         if event == 'webrtc' and isinstance(data, bytes):
             msg = decode_camera_webrtc_message(data)
             request_id = msg['request_id']
@@ -217,7 +266,7 @@ async def main():
                 if not request_id or not payload:
                     log.error('Ignoring malformed WebRTC offer without request ID or SDP')
                     return
-                streaming = True
+                state.streaming = True
                 log.info('Pausing snapshots for WebRTC stream')
                 await asyncio.sleep(1)
                 webrtc.handle_offer(request_id, payload, loop)
@@ -242,9 +291,9 @@ async def main():
                 await asyncio.sleep(0.2)
                 await sig.send_features(request_id=request_id)
             log.info('Trigger received, uploading snapshot')
-            if not streaming:
+            if not state.streaming:
                 try:
-                    jpeg = capture_jpeg(width, height)
+                    jpeg = capture_jpeg(*state.resolution())
                     await upload_snapshot(jpeg, token, fingerprint, server)
                 except Exception as e:
                     log.error(f'Trigger snapshot error: {e}')
@@ -256,16 +305,41 @@ async def main():
             log.info(f'Configuration: {redact_secrets(msg, token, fingerprint)!r}')
             name = msg.get('camera_name') or msg.get(7)
             if name:
-                log.info(f'Config: camera_name → {name!r}')
+                old_name = state.camera_name
+                if state.set_camera_name(name):
+                    state.mark_info_dirty()
+                    log.info(f'Config: camera_name → {state.camera_name!r}')
+                    if state.camera_name != old_name:
+                        # GAP-CONTROL-01: republish /c/info with the new name.
+                        # Bounded retry/dirty servicing is GAP-INFO-01, still open.
+                        try:
+                            info_status, _ = await upload_info(
+                                token, fingerprint, mac, ip, ssid, server,
+                                *state.resolution(), camera_name=state.camera_name,
+                            )
+                            log.info(f'/c/info refresh after rename: {info_status}')
+                            if info_status == 200:
+                                state.info_dirty = False
+                        except Exception as e:
+                            log.error(f'/c/info refresh after rename failed: {e}')
+                else:
+                    log.warning(f'Config: camera_name {name!r} rejected (empty)')
             interval_val = msg.get('snapshot_interval') or msg.get(8)
-            if interval_val and isinstance(interval_val, int) and 10 <= interval_val <= 600:
-                log.info(f'Config: snapshot_interval → {interval_val}s (live change not implemented)')
+            if interval_val is not None:
+                if state.set_snapshot_interval(interval_val):
+                    log.info(f'Config: snapshot_interval → {interval_val}s (live)')
+                else:
+                    log.warning(f'Config: snapshot_interval {interval_val!r} rejected (10..600)')
             vq = msg.get('video_quality') or msg.get(4)
             if vq and str(vq).lower() in ('sd', 'hd', 'fhd'):
-                qmap = {'sd': 1, 'hd': 2, 'fhd': 3}
-                current_quality = qmap[str(vq).lower()]
-                w, h = apply_quality(current_quality)
-                log.info(f'Config: video_quality → {vq} (enum {current_quality}, {w}x{h})')
+                qenum = {'sd': 1, 'hd': 2, 'fhd': 3}[str(vq).lower()]
+                raw = ENUM_TO_RAW.get(qenum)
+                # ASSUMPTION (GAP-CONFIG-01/GAP-QUALITY-02): the dispatch table
+                # confirms sd/hd/fhd -> raw 5/6/7, but it does NOT confirm that the
+                # configuration-form video_quality path persists. persist=True here
+                # is an inference, not recovered evidence.
+                if raw is not None and handle_quality(raw, persist=True):
+                    log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
             lc = msg.get('light_control') or msg.get(6)
             if lc:
                 log.info(f'Config: light_control → {lc!r} (Pi has no IR, ignored)')
@@ -290,21 +364,20 @@ async def main():
                 log.warning(f'set_rtsp_server_mode: unknown value {val!r}')
         elif event in ('change_video_size', 'save_video_size'):
             val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
-            qmap = {5: 'HD', 6: 'FHD', 7: 'SD'}
-            qenum = {5: 2, 6: 3, 7: 1}
-            if val in qenum:
-                current_quality = qenum[val]
-                w, h = apply_quality(current_quality)
-                log.info(f'{event}: quality → {qmap[val]} (enum {current_quality}, {w}x{h})')
+            # GAP-QUALITY-01/02: raw 5/6/7 -> SD/HD/FHD, live apply always, persist
+            # only per the (currently unresolved) event flag map.
+            persist = QUALITY_EVENT_PERSIST.get(event, False)
+            if handle_quality(val, persist):
+                log.info(f'{event}: quality → raw {val} (enum {state.quality}, {state.resolution()})')
             else:
-                log.warning(f'{event}: unknown quality byte {val!r}')
+                log.warning(f'{event}: quality byte {val!r} not fully applied (live or persist failed)')
         elif event == 'timelapse_get_file_list':
             log.info('timelapse_get_file_list: no SD card on Pi, responding with empty list')
             empty = encode_message({})
             await sig.sio_emit('timelapse_get_file_list', empty)
 
     sig.on_trigger(handle_event)
-    asyncio.create_task(snapshot_loop(cfg, token, fingerprint))
+    asyncio.create_task(snapshot_loop(token, fingerprint, server))
     asyncio.create_task(start_local_http())
     await sig.connect()
     await sig.wait()

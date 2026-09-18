@@ -48,8 +48,11 @@ PI=pi@<PI_IP> pi-impersonator/deploy.sh --enable-overlay
 | Key | Value |
 |---|---|
 | `token` | Camera registration token from Prusa Connect (Web UI → Camera → *Token*) |
-| `width` / `height` | Snapshot resolution (default `1920` / `1080`) |
-| `interval` | Snapshot upload interval in seconds (default `10`) |
+| `interval` | Snapshot upload interval in seconds, `10`–`600` (default `10`) |
+
+Resolution is not configured here: it follows the persisted video-quality tier
+(`/etc/prusa-cam/quality.env`) and the ephemeral live override
+(`/etc/prusa-cam/quality.live.env`), so snapshots, RTSP, WebRTC and status always agree.
 
 The fingerprint is generated automatically from `wlan0` exactly like firmware 3.1.6: normalize
 the MAC as uppercase colon-separated ASCII and send its lowercase MD5 digest. Connect binds this
@@ -62,7 +65,7 @@ Three systemd services, one concern each:
 
 ```
 rpicam-source.service   rpicam-vid -o - | stream_mux.py → H.264 TCP :8888 (multi-client)
-        │                 resolution driven by /etc/prusa-cam/quality.env (tier-switchable)
+        │                 resolution driven by quality.env (persisted) + quality.live.env (live override)
         │                 --rotation 180  --intra 30  --flush
         ↓
 prusa-rtsp.service      rtsp_server.py (GStreamer) → rtsp://<pi>:8554/live
@@ -73,7 +76,9 @@ prusa-cam.service       main.py
 
 `main.py` starts/stops `prusa-rtsp` on command from Prusa and reconfigures the encoder
 resolution live on video-quality commands (SD 640×480 / HD 1280×720 / FHD 1920×1080) by
-writing `/etc/prusa-cam/quality.env` and restarting `rpicam-source`.
+writing the ephemeral `/etc/prusa-cam/quality.live.env` and restarting `rpicam-source`;
+a persistence flag (whose event wiring is still being recovered, see `GAP-QUALITY-02`) also
+writes `/etc/prusa-cam/quality.env` for the next boot.
 
 ## Files
 

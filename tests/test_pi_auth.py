@@ -1,0 +1,85 @@
+import asyncio
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+PI_DIR = Path(__file__).resolve().parents[1] / 'pi-impersonator'
+sys.path.insert(0, str(PI_DIR))
+
+# GAP-AUTH-01 flow tests exercise signaling.PrusaSignaling._authenticate, whose
+# module imports socketio. Inject a minimal in-process double so the real runtime
+# dependency is never loaded (tests must not import socketio).
+_socketio_stub = types.ModuleType('socketio')
+_socketio_stub.AsyncClient = object
+sys.modules['socketio'] = _socketio_stub
+
+from auth import auth_ack_is_success  # noqa: E402
+import signaling  # noqa: E402
+
+
+class AuthAckPredicateTests(unittest.TestCase):
+    def test_exact_integer_one_succeeds(self):
+        self.assertTrue(auth_ack_is_success(1))
+
+    def test_all_other_values_fail(self):
+        # 0/5: other ints; True: bool must not pass; '1': string; None; malformed
+        # payloads (bytes/list/dict) and non-int numerics.
+        for ack in (0, 5, -1, True, False, '1', 'true', None, 1.0, b'\x01', [], {}):
+            with self.subTest(ack=ack):
+                self.assertFalse(auth_ack_is_success(ack))
+
+
+class _FakeSio:
+    def __init__(self, ack=None, error=None):
+        self._ack = ack
+        self._error = error
+        self.calls = []
+
+    async def call(self, event, data, timeout=None):
+        self.calls.append((event, data, timeout))
+        if self._error is not None:
+            raise self._error
+        return self._ack
+
+
+class _FakeSignaling:
+    def __init__(self, sio):
+        self.sio = sio
+        self.fingerprint = 'fingerprint-value'
+        self.token = 'token-value'
+        self.post_auth_count = 0
+
+    async def _send_post_auth(self):
+        self.post_auth_count += 1
+
+
+class AuthenticateFlowTests(unittest.TestCase):
+    def _authenticate(self, sio):
+        sig = _FakeSignaling(sio)
+        asyncio.run(signaling.PrusaSignaling._authenticate(sig))
+        return sig
+
+    def test_ack_one_proceeds_to_post_auth(self):
+        sig = self._authenticate(_FakeSio(ack=1))
+        self.assertEqual(sig.post_auth_count, 1)
+        self.assertEqual(sig.sio.calls[0][0], 'camera_authentication')
+
+    def test_rejected_acks_emit_no_post_auth(self):
+        for ack in (0, 5, True, '1', None, b'', [], {}):
+            with self.subTest(ack=ack):
+                sig = self._authenticate(_FakeSio(ack=ack))
+                self.assertEqual(sig.post_auth_count, 0)
+
+    def test_timeout_emits_no_post_auth(self):
+        sig = self._authenticate(_FakeSio(error=TimeoutError('auth timeout')))
+        self.assertEqual(sig.post_auth_count, 0)
+
+    def test_exception_emits_no_post_auth(self):
+        sig = self._authenticate(_FakeSio(error=RuntimeError('boom')))
+        self.assertEqual(sig.post_auth_count, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

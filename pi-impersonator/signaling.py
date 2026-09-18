@@ -5,15 +5,18 @@ import socketio
 import logging
 import hashlib
 import time
-from proto import Float32, encode_message, decode_message
+from auth import auth_ack_is_success
+from proto import encode_message, decode_message
+from status import build_status_message
 from features import PROTOCOL_VERSION, FEATURES, FIRMWARE_VERSION, MODEL, MANUFACTURER, HW_VERSION
 
 log = logging.getLogger('prusa-cam.signaling')
 
 class PrusaSignaling:
-    def __init__(self, fingerprint, token, mac='', ip='', ssid=''):
+    def __init__(self, fingerprint, token, state, mac='', ip='', ssid=''):
         self.fingerprint = fingerprint
         self.token = token
+        self.state = state
         self.mac = mac
         self.ip = ip
         self.ssid = ssid
@@ -97,9 +100,14 @@ class PrusaSignaling:
         auth_msg = encode_message({1: self.fingerprint, 2: self.token})
         try:
             ack = await self.sio.call('camera_authentication', auth_msg, timeout=10)
-            log.info(f'Auth ACK: {ack!r}')
         except Exception as e:
             log.error(f'Auth failed: {e}')
+            return
+        log.info(f'Auth ACK: {ack!r}')
+        # GAP-AUTH-01: only the exact integer 1 is a successful ACK; anything else
+        # (0, 5, malformed, bool) must not emit post-auth messages.
+        if not auth_ack_is_success(ack):
+            log.warning(f'Auth not accepted (ACK={ack!r}); skipping post-auth messages')
             return
         await self._send_post_auth()
 
@@ -179,12 +187,6 @@ class PrusaSignaling:
         except Exception:
             return 0
 
-    def _uptime_string(self, seconds):
-        days, rem = divmod(max(0, seconds), 86400)
-        hours, rem = divmod(rem, 3600)
-        minutes, seconds = divmod(rem, 60)
-        return f'{days} days, {hours}:{minutes}:{seconds}'
-
     def _load_average(self):
         try:
             with open('/proc/loadavg') as f:
@@ -212,96 +214,24 @@ class PrusaSignaling:
             return 0
 
     def _status_message(self, request_id=None):
-        signal_quality = self._signal_quality()
-        uptime = self._uptime_seconds()
-        memory = self._memory_stats()
-
-        timelapse_status = encode_message({
-            1: 2,
-            2: 0,
-            3: 0,
-            4: '',
-            5: 0,
-            6: 0,
-            7: Float32(0.0),
-        })
-
-        camera_status = encode_message({
-            3: 1,
-            4: 10,
-            5: 1,
-            6: 40,
-        })
-
-        network_info = encode_message({
-            1: encode_message({
-                1: self.ssid,
-                2: self.mac,
-                3: self.ip,
-                5: signal_quality,
-            }),
-            2: encode_message({}),
-        })
-
-        extended_status = encode_message({
-            1: FIRMWARE_VERSION,
-            2: MODEL,
-            3: 'Buddy3D Camera',
-            4: encode_message({
-                1: 2,
-                2: 0,
-                3: 0,
-                4: 0,
-                6: MODEL,
-            }),
-            6: encode_message({
-                1: 1,
-                2: 2,
-                4: f'rtsp://{self.ip}:8554/live' if self.ip else '',
-            }),
-            7: encode_message({
-                1: 1,
-                2: 0,
-            }),
-            9: encode_message({
-                1: 'webcam.connect.prusa3d.com',
-                2: 'camera-signaling.prusa3d.com',
-                3: 'connect.prusa3d.com',
-            }),
-            10: encode_message({
-                1: time.tzname[0] if time.tzname else '',
-                2: 1,
-            }),
-            11: encode_message({
-                1: 1,   # webrtc_mode: enabled (RE confirmed +0x13d=1 after set_webrtc_mode)
-                2: 1,   # webrtc_status: running (RE confirmed +0x13e=1 after service starts)
-            }),
-        })
-
-        system_info = encode_message({
-            1: Float32(self._cpu_temperature()),
-            2: uptime,
-            3: self._uptime_string(uptime),
-            4: self._load_average(),
-            5: memory['MemTotal'],
-            6: memory['MemFree'],
-            7: memory['Shmem'],
-            8: memory['Buffers'],
-            9: self._process_count(),
-        })
-
-        video_quality = encode_message({1: 3})
-        fields = {
-            2: timelapse_status,
-            3: camera_status,
-            4: network_info,
-            5: extended_status,
-            8: self.token,
-            9: system_info,
-            10: self.sio.get_sid() or self.sio.sid or '',
-            11: video_quality,
-        }
-        return encode_message(fields)
+        # Field construction is pure and lives in status.py so it can be tested
+        # without socketio (GAP-STATUS-01/02, GAP-NETWORK-01).
+        return build_status_message(
+            self.state,
+            token=self.token,
+            mac=self.mac,
+            ip=self.ip,
+            ssid=self.ssid,
+            signal_quality=self._signal_quality(),
+            cpu_temperature=self._cpu_temperature(),
+            uptime=self._uptime_seconds(),
+            load_average=self._load_average(),
+            memory=self._memory_stats(),
+            process_count=self._process_count(),
+            request_id=request_id,
+            sid=self.sio.get_sid() or self.sio.sid or '',
+            tz_name=time.tzname[0] if time.tzname else '',
+        )
 
     async def send_status(self, request_id=None):
         status_msg = self._status_message(request_id=request_id)

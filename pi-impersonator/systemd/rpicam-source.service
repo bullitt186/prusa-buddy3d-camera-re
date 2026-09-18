@@ -2,6 +2,8 @@
 # that stream to any number of TCP clients on port 8888 (RTSP server, snapshot code, etc.)
 # Resolution is driven by the VideoQuality tier:
 # main.py writes /etc/prusa-cam/quality.env (CAM_WIDTH/CAM_HEIGHT) and restarts this unit.
+# quality.live.env is an ephemeral live override (GAP-QUALITY-02); it is read last so a
+# live change moves the encoder without touching the persisted tier.
 # --rotation 180: camera module is mounted inverted. --intra 30 --flush: lower latency.
 [Unit]
 Description=Persistent H264 camera source (TCP)
@@ -12,6 +14,7 @@ Type=simple
 User=pi
 Environment=CAM_WIDTH=1920 CAM_HEIGHT=1080
 EnvironmentFile=-/etc/prusa-cam/quality.env
+EnvironmentFile=-/etc/prusa-cam/quality.live.env
 ExecStart=/bin/bash -c '/usr/bin/rpicam-vid --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --intra 30 --flush --inline -o - | /home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/stream_mux.py'
 Restart=always
 RestartSec=2
