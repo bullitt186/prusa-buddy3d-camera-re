@@ -12,13 +12,17 @@ Evidence markers: **[confirmed]** = verified live against the real backend or fi
 
 ## Bottom line
 
-A Raspberry Pi can fully impersonate the camera for **snapshots, identity, and metadata**,
-and serve a **local RTSP** live view. It **cannot** deliver the app's live WebRTC stream.
+A Raspberry Pi can impersonate the camera for **snapshots and metadata**, authenticate its
+camera session, and serve a **local RTSP** live view. It **cannot currently** deliver the app's
+live WebRTC stream.
 
-The blocker is a hard backend gate, not a protocol bug we can fix.
-**[confirmed]** Our tokens (`origin: OTHER` and `origin: WEB`) are absent from
+The immediate failure is a backend gate rather than the media codec: **[confirmed]** our tokens
+(`origin: OTHER` and `origin: WEB`) are absent from
 `camera-service-api.prusa3d.com` (direct lookup → 404), and the signaling server rejects every
-viewer for them (`client_authentication` → ACK `5`), so no WebRTC offer is ever relayed.
+viewer for them (`client_authentication` → ACK `5`), so no WebRTC offer is ever relayed. The
+remaining question is why the token never enters that registry. A 2026-09-18 firmware trace
+reopened one exact software-side identity test: the reported MAC must match the fingerprint
+preimage formatted precisely as the OEM firmware does.
 
 **[confirmed 2026-07-09, revised]** The `origin: LINK` hypothesis (below) is **dropped as the
 leading lead** — it was chasing the wrong origin. Two official Prusa documents settle this:
@@ -98,14 +102,14 @@ preflight, not new information). No hidden registration path, no informative err
 feature-flag hint anywhere in the responses. This was the cheapest remaining software-only probe
 and it came back clean/negative like everything else today.
 
-**Net effect:** every gate hypothesis that could be tested purely from software/account-level
-control has now been tried and failed to explain the block. What's left: a real-hardware allowlist
-keyed on something we haven't identified (MAC/OUI, `next-steps.md` P.2, still untested), or a
-backend feature-rollout gate genuinely not yet enabled for this account/camera class — see
+**Net effect:** origin, source-network reputation, hidden registry endpoints, and firmware 3.1.6
+protocol changes are ruled out. One software-controlled variable needs an exact retest:
+MAC/fingerprint consistency using the OEM uppercase preimage. After that, the remaining
+explanations are a genuine-hardware allowlist or a backend feature-rollout gate — see
 `next-steps.md` for the current priority order.
 
-Everything protocol-level that we *can* influence from software has been corrected to match a
-real camera; none of it changes this outcome.
+The framing and message schemas now match firmware; device-identity consistency is the remaining
+software-controlled variable.
 
 ### 2026-09-18 — 3.1.6 exhaustive audit and live gate retest
 
@@ -140,7 +144,7 @@ This is necessary for an offer to work after enrollment is unblocked, but cannot
 | Camera info / metadata (`/c/info`) | ✅ Working | 200; name, firmware, model, Wi-Fi shown in app **[confirmed]** |
 | Appears online & paired, survives reboot | ✅ Working | web + mobile app; `Restart=always` **[confirmed]** |
 | Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC, 1080p, `--rotation 180` **[confirmed]** |
-| Dynamic video-quality tier-switching | ✅ Working | app `change_video_size`/`configuration` → live SD/HD/FHD reconfigure of the RTSP source **[confirmed 2026-07-14]** |
+| Dynamic video-quality tier-switching | ⚠️ Partial | reconfiguration plumbing works, but the raw-byte handler still uses the obsolete mapping; firmware is `5=SD`, `6=HD`, `7=FHD` **[confirmed from 3.1.6]** |
 | Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]**; likely just reflects the same registry-membership gap below, not an `origin` mismatch — genuine cameras are `origin: OTHER` too **[assumption]** |
 | Live WebRTC stream in the app | ❌ Blocked | viewer auth rejected (ACK `5`) + camera 404 in registry **[confirmed]**; root cause still open — `origin: LINK` as the unblock is **ruled out as the leading lead 2026-07-09** (see Bottom line) |
 | "Kamera-Kommunikation fehlgeschlagen" warning | ⚠️ Persistent | side-effect of the same gate **[confirmed]** |
@@ -156,19 +160,19 @@ This is necessary for an offer to work after enrollment is unblocked, but cannot
   (`fingerprint`, `token`); server ACKs a bare `1`.
 - **`/c/info` metadata upload** — the corrected schema (almost everything nested under
   `config`, `features`/`capabilities` as JSON **arrays**) returns 200 and populates the
-  camera's name, firmware, model `Buddy3D-C1`, and Wi-Fi details. This was live-verified with
-  `3.1.5`; current code advertises `3.1.6` after the static regression check, but has not yet
-  been redeployed. Full body in [`protocol.md` §8](protocol.md).
+  camera's name, firmware, model `Buddy3D-C1`, and Wi-Fi details. Firmware `3.1.6` was deployed
+  and live-verified after reboot on 2026-09-18. Full body in [`protocol.md` §8](protocol.md).
 - **Local RTSP** — `rpicam-vid` (userspace HW H.264) → TCP → GStreamer `GstRtspServer`.
   Continuous video (needs `do-timestamp=true` on `tcpclientsrc`). Single upstream client;
   see [RTSP notes in `protocol.md` §12](protocol.md). Default **1080p @ 30 fps**, `--rotation 180`
   (camera mounted inverted).
-- **Dynamic video-quality tier-switching** — the app's `change_video_size`/`save_video_size`
-  (byte 5=HD/6=FHD/7=SD) and `configuration` (`sd`/`hd`/`fhd`) commands now live-reconfigure the
-  encoder. `main.py apply_quality()` writes the tier to `/etc/prusa-cam/quality.env` (read by
-  `rpicam-source`'s `EnvironmentFile`) and restarts the source — a ~2 s blip, like the real
-  camera. Resolutions per `quality.py`: SD 640×480 / HD 1280×720 / FHD 1920×1080. The WebRTC
-  path (`webrtc.py`) reads the same tier at spawn. Snapshots stay FHD. **[confirmed 2026-07-14]**
+- **Dynamic video-quality plumbing (partial)** — configuration strings (`sd`/`hd`/`fhd`) can
+  reconfigure the encoder, and `main.py apply_quality()` writes the tier to
+  `/etc/prusa-cam/quality.env` before restarting the source. Resolutions in `quality.py` are
+  correct: SD 640×480 / HD 1280×720 / FHD 1920×1080. However, the raw
+  `change_video_size`/`save_video_size` handler still maps bytes incorrectly. Firmware 3.1.6 uses
+  `5=SD`, `6=HD`, `7=FHD`, and its shared handler persists only when a callback flag is nonzero.
+  Until `GAP-QUALITY-01` and `GAP-QUALITY-02` close, raw-event parity is not confirmed.
 
 ### Streaming latency (measured 2026-07-14, [confirmed])
 
@@ -238,7 +242,7 @@ rollout). See [`protocol.md` §5 (server-side gate) and §10 (enable gate)](prot
 | `origin: LINK` is the WebRTC unblock for a Buddy3D-style camera | **Downgraded (2026-07-09)** | The official pairing manual shows genuine Buddy3D cameras register as `origin: OTHER` (same as us) via Connect's "Add WiFi Camera" QR wizard. `LINK` belongs to a separate, unrelated product — CSI/USB webcams wired into a Raspberry Pi running PrusaLink, toggled on via a "Link camera to Connect" button, no WebRTC/Socket.IO involved at all. See `dead-ends.md`. |
 | `origin` (`WEB` vs `OTHER`) is the WebRTC gate | **Ruled out — confirmed by live experiment (2026-07-09)** | Registered a fresh `origin: OTHER` token, redeployed the fully-correct-protocol impersonator against it (`registered: true`) — identical ACK `5` + registry `404` as the pre-existing `origin: WEB` token. Also corrects an earlier, weaker claim: `origin: WEB` is **not** restricted to the browser-webcam client — our impersonator ran the full Socket.IO/protobuf protocol successfully on a `WEB`-origin token for the whole project up to this point (auth ACK `1`, `/c/info` 200, snapshots all worked). `origin` appears to be account-side metadata, not a protocol-level access restriction. |
 | Source-IP / network reputation (WAF, geo, ASN, residential-IP blocking) is the WebRTC gate | **Ruled out — confirmed by live experiment (2026-07-09)** | Replayed the identical `client_authentication` handshake from a second machine on a completely different network (non-residential, different ASN) — same ACK `5`. |
-| MAC/OUI (a guessed Realtek `00:E0:4C` reference prefix) is the WebRTC gate | **Ruled out for this OUI, not the mechanism (2026-07-09)** | Spoofed `wlan0` to `00:E0:4C:xx:xx:xx`, recomputed `MD5(MAC)` fingerprint, registered a fresh token to bind cleanly — identical ACK `5` + `404`. Caveat: no confirmed genuine Buddy3D MAC was ever found to test against; this only rules out the specific guessed OUI, not MAC-checking in general. |
+| MAC/OUI or MAC/fingerprint consistency is the WebRTC gate | **Inconclusive; exact retest needed** | The 2026-07-09 guessed-Realtek-OUI run produced identical ACK `5` + `404`, but the one-off MD5 preimage was not preserved. The full 3.1.6 trace now proves the firmware hashes the exact uppercase colon-separated MAC string; the recorded test MAC was mixed-case, so firmware-consistent pairing cannot be established retrospectively. No confirmed genuine Buddy3D OUI is available. |
 | mitmproxy would show the real app's `connect.prusa3d.com`/`camera-service-api` traffic | **Blocked, not just untried (2026-07-09)** | Proxy + cert trust confirmed working (other domains decrypted cleanly), but zero requests to any Prusa Camera API domain appeared despite confirmed time on the camera view — consistent with certificate pinning on that traffic specifically. |
 
 ---
@@ -269,11 +273,14 @@ All corrected and matched against a real camera / the buddy3d-proxy captures. Fu
 - **Field semantics fixed from buddy3d-proxy captures:** `status` field 10 = Socket.IO sid;
   `features` field 7 = MD5 of the features JSON (used as WebRTC `peer_id`); Socket.IO CONNECT
   must carry `auth={token}` and `Origin: https://connect.prusa3d.com`.
-- **No cryptographic secret to forge** — auth is `fingerprint = MD5(MAC)` + `token`; no certs
-  or keypairs anywhere in the pairing flow. Whether the backend validates the MAC/OUI or the
-  fingerprint against a registry of genuine cameras is **untested** (see hardware-identity
-  hypothesis in [`next-steps.md`](next-steps.md)). Note the impersonator sends a Pi-OUI MAC and
-  a static fingerprint that is not recomputed from that MAC.
+- **No device certificate or asymmetric key to forge** — auth is `fingerprint = MD5(MAC)` plus
+  the server-minted token credential; no certs or keypairs appear in the pairing flow. The token
+  is a random 20-character value minted by Connect from a bodyless registration request
+  (`printer_uuid` + `origin`); firmware only reads it from the QR/serial command and persists it.
+  The wire fingerprint is lowercase MD5 of the firmware's uppercase colon-separated MAC string
+  (or a random fallback seed). See [`protocol.md` §0–2](protocol.md) for the complete 3.1.6 trace.
+  The repository implementation now derives this value automatically from `wlan0`; the deployed
+  camera still uses its previously bound static value until a fresh token is issued for migration.
 
 ---
 
@@ -383,18 +390,19 @@ low-priority, separate curiosity, not the leading lead.
 **2026-07-09 update #3:** live-tested and ruled out both `origin` and source-IP/network-reputation
 as the gate (see "origin and network-reputation ruled out by live experiment" above).
 
-**2026-07-09 update #4:** MAC/OUI test executed live — also a negative result, and mitmproxy
-turned out to be **blocked entirely**, not just untried:
+**2026-07-09 update #4 (fingerprint caveat added 2026-09-18):** MAC/OUI test executed live and
+mitmproxy turned out to be **blocked entirely**, not just untried:
 
 - **MAC/OUI (P.2):** spoofed the Pi's `wlan0` to a guessed Realtek reference OUI (`00:E0:4C`,
   matching the RTL8188FU chip a community teardown found inside a real Buddy3D unit — no confirmed
   real-device MAC was found anywhere to test against directly), recomputed the fingerprint
   (`MD5(MAC)`, per P.3), registered a fresh token so it bound cleanly to the new identity, and
-  redeployed. Identical ACK `5` + registry `404`. **Caveat:** rules out *this specific guessed*
-  OUI only, not MAC-checking as a mechanism in general — no confirmed genuine MAC was ever
-  available to test with. (Also incidentally confirmed the server validates fingerprint against
-  what was recorded at a token's first use: reusing the *existing* `OTHER` token with a *changed*
-  fingerprint got `403`, not `200` — a real, previously-undocumented behavior.)
+  redeployed. Identical ACK `5` + registry `404`. **2026-09-18 caveat:** firmware hashes the exact
+  uppercase colon-separated MAC string, but the test's one-off MD5 preimage/casing was not saved.
+  The recorded MAC was mixed-case, so this does not reproducibly establish firmware-consistent
+  MAC/fingerprint pairing and must be repeated before ruling it out. No confirmed genuine MAC was
+  available either. The run did confirm that the server binds fingerprint at a token's first use:
+  reusing the existing token with a changed fingerprint returned `403`.
 - **mitmproxy (Step 2):** phone proxy + cert trust both confirmed working (`sentry.prusa3d.com`
   and Firebase traffic decrypted cleanly), but across the whole session — including confirmed time
   spent on the Core One's camera view — **zero requests to `connect.prusa3d.com`,
@@ -403,21 +411,23 @@ turned out to be **blocked entirely**, not just untried:
   points to **certificate pinning** on the app's core API traffic. Seeing it would need
   jailbreak-level tooling (SSL Kill Switch / Frida), a much bigger escalation than attempted today.
 
-**Net effect:** every gate hypothesis reachable from software-only testing (origin, source-IP
-reputation, guessed MAC/OUI) has now been tried and failed to explain the block, and the one
-remaining low-effort diagnostic (mitmproxy) is blocked by pinning. What's left needs either real
-Buddy3D hardware to compare against, or significantly more invasive phone tooling:
+**Net effect (revised 2026-09-18):** origin and source-IP reputation are ruled out. One precise
+software-only test has reopened: a fresh token bound on first use to the exact firmware-derived
+fingerprint for the same reported MAC. Mitmproxy remains blocked by pinning. After that retest,
+what remains needs real Buddy3D hardware or significantly more invasive phone tooling:
 
-1. ~~**Probe `camera-service-api` for a direct registration path**~~ — **done 2026-07-09, negative.**
+1. **Repeat MAC/fingerprint consistency with a fresh token** using
+   `md5("AA:BB:CC:DD:EE:FF").hexdigest()` over the exact uppercase reported MAC.
+2. ~~**Probe `camera-service-api` for a direct registration path**~~ — **done 2026-07-09, negative.**
    No hidden endpoint, no informative error; see "camera-service-api surface probed directly"
    above. Also confirmed the genuine ESP32Cam is absent from this registry too.
-2. ~~**Check the next firmware for a protocol/rollout change**~~ — **done 2026-09-17.** A direct
+3. ~~**Check the next firmware for a protocol/rollout change**~~ — **done 2026-09-17.** A direct
    3.1.5→3.1.6 binary diff found no signaling, WebRTC-gate, protobuf, feature, endpoint, or
    `/c/info` change. The app delta is hardware-version classification; see
    [`firmware-3.1.6.md`](firmware-3.1.6.md). This rules out a client-side 3.1.6 protocol fix, but
    cannot rule out a server-side staged rollout.
-3. **SSL-unpinning on a jailbroken device**, if one becomes available — the only way left to see
+4. **SSL-unpinning on a jailbroken device**, if one becomes available — the only way left to see
    the real app's actual `connect.prusa3d.com`/`camera-service-api` traffic.
-4. **Get real Buddy3D hardware** to compare directly (the ESP32Cam on the account doesn't count —
+5. **Get real Buddy3D hardware** to compare directly (the ESP32Cam on the account doesn't count —
    it never implements WebRTC at all, see above).
-5. **If a real `webrtc` offer ever arrives**, verify `webrtc.py` end-to-end (currently untested).
+6. **If a real `webrtc` offer ever arrives**, verify `webrtc.py` end-to-end (currently untested).

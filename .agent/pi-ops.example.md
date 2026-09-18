@@ -8,7 +8,7 @@
 | Device | What | Access |
 |---|---|---|
 | **Pi** | Raspberry Pi Zero 2 W, Debian 13 (trixie). Runs the impersonator. | `ssh <PI_USER>@<PI_IP>` (SSH **key** auth, no password) |
-| **Camera** | Prusa Buddy3D Camera, firmware 3.1.5 (Rockchip, ARM). The RE target. | via Prusa Connect / SD-card overlay |
+| **Camera** | Prusa Buddy3D Camera, firmware 3.1.6 (Rockchip, ARM). The RE target. | via Prusa Connect / SD-card overlay |
 
 App lives on the Pi at `~/prusa-cam/` (== `/home/<PI_USER>/prusa-cam/`). Repo source of truth is
 `pi-impersonator/` in this checkout.
@@ -22,23 +22,16 @@ ssh $PI 'journalctl -u prusa-cam -n 50 --no-pager'                 # impersonato
 ssh $PI 'journalctl -fu prusa-cam'                                 # follow live
 ```
 
-## Deploy code changes (repo → Pi)
+## Deploy code changes (repo → Pi, only when explicitly authorized)
 
-The repo code is redacted/portable; `config.ini` (the live secret) stays only on the Pi, so
-**exclude it** from any sync.
+Repository edits/tests do not authorize a live deployment. When deployment has been explicitly
+requested, use the overlay-aware script; do not manually `rsync` or edit application files on the
+Pi. The script excludes `config.ini`, preserves the live secret, backs up the running Python files,
+handles the read-only overlay maintenance cycle, restarts services, and verifies them.
 
 ```bash
-PI=<PI_USER>@<PI_IP>   # fill in your Pi
 cd ~/Documents/Repositories/prusa-buddy3d-camera-re
-
-# back up what's running, then push the .py files (never config.ini / venv / systemd)
-ssh $PI 'mkdir -p ~/prusa-cam/backups/$(date +%Y%m%d_%H%M%S) && cp ~/prusa-cam/*.py "$_"'
-rsync -av --exclude 'config.ini' --exclude 'venv/' --exclude '__pycache__/' \
-      --exclude 'backups/' --exclude 'systemd/' --exclude '*.example' --exclude 'README.md' \
-      pi-impersonator/ $PI:~/prusa-cam/
-
-ssh $PI 'sudo systemctl restart prusa-cam prusa-rtsp'
-ssh $PI 'journalctl -u prusa-cam -n 30 --no-pager'    # confirm "/c/info upload: 200"
+PI=<PI_USER>@<PI_IP> pi-impersonator/deploy.sh
 ```
 
 Systemd units currently on the Pi use `User=<PI_USER>` and `/home/<PI_USER>/...` paths (the repo

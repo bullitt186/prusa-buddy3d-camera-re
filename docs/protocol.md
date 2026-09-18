@@ -1,6 +1,6 @@
 # Prusa Buddy3D Camera Protocol Specification
 
-Firmware 3.1.5, regression-checked against 3.1.6; Protocol Schema 4.4. Reversed from `lp_app`
+Firmware through 3.1.6; Protocol Schema 4.4. Reversed from `lp_app`
 ARM binaries via Ghidra. See [`firmware-3.1.6.md`](firmware-3.1.6.md) for the update delta.
 
 REST endpoints below (registration, `/c/snapshot`, `/c/info`) are cross-checked against Prusa's
@@ -34,10 +34,33 @@ Cookie: SESSID=<user session>
   PrusaLink — a different product from the Buddy3D camera, with no WebRTC involved. See
   `status.md` and `next-steps.md` Step 1 (deprioritized).
 - Response `201` returns a `camera_response` object containing the new `token` (exactly 20
-  alphanumeric characters) and `origin`.
+  alphanumeric characters) and `origin`. Prusa's registration documentation explicitly defines
+  this as a randomly generated combination of letters and numbers. The OpenAPI operation has no
+  request body: the authenticated user/team (from the session cookie), `printer_uuid`, and
+  optional `origin` are the complete registration inputs. No MAC, fingerprint, hardware version,
+  serial number, model, or firmware version participates in token generation.
 - The camera's role starts *after* this: it receives the token out-of-band (typed in or scanned
   via QR) and uses it for `fingerprint`+`token` auth (§2) and the `Token`/`Fingerprint` HTTP
   headers (§7–8). The camera has no way to self-register or change its own `origin`.
+
+### Firmware token provenance (3.1.6)
+
+The complete firmware trace confirms that the token is opaque input, not a device-derived value:
+
+1. `FUN_0006fb94` parses the scanned QR JSON and invokes `FUN_00068a50` (`CheckQrCodeToken`).
+2. `FUN_00068a50` reads the top-level `token` key. It rejects a missing token, the sentinel
+   `"none"`, or a value longer than 20 bytes; it performs no derivation or cryptographic check.
+   The separate serial-console command `AT+TOKEN=` requires exactly 20 bytes.
+3. `FUN_00082eec` (`setHttpToken`) persists the received value as `http.token` in
+   `/data/xhr_config.ini` and `/data/xhr_http_token.conf`. `FUN_000842d4` reloads that file at
+   startup.
+4. The same stored value is used unchanged in HTTP `Token` headers and the protobuf
+   `camera_authentication`/`send_sio_info` messages.
+
+There is therefore no algorithm for recreating a token from camera data. A valid token must be
+minted by Connect and delivered to the camera. On first camera communication, Connect associates
+the separately supplied fingerprint with that token; changing the fingerprint later produces
+`403`, but that binding happens after token creation and is not encoded in the token.
 
 ---
 
@@ -65,8 +88,14 @@ TLS: Required
 
 | Value | Description | Example |
 |-------|-------------|---------|
-| `fingerprint` | MD5 hex of WiFi MAC address (32 chars) | `a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4` |
-| `token` | Pairing token from Prusa Connect web UI (Camera > Token) | user-provided string |
+| `fingerprint` | Lowercase MD5 hex of the uppercase, colon-separated Wi-Fi MAC string (32 chars) | `md5("AA:BB:CC:DD:EE:FF")` |
+| `token` | Opaque, server-generated 20-character alphanumeric pairing token | supplied by Connect |
+
+The 3.1.6 fingerprint path is distinct from token creation. `FUN_00096cd8` obtains `wlan0`'s MAC
+with `SIOCGIFHWADDR` and formats it as `%02X:%02X:%02X:%02X:%02X:%02X`; if that fails it creates
+a random 10-character seed. `FUN_00097a4c` MD5-hashes that seed and emits 16 bytes as lowercase
+`%02x` hex for the wire fingerprint. The impersonator now performs the same normalization and
+derivation automatically from `wlan0`, and reports that normalized MAC in camera metadata.
 
 ---
 
@@ -105,7 +134,11 @@ message SetWebRtcMode {
 
 ### `set_rtsp_server_mode`
 
-Also dispatched internally as an action name within `configuration`. Single-byte or integer payload: `1` = disabled, `2` = enabled. Confirmed from `FUN_000c1388` and `FUN_000af67c` (VMA `0xaf67c`). On `2`, starts the RTSP server on port 554 (`rtsp://<ip>/live`). On `1`, stops it.
+Also dispatched internally as an action name within `configuration`. Single-byte or integer
+payload: `1` = disabled, `2` = enabled. On `2`, the firmware starts its configured RTSP service;
+on `1`, it stops it. Firmware 3.1.6 loads the port through a configuration getter and builds the
+advertised URL from runtime state. The shipped default has not yet been pinned from a configuration
+image or genuine status capture; older notes naming port 554 are not sufficient evidence.
 
 ```protobuf
 message SetRtspServerMode {
@@ -115,17 +148,22 @@ message SetRtspServerMode {
 
 ### `change_video_size`
 
-Single raw byte payload (not a length-delimited protobuf field): quality enum. **Immediately** applies the new resolution to the live encoder via `change_vi_resolution`. Handler VMA `0x71D50`.
+Single raw byte payload (not a length-delimited protobuf field). The shared 3.1.6 handler
+`FUN_00072f08` applies the corresponding live resolution and updates in-memory current state only
+after success. A third callback argument controls whether it also persists the value.
 
 | Byte value | Quality | Resolution |
 |---|---|---|
-| `5` | HD | 1280×720 |
-| `6` | FHD | 1920×1080 |
-| `7` | SD | 640×360 |
+| `5` | SD | 640×480 |
+| `6` | HD | 1280×720 |
+| `7` | FHD | 1920×1080 |
 
 ### `save_video_size`
 
-Same single-byte payload as `change_video_size`. **Only persists** the quality preference to `/data/xhr_config.ini` — does NOT change the live encoder. Handler VMA `0x6F954`. Sent after `change_video_size` to make the change survive reboot.
+Same raw-value domain as `change_video_size`. The recovered shared handler always performs the
+live change and persists only when its third callback argument is nonzero. Which indirectly
+registered Socket.IO event supplies flag `0` versus `1` remains to be recovered; do not infer that
+wiring from the event names. See `GAP-QUALITY-02` in the implementation gap tracker.
 
 ### `configuration`
 
@@ -606,12 +644,15 @@ if ((*(char *)(singleton + 0x13d) == '\0') &&   // webrtc_mode == 0
 }
 ```
 
-Both `webrtc_mode` (+0x13d) and `webrtc_status` (+0x13e) must be non-zero for an
-offer to be processed. The server only sends `set_webrtc_mode` to cameras whose
-`/c/info` response shows `origin` other than `OTHER`. An impersonator registered
-with `origin: OTHER` never receives `set_webrtc_mode`, so these bytes remain zero
-unless the impersonator sets them explicitly (e.g. by self-reporting them as enabled
-in the `status` message field `5.11`).
+The 3.1.6 gate uses configured `webrtc_mode` (+0x13d) and runtime `webrtc_status` (+0x13e): when
+both are zero, an inbound offer is rejected before peer work is queued. `set_webrtc_mode(1)`
+persists enabled mode and starts the service; `set_webrtc_mode(0)` persists disabled mode and stops
+it. Mode and runtime state must be reported truthfully rather than bypassed by hardcoding status.
+
+Older revisions attributed delivery of `set_webrtc_mode` to the camera registration `origin`.
+Controlled `WEB` versus `OTHER` tests disproved `origin` as the registry/viewer-auth gate; do not
+use it as an implementation condition. The currently observed block happens earlier: the test
+camera is absent from the camera-service registry and viewer authentication returns ACK `5`.
 
 ---
 
@@ -619,13 +660,15 @@ in the `status` message field `5.11`).
 
 | Protobuf Enum | Resolution | Config Value (`change_video_size` byte) | String |
 |---------------|------------|-------------|--------|
-| 1 | 640x480 | 7 | SD |
-| 2 | 1280x720 | 5 | HD |
-| 3 | 1920x1080 | 6 | FHD |
+| 1 | 640x480 | 5 | SD |
+| 2 | 1280x720 | 6 | HD |
+| 3 | 1920x1080 | 7 | FHD |
 
 Config Value is the single byte carried by the `change_video_size`/`save_video_size` events
-(5=HD, 6=FHD, 7=SD) — matches the impersonator's handler in `main.py`. (Earlier revisions of
-this table listed 5=SD/6=HD/7=FHD, which was wrong.)
+(`5=SD`, `6=HD`, `7=FHD`). This is confirmed independently by the protobuf-to-raw converter,
+configuration dispatcher, direct handler, and dimension selector in firmware 3.1.6. The current
+impersonator handler still uses the obsolete reversed mapping; track its correction under
+`GAP-QUALITY-01`.
 
 ---
 

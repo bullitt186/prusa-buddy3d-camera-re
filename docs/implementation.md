@@ -30,7 +30,6 @@ opencv-python                    # Camera capture + JPEG
 ```ini
 [identity]
 token = <paste from Prusa Connect web UI: Camera > Token>
-fingerprint = <MD5 hex of any stable identifier, 32 chars>
 
 [camera]
 firmware_version = 3.1.6
@@ -431,7 +430,8 @@ import asyncio, aiohttp, hashlib, time
 from pathlib import Path
 
 TOKEN = "your-token-from-prusa-connect"
-FINGERPRINT = hashlib.md5(b"any-stable-id").hexdigest()
+MAC = "AA:BB:CC:DD:EE:FF"  # normalized exactly as firmware's %02X formatter
+FINGERPRINT = hashlib.md5(MAC.encode("ascii")).hexdigest()
 SERVER = "connect.prusa3d.com"
 
 async def main():
@@ -466,7 +466,7 @@ This works without Socket.IO — the HTTP snapshot endpoint is independent.
 
 ```
 impersonator/
-├── config.ini          # Token, fingerprint, network info
+├── config.ini          # Token and camera/upload settings
 ├── main.py             # Entry point + state machine
 ├── proto.py            # Protobuf encode/decode helpers
 ├── signaling.py        # Socket.IO connection + auth + events

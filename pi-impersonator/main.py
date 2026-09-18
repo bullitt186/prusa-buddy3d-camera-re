@@ -11,6 +11,7 @@ from upload import upload_snapshot, upload_info
 from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
+from identity import fingerprint_from_mac, normalize_wifi_mac
 from proto import (
     WEBRTC_ANSWER,
     WEBRTC_CANDIDATE,
@@ -117,16 +118,15 @@ def load_config():
     return cfg
 
 def get_network_info():
-    mac = open('/sys/class/net/wlan0/address').read().strip()
+    raw_mac = open('/sys/class/net/wlan0/address').read().strip()
+    mac = normalize_wifi_mac(raw_mac)
     ip = subprocess.run(['ip', '-4', 'addr', 'show', 'wlan0'], capture_output=True, text=True).stdout
     ip = [l.split()[1].split('/')[0] for l in ip.splitlines() if 'inet ' in l][0]
     ssid_out = subprocess.run(['nmcli', '-t', '-f', 'active,ssid', 'dev', 'wifi'], capture_output=True, text=True).stdout
     ssid = next((l.split(':', 1)[1] for l in ssid_out.splitlines() if l.startswith('yes:')), '')
     return mac, ip, ssid
 
-async def snapshot_loop(cfg):
-    token = cfg['identity']['token']
-    fingerprint = cfg['identity']['fingerprint']
+async def snapshot_loop(cfg, token, fingerprint):
     width = cfg.getint('camera', 'width')
     height = cfg.getint('camera', 'height')
     interval = cfg.getint('upload', 'interval')
@@ -172,12 +172,13 @@ async def main():
     global streaming
     cfg = load_config()
     token = cfg['identity']['token']
-    fingerprint = cfg['identity']['fingerprint']
     width = cfg.getint('camera', 'width')
     height = cfg.getint('camera', 'height')
     server = cfg['upload']['server']
 
     mac, ip, ssid = get_network_info()
+    fingerprint = fingerprint_from_mac(mac)
+    log.info('Using firmware-style fingerprint derived from the normalized wlan0 MAC')
     status, body = await upload_info(token, fingerprint, mac, ip, ssid, server, width, height)
     log.info(f'/c/info upload: {status}')
     summary = summarize_info_response(body, token, fingerprint)
@@ -303,7 +304,7 @@ async def main():
             await sig.sio_emit('timelapse_get_file_list', empty)
 
     sig.on_trigger(handle_event)
-    asyncio.create_task(snapshot_loop(cfg))
+    asyncio.create_task(snapshot_loop(cfg, token, fingerprint))
     asyncio.create_task(start_local_http())
     await sig.connect()
     await sig.wait()

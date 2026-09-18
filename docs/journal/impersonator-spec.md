@@ -13,7 +13,7 @@ The impersonator needs these values (from a real paired camera or fresh pairing)
 ```ini
 # config.ini
 token = <pairing_token>           # From QR pairing or Prusa Connect UI
-fingerprint = <md5_hex>           # MD5 of MAC address (or any stable unique ID)
+fingerprint = <md5_hex>           # lowercase MD5 of uppercase colon-separated Wi-Fi MAC
 firmware_version = 3.1.5          # Must match known firmware
 model = Niceboy
 manufacturer = Niceboy            # Inferred, confirm via traffic capture

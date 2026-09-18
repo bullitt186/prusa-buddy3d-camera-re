@@ -1,17 +1,16 @@
 # Next Steps Plan — Prusa Buddy3D Camera Impersonator
 
-**Created:** 2026-07-07. **Revised 2026-07-09** after reading Prusa's official Buddy3D pairing
+**Created:** 2026-07-07. **Revised 2026-09-18** after tracing token and fingerprint provenance
+through the complete 3.1.6 decompilation. Earlier revisions incorporated Prusa's official Buddy3D pairing
 manual and PrusaLink camera guide — see `status.md`'s Bottom line for the full story.
 **Firmware follow-up (2026-09-17):** 3.1.6 was compared directly with 3.1.5 and contains no
 cloud-protocol change; see [`firmware-3.1.6.md`](firmware-3.1.6.md).
 **Context:** Camera impersonator works (snapshots, Socket.IO auth, `/c/info`, RTSP) but the
 mobile app never sends WebRTC offers and shows "Kamera-Kommunikation Fehlgeschlagen".
-Two leads are open: (a) a backend **registration/registry gate** on the token — **Step 2
-(mitmproxy) is now the priority, not Step 1** (`origin: LINK` was downgraded once we confirmed
-genuine Buddy3D cameras also register as `origin: OTHER`) — and (b) the **hardware-identity
-hypothesis** below, now narrowed to the MAC/OUI test (P.2) since the wire-level serial search
-(P.1) came back negative. Do these in order — each tier's results inform whether the next is
-worth attempting.
+The immediate software-only lead is an exact MAC/fingerprint consistency retest with a fresh
+token. Firmware hashes an uppercase, colon-separated MAC preimage; the 2026-07-09 one-off test did
+not preserve its preimage/casing and is not reproducible. The other remaining routes are backend
+rollout/enrollment, real Buddy3D hardware for comparison, or SSL-unpinning on a jailbroken client.
 
 ---
 
@@ -22,19 +21,19 @@ P.1 traced the remaining extended-status sub-block; the answer is "a hardware-de
 sent, but it's a small, guessable model string, not an unforgeable serial." Full evidence in
 `protocol.md`'s `extended_status` section and `status.md`'s "ruled out" table.
 
-**P.2 (MAC/OUI) is now the top priority (2026-07-09, updated later the same day).** `origin:
+**P.2 (MAC/OUI and fingerprint consistency) is again the top priority (corrected 2026-09-18).** `origin:
 LINK` was downgraded, then **both `origin` (WEB vs OTHER) and source-IP/network-reputation were
 live-tested and conclusively ruled out** — see `status.md`'s "origin and network-reputation ruled
 out by live experiment" section. A fresh, fully-correct-protocol `origin: OTHER` token got the
-identical ACK `5` from two different networks. That leaves MAC/OUI as the last untested
-"real-hardware allowlist" candidate reachable purely from software — see `status.md`'s
-"Recommended next steps" for the full current priority order (P.2 first, then mitmproxy).
+identical ACK `5` from two different networks. The exact 3.1.6 fingerprint algorithm now gives
+one narrowly scoped retest reachable purely from software; mitmproxy remains blocked by pinning.
 
 **Why this is a lead:** there is no user setting to enable/disable WebRTC, cameras are not tied
 to a user account (they can be resold), and pairing is QR-based — so WebRTC eligibility likely
 depends only on what the camera *reports about itself* (serial / MAC / HW identity, or a specific
-field combination). Today we send a **Pi-OUI MAC**, a **static fingerprint** (not `MD5(MAC)` as
-the firmware computes), an **invented HW string** (`NB.1.1.0` / `Pi Zero 2 W`), and **~90
+field combination). The deployed instance still sends a **Pi-OUI MAC** and its previously bound
+**static fingerprint**; repository code now derives the exact matching fingerprint but needs a
+fresh token before deployment. It also sends an **invented HW string** (`NB.1.1.0` / `Pi Zero 2 W`), and **~90
 `CameraInfoMessage` fields are un-mapped**. Provenance breakdown: see the "Current deployment
 state" table in [`status.md`](status.md). Field-5 sub-field mechanics overlap with Step 5 below.
 
@@ -79,20 +78,26 @@ rename/struct-typing from prior GUI sessions, so results are equivalent. Four sh
   already `status.md`'s #1 recommendation) rather than P.2/P.3 below (see the note at the top of
   this Priority section).
 
-### P.2 — MAC / OUI test (does the backend check the MAC or its vendor prefix?) — DONE 2026-07-09
+### P.2 — MAC / OUI test (does the backend check the MAC or its vendor prefix?) — NEEDS EXACT RETEST
 
 **Result: negative for the OUI tested, inconclusive for the mechanism in general.** No confirmed
 genuine Buddy3D MAC was ever found (checked the community GitHub repo and Prusa forums — one user
 even reported the camera ships with no MAC label at all). Used the best available proxy instead:
 a community teardown confirmed the WiFi chip is a **Realtek RTL8188FU**, and `00:E0:4C` is
 Realtek's common default/reference OUI for that chip family. Spoofed `wlan0` to
-`00:E0:4C:86:17:ff`, recomputed `MD5(MAC)` as the fingerprint (P.3, done as part of this test),
+`00:E0:4C:86:17:ff`, recomputed an `MD5(MAC)` fingerprint,
 registered a **fresh token** (reusing the existing token with just a changed fingerprint got
 `403` — the server validates fingerprint against what was recorded at first use, a new
 previously-undocumented finding), and redeployed. `client_authentication` → ACK `5`,
 registry lookup → `404`, identical to every other test. See `status.md`'s "ruled out" table.
-If a confirmed genuine MAC ever surfaces, this is worth re-running against it specifically —
-`00:E0:4C` was an educated guess, not a verified real-device value.
+
+**2026-09-18 correction from the complete 3.1.6 trace:** firmware does not hash an arbitrary
+Linux MAC representation. It formats the six bytes as uppercase colon-separated ASCII
+(`%02X:%02X:%02X:%02X:%02X:%02X`) and then MD5-hashes that exact byte string. The one-off test
+command/preimage was not preserved, and the recorded MAC uses mixed case, so the old result does
+not prove that the reported MAC and fingerprint were firmware-consistent. Retest with a fresh
+token and the exact uppercase preimage before treating MAC/fingerprint consistency as ruled out.
+`00:E0:4C` itself also remains an educated guess, not a verified genuine-camera OUI.
 
 - [x] **P.2.1** Find a genuine Niceboy/Prusa camera **OUI** — no confirmed one found; used the
   Realtek RTL8188FU chip's common reference OUI (`00:E0:4C`) as the best available proxy instead.
@@ -102,29 +107,31 @@ If a confirmed genuine MAC ever surfaces, this is worth re-running against it sp
   sudo ip link set wlan0 address <NICEBOY_OUI>:XX:XX:XX
   sudo ip link set wlan0 up
   ```
-- [x] **P.2.3** Recompute the fingerprint (P.3), update `config.ini`, restart `prusa-cam`, then
+- [ ] **P.2.3** Register a fresh token, deploy the automatic 3.1.6 fingerprint derivation, then
   re-run `/c/info` + the viewer-flow test. Note whether viewer ACK `5` or the
-  `/v1/cameras/<token>` 404 changes. **Done — no change either way.**
+  `/v1/cameras/<token>` 404 changes. The 2026-07-09 run returned no change, but its MD5 preimage
+  casing cannot be verified and therefore does not close this test.
   - **Confirmed (not just a caveat anymore):** the registry gate is keyed on the *token*
     (origin fixed at creation) — reusing the existing token with just a changed fingerprint got
     `403 Forbidden` (server validates fingerprint against what it recorded at first use), so a
     **fresh token** was required to test MAC/OUI in isolation. Done — see `status.md`.
 
-### P.3 — Make the fingerprint firmware-faithful (`MD5(MAC)`) — DONE 2026-07-09 (as part of P.2)
+### P.3 — Make the fingerprint firmware-faithful — EXACT ALGORITHM RECOVERED; LIVE RETEST OPEN
 
-Today `fingerprint` is read verbatim from `config.ini` and is not tied to the MAC we send — a
-mismatch could itself fail a check. The firmware computes `MD5(MAC)`
-(`lp_fingerprint_generation_tool.cpp`: MAC via `iw dev` → MD5, random fallback).
+The repository implementation now derives `fingerprint` from the same MAC it reports. Firmware
+3.1.6 obtains `wlan0`'s six MAC bytes with the
+`SIOCGIFHWADDR` ioctl, formats them as uppercase colon-separated ASCII, and emits the lowercase
+hex MD5 digest of that exact string. If MAC lookup fails, it hashes a random 10-character seed.
 
-- [x] **P.3.1** Compute it instead of reading a static value (in `main.py`) — done manually for
-  the P.2 test (`MD5(new_mac)` via a one-off Python one-liner, not wired into `main.py` itself
-  yet). The `main.py` code change described here (auto-compute at runtime, `config.ini` as
-  override) is still open if a permanent fix is wanted — low priority since the live test already
-  answered the empirical question this existed to support.
+- [x] **P.3.1** Compute `md5(mac.upper().encode("ascii")).hexdigest()` over a normalized
+  `AA:BB:CC:DD:EE:FF` string instead of reading a static final value. Implemented in
+  `pi-impersonator/identity.py` with unit coverage. **Deployment still needs a fresh token:** the
+  current token is already bound to its old fingerprint and changing it returns `403`.
 - [x] **P.3.2** Confirmed the "careful" concern was real: changing fingerprint against the
   *existing* token broke it (`403`). Worked around by registering a fresh token instead — see P.2.
 
-**Order:** P.1 first (decisive, no risk), then P.2 + P.3 as quick empirical tests. All three done.
+**Current order:** P.1 is complete. Repeat P.2 + P.3 once with the exact uppercase MAC preimage
+and a fresh token; then return to real hardware or SSL-unpinning if the gate remains unchanged.
 
 ---
 
@@ -638,7 +645,7 @@ backend publishes that gate WebRTC in the app.
 ```
 [2026-07-09, done] origin (WEB vs OTHER) ruled out — live experiment
 [2026-07-09, done] source-IP/network reputation ruled out — live experiment from 2nd network
-[2026-07-09, done] MAC/OUI (guessed Realtek prefix) ruled out — live experiment
+[2026-09-18, open] repeat guessed-OUI test with exact uppercase MAC → MD5 fingerprint preimage
 [2026-07-09, blocked] Step 2 (mitmproxy) — certificate pinning on the app's core API traffic
 [2026-07-09, done] camera-service-api probed directly (root/list/POST/OPTIONS/health/docs) —
                     no hidden endpoint, no informative error, ESP32Cam also absent from registry

@@ -12,8 +12,8 @@ protocol from the ARM firmware and reimplements it so you can:
 - **Proxy** an already-registered camera's cloud WebRTC stream to a local RTSP URL and
   send control commands (reboot, resolution, IR mode). → [`proxy/`](proxy/)
 
-> **Status:** the Pi impersonator is **fully working for local use** — it registers, uploads
-> snapshots, streams RTSP, and handles video-quality tier-switching. Full cloud WebRTC playback
+> **Status:** the Pi impersonator is **working for core local use** — it registers, uploads
+> snapshots, streams RTSP, and has partial video-quality tier-switching. Full cloud WebRTC playback
 > in the Prusa app is blocked by a backend gate (the camera isn't in Prusa's camera registry).
 > See [`docs/status.md`](docs/status.md) for the exact confirmed-vs-pending line.
 
@@ -21,6 +21,7 @@ protocol from the ARM firmware and reimplements it so you can:
 
 | If you want to… | Read |
 |---|---|
+| Implement the remaining firmware-parity gaps | [`docs/firmware-implementation-gap-tracker.md`](docs/firmware-implementation-gap-tracker.md) ⭐ |
 | Know what actually works vs. what's still theory | [`docs/status.md`](docs/status.md) ⭐ |
 | Understand the wire protocol (the spec) | [`docs/protocol.md`](docs/protocol.md) |
 | **Set up the Pi impersonator (one command)** | [`pi-impersonator/README.md`](pi-impersonator/README.md) ⭐ |
@@ -44,6 +45,7 @@ protocol from the ARM firmware and reimplements it so you can:
 │   ├── implementation.md     build guide with constants & payload shapes
 │   ├── reverse-engineering.md how to reproduce the RE (Ghidra, VMAs, techniques)
 │   ├── firmware-3.1.6.md     direct 3.1.5 → 3.1.6 binary/package delta
+│   ├── firmware-implementation-gap-tracker.md  actionable parity backlog + decompiler evidence
 │   ├── tools.md              every tool used
 │   ├── sources.md            firmware image + third-party projects referenced
 │   ├── openapi.yaml           Prusa's official Camera API spec (v0.22.0, REST only — no WebRTC)

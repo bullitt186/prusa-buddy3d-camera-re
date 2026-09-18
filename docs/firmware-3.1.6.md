@@ -75,10 +75,21 @@ hashes—including the call-target hash—match exactly for all protocol-critica
 | WebRTC answer/candidate encoder | `0x000a2cd8` | `0x000a3e90` |
 | WebRTC numeric-type translator | `0x000b5be4` | `0x000b6d9c` |
 | local ICE candidate emission | `0x000b6428` | `0x000b75e0` |
+| QR token parser/validator | `0x00067898` | `0x00068a50` |
+| QR payload dispatcher | `0x0006e9dc` | `0x0006fb94` |
+| token persistence (`setHttpToken`) | `0x00081d34` | `0x00082eec` |
+| fingerprint seed generation | `0x00095b20` | `0x00096cd8` |
+| fingerprint MD5/hex encoding | `0x00096894` | `0x00097a4c` |
 
-The latter three also confirm the camera-side wire enum remains `1=request`, `2=answer`,
+The three WebRTC encode/translate/emission rows also confirm the camera-side wire enum remains `1=request`, `2=answer`,
 `3=offer`, `4=candidate`. No 3.1.6 enrollment request, new endpoint, authentication field,
 Socket.IO event, TURN configuration path, or WebRTC enable mechanism was found. **[confirmed]**
+
+The token trace is unchanged as well. Connect—not the firmware—creates the random 20-character
+alphanumeric token. Firmware accepts it as the QR JSON's top-level `token` value and persists it;
+there is no device-side token derivation. The separate fingerprint is generated from the uppercase,
+colon-separated `wlan0` MAC (random 10-character fallback) and MD5-encoded as lowercase hex before
+transmission. Full provenance and function flow are documented in [`protocol.md`](protocol.md#firmware-token-provenance-316).
 
 **Conclusion:** keep protocol schema `4.4`, feature/capability payloads, signaling behavior, and
 `Buddy3D-C1` model identity unchanged. Advertise firmware `3.1.6` in `/c/info`, status/features

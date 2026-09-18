@@ -57,6 +57,43 @@ For a repeatable one-off decompile, use the checked-in helper:
 
 See [`firmware-3.1.6.md`](firmware-3.1.6.md) for the version-to-version findings.
 
+### Recreate the complete 3.1.6 export used by the gap tracker
+
+The implementation tracker cites line numbers in a complete per-function export. Recreate it with
+the checked-in `ExportAllDecomp.java` script; do not put the resulting copyrighted decompilation in
+Git:
+
+```bash
+mkdir -p ~/firmware-analysis/decompiled-3.1.6-full
+~/tools/ghidra_12.1.3_PUBLIC/support/analyzeHeadless \
+  ~/firmware-analysis/ghidra-projects buddy3d-3.1.6 \
+  -process lp_app -noanalysis -readOnly \
+  -scriptPath "$PWD/research/ghidra" \
+  -postScript ExportAllDecomp.java \
+  "$HOME/firmware-analysis/decompiled-3.1.6-full"
+```
+
+The output must contain `functions.tsv`, `summary.txt`, and `functions/*.c`. Before relying on the
+tracker's line anchors, verify that `summary.txt` identifies `lp_app`, reports `failed=0`, and that
+the expected file exists, for example:
+
+```bash
+grep -E '^(program|total|success|failed)=' \
+  ~/firmware-analysis/decompiled-3.1.6-full/summary.txt
+test -f ~/firmware-analysis/decompiled-3.1.6-full/functions/000a1394__FUN_000a1394.c
+```
+
+Generate the strings file cited by the tracker from the same 3.1.6 binary:
+
+```bash
+strings ~/firmware-analysis/cam-3.1.6/oem-extracted/*/oem/usr/sbin/lp_app \
+  > ~/firmware-analysis/cam-3.1.6/lp_app.strings
+```
+
+If the project was reanalysed and line numbers moved, locate evidence by the function VMA in the
+filename and then by the constants/branches described in the tracker. A missing local export is a
+recovery prerequisite, not permission to substitute an older prose claim.
+
 ## Key Analysis Techniques
 
 ### Finding functions in a stripped binary
@@ -86,27 +123,37 @@ See [`firmware-3.1.6.md`](firmware-3.1.6.md) for the version-to-version findings
 
 Each Send* function's literal pool contains the event name string near `"Checking sio_client and locking mutex"` and `"Binary message with X sent"`.
 
-## Key VMAs
+## Key 3.1.6 VMAs
 
 | Address | Function |
 |---------|----------|
-| `0x0009c294` | `pb_encode_string_cus` (nanopb callback encoder) |
-| `0x0009a938` | `pb_encode_tag` (tag encoder with type jump table) |
-| `0x0009a9c4` | `pb_encode_string` (writes varint len + bytes) |
-| `0x0009b0cc` | `pb_encode` (main encode entry, takes stream + descriptor + struct) |
-| `0x0009a648` | `pb_ostream_from_buffer` (init output stream) |
-| `0x000a1ea0` | `SendAuthMessage` |
-| `0x000a7d18` | `SendCameraSupportedFeatures` |
-| `0x000a23b8` | `SendProtobufSchemaVersion` |
-| `0x000a322c` | WebRTC incoming message parser |
-| `0x000b87b4` | `ProcessingMessage` (WebRTC message dispatch) |
-| `0x00061bbc` | `do_update_camera_attr` (JSON builder for /c/info) |
-| `0x0009ea50` | Feature list string builder |
-| `0x000a6510` | `SetVideoQualityFromProtobuf` |
-| `0x000a003c` | `TranslateVideoProtobufToString` |
-| `0x0005e274` | HTTP snapshot upload function |
+| `0x00062d74` | `/c/info` JSON and HTTP request builder |
+| `0x00063bfc` | `/c/info` dirty/retry service loop |
+| `0x0005f42c` | Snapshot capture and HTTP upload |
+| `0x0006cf34` | QR/configuration semantic dispatcher |
+| `0x00072f08` | Raw quality live-change and optional-persistence handler |
+| `0x0007d7c4` | Raw quality value to dimensions |
+| `0x000a76c8` | Protobuf quality enum to raw value |
+| `0x000a11f4` | Protobuf quality enum to string |
+| `0x00097e78` | Interface MAC retrieval and uppercase formatting |
+| `0x00096cd8` | Fingerprint seed selection and random fallback |
+| `0x00097a4c` | Fingerprint MD5/lowercase-hex encoding |
+| `0x000a3058` | Camera authentication sender |
+| `0x000a3570` | Protobuf-schema-version sender |
+| `0x000a1394` | Camera status construction/sender |
+| `0x000a8ed0` | Supported-feature construction/hash/sender |
+| `0x000a3e90` | WebRTC answer/candidate encoder and sender |
+| `0x000b6d9c` | WebRTC numeric-type translator |
+| `0x000b75e0` | Local ICE candidate emission |
+| `0x000b94ac` | WebRTC enable/disable mode application |
+| `0x000b996c` | WebRTC offer gate and peer-work enqueue |
 
-## Descriptor Table VMAs
+## Legacy descriptor-table leads
+
+The addresses below were recovered from the 3.1.5 baseline. They are useful for matching structure
+and locating shifted tables, but **must not be copied as 3.1.6 tag evidence**. Re-resolve the table
+and sender assignment path in the 3.1.6 project. The implementation tracker explicitly names the
+messages whose 3.1.6 nested annotations are still prerequisites.
 
 | Address | Message | Fields |
 |---------|---------|--------|
@@ -119,18 +166,18 @@ Each Send* function's literal pool contains the event name string near `"Checkin
 | `0x3f65c8` | WebRtcConnectionType | 6 |
 | `0x3f6680` | WebRTCMessage | 9 |
 
-## Ghidra Scripts Used
+## Checked-in Ghidra scripts
 
-All in `/tmp/`, referenced by filename:
+All maintained scripts are in `research/ghidra/` and are referenced by filename through
+`-scriptPath "$PWD/research/ghidra"`:
 
 | Script | Purpose |
 |--------|---------|
-| `DumpDescriptors.java` | Dumps nanopb field descriptor tables from known rodata addresses |
-| `DecompileSenders.java` | Finds Send* functions via literal pool xrefs |
-| `ForceDecompile.java` | Creates functions at discovered addresses and decompiles |
-| `ExtractRemaining.java` | Decompiles ProcessingMessage, features builder, emit helpers |
-| `ExtractFinal.java` | Incoming events, HTTP upload, video quality enum, timers |
-| `ExtractLast.java` | `do_update_camera_attr` (JSON) and feature list assembly |
+| `ExportAllDecomp.java` | Exports every function to one C file plus TSV/summary metadata |
+| `DecompileFunctions.java` | Decompiles selected VMAs without writing a corpus |
+| `ExportFidHashes.java` | Exports relocation-insensitive Function-ID hashes |
+| `ListXrefs.java` | Lists references to addresses and their containing functions |
+| `ShowData.java` | Resolves raw words and pointer/string targets at specified addresses |
 
 ## Community Reference
 
@@ -138,10 +185,11 @@ https://github.com/tlchandler/Improved-Buddy3D-Camera-for-Prusa-CORE-One
 
 Runs custom scripts on the camera via SD card override (`/mnt/sdcard/lp_app.sh`). Confirmed: config file paths, token source, upload interval units, RTSP mode values, video capture via Rockchip MPI.
 
-## What Remains Unknown
+## Remaining recovery work
 
-- Exact content of `"options"` and `"capabilities"` JSON fields (likely empty arrays work)
-- Whether `"features"` goes into protobuf field 1 or another field in the 6-field message
-- Exact sub-message field assignments for CameraInfoMessage fields 1-6
-
-All resolvable by trial against the live server.
+Do not use this older list as a guess queue. The authoritative, current prerequisite list is
+[`firmware-implementation-gap-tracker.md` § Areas where decompilation still does not remove all
+ambiguity](firmware-implementation-gap-tracker.md#areas-where-decompilation-still-does-not-remove-all-ambiguity).
+It currently includes the trigger/configuration descriptors, remaining nested status annotations,
+ICE subfields, timelapse-list fields, and `client_trigger` subtype/result enums. Recover those from
+the 3.1.6 descriptor and assignment paths before implementing their dependent gaps.

@@ -7,7 +7,8 @@ WebRTC. The root filesystem is locked read-only with overlayfs so abrupt power c
 (the Pi powers on/off with the printer) can't corrupt the SD card.
 
 Protocol spec: [`../docs/protocol.md`](../docs/protocol.md) —
-what works vs. what's still gated: [`../docs/status.md`](../docs/status.md).
+what works vs. what's still gated: [`../docs/status.md`](../docs/status.md) —
+implementation backlog: [`../docs/firmware-implementation-gap-tracker.md`](../docs/firmware-implementation-gap-tracker.md).
 
 ## Hardware
 
@@ -30,7 +31,7 @@ systemd units, and deploys the code. When it finishes, drop in your `config.ini`
 
 ```bash
 scp pi-impersonator/config.ini.example pi@<PI_IP>:~/prusa-cam/config.ini
-ssh pi@<PI_IP> 'nano ~/prusa-cam/config.ini'   # set token + fingerprint
+ssh pi@<PI_IP> 'nano ~/prusa-cam/config.ini'   # set token
 ssh pi@<PI_IP> 'sudo systemctl restart prusa-cam'
 ```
 
@@ -47,9 +48,13 @@ PI=pi@<PI_IP> pi-impersonator/deploy.sh --enable-overlay
 | Key | Value |
 |---|---|
 | `token` | Camera registration token from Prusa Connect (Web UI → Camera → *Token*) |
-| `fingerprint` | Any random 32-char hex string, fixed per device: `python3 -c "import secrets; print(secrets.token_hex(16))"` |
 | `width` / `height` | Snapshot resolution (default `1920` / `1080`) |
 | `interval` | Snapshot upload interval in seconds (default `10`) |
+
+The fingerprint is generated automatically from `wlan0` exactly like firmware 3.1.6: normalize
+the MAC as uppercase colon-separated ASCII and send its lowercase MD5 digest. Connect binds this
+fingerprint on a token's first use, so use a fresh token when migrating from an older deployment
+that configured a static fingerprint.
 
 ## Architecture
 
@@ -78,6 +83,7 @@ writing `/etc/prusa-cam/quality.env` and restarting `rpicam-source`.
 | `signaling.py` | Socket.IO/Engine.IO client → `camera-signaling.prusa3d.com` |
 | `webrtc.py` | WebRTC offer/answer via GStreamer `webrtcbin` |
 | `upload.py` | HTTP uploads → `webcam.connect.prusa3d.com` |
+| `identity.py` | Firmware-faithful MAC normalization and fingerprint derivation |
 | `proto.py` | Minimal protobuf encode/decode (nanopb wire format) |
 | `camera.py` | JPEG snapshot via `gst-launch-1.0` reading from `stream_mux.py` on port 8888 (avoids fighting `rpicam-vid` for the sensor — libcamera is single-consumer) |
 | `rtsp_server.py` | GStreamer `GstRtspServer` → `rtsp://0.0.0.0:8554/live` |
@@ -89,6 +95,24 @@ writing `/etc/prusa-cam/quality.env` and restarting `rpicam-source`.
 | `deploy.sh` | Overlay-aware deploy helper (dev: fast rsync; prod: maintenance dance) |
 | `bootstrap.sh` | One-command fresh-Pi provisioning |
 | `systemd/` | Ready-to-install unit files (`User=pi` templates — `bootstrap.sh` adapts them) |
+
+## Local development
+
+The source-level tests use only the Python standard library and run without Pi/GStreamer runtime
+packages:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q pi-impersonator tests
+```
+
+Firmware-parity work must name and update a `GAP-*` item in the implementation tracker. Follow the
+evidence precedence and completion workflow in [`../CLAUDE.md`](../CLAUDE.md); in particular, do
+not invent fields whose descriptor is still marked as required.
+
+For coding agents, repository edits and these tests are local-only. They do not authorize running
+the deployment/bootstrap commands below, changing a Connect token, or operating a physical device.
+Those actions require an explicit user request and the private `.agent/pi-ops.md` runbook.
 
 ## Deployment
 
@@ -137,7 +161,7 @@ python3 -m venv ~/prusa-cam/venv --system-site-packages
 # 3. Copy source, configure
 cp pi-impersonator/* ~/prusa-cam/
 cp ~/prusa-cam/config.ini.example ~/prusa-cam/config.ini
-# edit config.ini: token + fingerprint
+# edit config.ini: token
 
 # 4. Systemd units (adjust User= to your username)
 sed "s/^User=pi$/User=$USER/; s|/home/pi/|/home/$USER/|g" \

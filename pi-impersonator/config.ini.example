@@ -3,12 +3,11 @@
 ; token       - camera registration token from Prusa Connect
 ;               (Web UI or app > Camera > Token, or the "add camera" QR screen).
 ;               This is the credential that authenticates this device AS the camera.
-; fingerprint - a stable 32-hex-char device id you invent once and keep constant.
-;               Any random 128-bit hex string works; the camera reuses the same one.
+; fingerprint - generated automatically from wlan0 exactly like firmware 3.1.6:
+;               md5("AA:BB:CC:DD:EE:FF").hexdigest(). Do not configure it here.
 
 [identity]
 token = <REGISTRATION_TOKEN>
-fingerprint = 00000000000000000000000000000000
 
 [camera]
 width = 1920
