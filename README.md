@@ -1,8 +1,8 @@
 # Prusa Buddy3D Camera — Protocol Reverse Engineering & Impersonator
 
-Reverse engineering of the **Prusa Buddy3D Camera** cloud protocol (firmware `3.1.5`),
-plus two working implementations that let a Linux box (Raspberry Pi) take the camera's
-place or pull its stream locally.
+Reverse engineering of the **Prusa Buddy3D Camera** cloud protocol (firmware through `3.1.6`),
+plus two working implementations that let a Linux box (Raspberry Pi)
+take the camera's place or pull its stream locally.
 
 The camera normally only works through Prusa Connect's cloud. This project documents its
 protocol from the ARM firmware and reimplements it so you can:
@@ -26,6 +26,7 @@ protocol from the ARM firmware and reimplements it so you can:
 | **Set up the Pi impersonator (one command)** | [`pi-impersonator/README.md`](pi-impersonator/README.md) ⭐ |
 | Run the local RTSP proxy / control tool | [`proxy/README.md`](proxy/README.md) |
 | Reproduce or extend the RE work | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
+| See exactly what changed in firmware 3.1.6 | [`docs/firmware-3.1.6.md`](docs/firmware-3.1.6.md) |
 | See what was tried and failed | [`docs/dead-ends.md`](docs/dead-ends.md) |
 | Know the tools used | [`docs/tools.md`](docs/tools.md) |
 | Know the firmware / project sources | [`docs/sources.md`](docs/sources.md) |
@@ -42,6 +43,7 @@ protocol from the ARM firmware and reimplements it so you can:
 │   ├── protocol.md           definitive wire-protocol spec (single source of truth)
 │   ├── implementation.md     build guide with constants & payload shapes
 │   ├── reverse-engineering.md how to reproduce the RE (Ghidra, VMAs, techniques)
+│   ├── firmware-3.1.6.md     direct 3.1.5 → 3.1.6 binary/package delta
 │   ├── tools.md              every tool used
 │   ├── sources.md            firmware image + third-party projects referenced
 │   ├── openapi.yaml           Prusa's official Camera API spec (v0.22.0, REST only — no WebRTC)

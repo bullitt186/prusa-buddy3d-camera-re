@@ -357,7 +357,7 @@ class PrusaSignaling:
             auth={'token': self.token},
             headers={
                 'Origin': 'https://connect.prusa3d.com',
-                'User-Agent': 'Mozilla/5.0 (Linux; rv1106) Buddy3D/3.1.5',
+                'User-Agent': f'Mozilla/5.0 (Linux; rv1106) Buddy3D/{FIRMWARE_VERSION}',
             },
             transports=['websocket'],
             wait_timeout=10,

@@ -33,7 +33,7 @@ token = <paste from Prusa Connect web UI: Camera > Token>
 fingerprint = <MD5 hex of any stable identifier, 32 chars>
 
 [camera]
-firmware_version = 3.1.5
+firmware_version = 3.1.6
 model = Buddy3D-C1
 manufacturer = Niceboy
 
@@ -269,7 +269,7 @@ async def upload_info(token, fingerprint, mac, ip, ssid, server="connect.prusa3d
             "name": camera_name,
             "driver": "private",
             "model": "Buddy3D-C1",
-            "firmware": "3.1.5",
+            "firmware": "3.1.6",
             "manufacturer": "Niceboy",
             "trigger_scheme": "THIRTY_SEC",
             "resolution": {"width": width, "height": height},
@@ -386,11 +386,15 @@ async def handle_webrtc(data):
         
         response = encode_protobuf({
             1: request_id,
-            2: "answer",
+            2: 2,  # numeric camera-side enum: answer
             3: answer_sdp,
         })
         await sio.emit('webrtc', response)
 ```
+
+Do not reuse the viewer-side nested `WebRtcSignal` schema here. Connect translates it into the
+firmware's flat camera envelope. Camera-side values are `1=request`, `2=answer`, `3=offer`, and
+`4=candidate`; inbound SDP is field 4, while outbound answer/candidate payloads are field 3.
 
 ### WebRTC Details
 - Codec: H.264, Constrained Baseline, Level 3.1
@@ -491,7 +495,7 @@ SIGNALING_URL = "wss://camera-signaling.prusa3d.com"
 SNAPSHOT_URL = "https://connect.prusa3d.com/c/snapshot"
 INFO_URL = "https://connect.prusa3d.com/c/info"
 PROTOCOL_VERSION = "4.4"
-FIRMWARE_VERSION = "3.1.5"
+FIRMWARE_VERSION = "3.1.6"
 MODEL = "Buddy3D-C1"
 MANUFACTURER = "Niceboy"
 USER_AGENT = "Buddy3D Camera"

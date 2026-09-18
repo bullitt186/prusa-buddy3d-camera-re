@@ -2,6 +2,8 @@
 
 **Created:** 2026-07-07. **Revised 2026-07-09** after reading Prusa's official Buddy3D pairing
 manual and PrusaLink camera guide — see `status.md`'s Bottom line for the full story.
+**Firmware follow-up (2026-09-17):** 3.1.6 was compared directly with 3.1.5 and contains no
+cloud-protocol change; see [`firmware-3.1.6.md`](firmware-3.1.6.md).
 **Context:** Camera impersonator works (snapshots, Socket.IO auth, `/c/info`, RTSP) but the
 mobile app never sends WebRTC offers and shows "Kamera-Kommunikation Fehlgeschlagen".
 Two leads are open: (a) a backend **registration/registry gate** on the token — **Step 2

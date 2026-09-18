@@ -11,7 +11,16 @@ from upload import upload_snapshot, upload_info
 from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
-from proto import encode_message, decode_message
+from proto import (
+    WEBRTC_ANSWER,
+    WEBRTC_CANDIDATE,
+    WEBRTC_OFFER,
+    WEBRTC_REQUEST,
+    decode_camera_webrtc_message,
+    decode_message,
+    encode_camera_webrtc_message,
+    encode_message,
+)
 import quality
 import local_http
 
@@ -181,13 +190,13 @@ async def main():
     loop = asyncio.get_event_loop()
 
     async def on_webrtc_answer(request_id, sdp_text):
-        msg = encode_message({1: request_id, 2: 'answer', 3: sdp_text})
-        await sig.sio.emit('webrtc', msg)
+        msg = encode_camera_webrtc_message(request_id, WEBRTC_ANSWER, sdp_text)
+        await sig.sio_emit('webrtc', msg)
         log.info(f'Sent WebRTC answer for {request_id[:16]}...')
 
     async def on_ice_candidate(request_id, candidate, mline_index):
-        msg = encode_message({1: request_id, 2: 'candidate', 3: candidate})
-        await sig.sio.emit('webrtc', msg)
+        msg = encode_camera_webrtc_message(request_id, WEBRTC_CANDIDATE, candidate)
+        await sig.sio_emit('webrtc', msg)
 
     webrtc = PrusaWebRTC(on_answer=on_webrtc_answer, on_ice_candidate=on_ice_candidate)
     webrtc.start()
@@ -195,22 +204,32 @@ async def main():
     async def handle_event(event, data):
         global streaming, current_quality
         if event == 'webrtc' and isinstance(data, bytes):
-            msg = decode_message(data)
-            request_id = msg.get(1, '')
-            msg_type = msg.get(2, '')
-            sdp = msg.get(3, '')
-            log.info(f'WebRTC event: type={msg_type} id={request_id[:16]}...')
-            if msg_type == 'offer':
+            msg = decode_camera_webrtc_message(data)
+            request_id = msg['request_id']
+            msg_type = msg['msg_type']
+            payload = msg['payload']
+            log.info(
+                f'WebRTC event: type={msg_type} id={request_id[:16]}... '
+                f'client={msg["client_id"][:16]}... payload_len={len(payload)}'
+            )
+            if msg_type == WEBRTC_OFFER:
+                if not request_id or not payload:
+                    log.error('Ignoring malformed WebRTC offer without request ID or SDP')
+                    return
                 streaming = True
                 log.info('Pausing snapshots for WebRTC stream')
                 await asyncio.sleep(1)
-                webrtc.handle_offer(request_id, sdp, loop)
-            elif msg_type == 'candidate':
-                webrtc.add_ice_candidate(sdp)
-            elif msg_type == 'request':
-                streaming = False
-                webrtc._teardown()
-                log.info('WebRTC stream ended, resuming snapshots')
+                webrtc.handle_offer(request_id, payload, loop)
+            elif msg_type == WEBRTC_CANDIDATE:
+                # GStreamer's add-ice-candidate expects the attribute value,
+                # while some server messages include the SDP "a=" prefix.
+                candidate = payload[2:] if payload.startswith('a=') else payload
+                webrtc.add_ice_candidate(candidate)
+            elif msg_type == WEBRTC_REQUEST:
+                # lp_app 3.1.6 logs this as unsupported; it is not a teardown.
+                log.warning('Ignoring unsupported WebRTC request/start message')
+            else:
+                log.warning(f'Ignoring unknown camera-side WebRTC message type {msg_type}')
         elif event == 'trigger' and isinstance(data, bytes):
             msg = decode_message(data)
             request_id = extract_request_id(msg)

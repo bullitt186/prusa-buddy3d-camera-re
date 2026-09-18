@@ -20,31 +20,42 @@ This revealed: server URLs, event names, log format strings, HTTP headers, confi
 
 ## Ghidra Setup
 
-**Installed at:**
-- JDK 21: `~/tools/jdk-21.0.11+10/`
-- Ghidra 12.1.2: `~/tools/ghidra_12.1.2_PUBLIC/`
-- Project: `/tmp/ghidra_project/cam_analysis` (binary imported as ARM:LE:32:v7)
+**Installed at (current workstation):**
+- JDK 21: system OpenJDK (`/usr/lib/jvm/java-21-openjdk-amd64/`)
+- Ghidra 12.1.3: `~/tools/ghidra_12.1.3_PUBLIC/`
+- Projects: `~/firmware-analysis/ghidra-projects/buddy3d-3.1.5` and
+  `~/firmware-analysis/ghidra-projects/buddy3d-3.1.6` (both imported as `ARM:LE:32:v7`)
 
 **Running headless scripts:**
 ```bash
-export JAVA_HOME=~/tools/jdk-21.0.11+10/Contents/Home
-export PATH=$JAVA_HOME/bin:$PATH
-
-~/tools/ghidra_12.1.2_PUBLIC/support/analyzeHeadless \
-  /tmp/ghidra_project cam_analysis \
+~/tools/ghidra_12.1.3_PUBLIC/support/analyzeHeadless \
+  ~/firmware-analysis/ghidra-projects buddy3d-3.1.6 \
   -process lp_app \
   -noanalysis \
   -postScript YourScript.java \
-  -scriptPath "/tmp"
+  -scriptPath "$PWD/research/ghidra"
 ```
 
-Use `-noanalysis` since the binary is already analyzed. Scripts go in `/tmp/` and must be referenced by filename only.
+Use `-noanalysis` since the binary is already analyzed. Scripts must be referenced by filename
+only.
 
 **Opening GUI:**
 ```bash
-~/tools/ghidra_12.1.2_PUBLIC/ghidraRun
+~/tools/ghidra_12.1.3_PUBLIC/ghidraRun
 ```
-Open project `/tmp/ghidra_project/cam_analysis`, file `lp_app`.
+Open either project under `~/firmware-analysis/ghidra-projects/`, file `lp_app`.
+
+For a repeatable one-off decompile, use the checked-in helper:
+
+```bash
+~/tools/ghidra_12.1.3_PUBLIC/support/analyzeHeadless \
+  ~/firmware-analysis/ghidra-projects buddy3d-3.1.6 \
+  -process lp_app -noanalysis -readOnly \
+  -scriptPath "$PWD/research/ghidra" \
+  -postScript DecompileFunctions.java 0x62d74 0xb996c
+```
+
+See [`firmware-3.1.6.md`](firmware-3.1.6.md) for the version-to-version findings.
 
 ## Key Analysis Techniques
 

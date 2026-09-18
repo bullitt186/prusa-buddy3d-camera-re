@@ -15,6 +15,7 @@ tokens.json
 # ── Firmware & decompilation artifacts — excluded for IP reasons ──────────
 # (see docs/sources.md — the firmware is referenced, never redistributed)
 *.img
+*.tar
 *.gzf
 lp_app*
 *.bin

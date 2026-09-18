@@ -1,8 +1,8 @@
 # Agent instructions — Prusa Buddy3D Camera RE
 
-Reverse engineering of the Prusa Buddy3D Camera cloud protocol (firmware `3.1.5`) plus two
-working reimplementations. Full orientation is in [`README.md`](README.md); this file is the
-fast path for coding agents.
+Reverse engineering of the Prusa Buddy3D Camera cloud protocol (firmware through `3.1.6`)
+plus two working reimplementations. Full orientation is in
+[`README.md`](README.md); this file is the fast path for coding agents.
 
 ## Where things are
 

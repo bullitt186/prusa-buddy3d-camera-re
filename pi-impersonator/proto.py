@@ -1,5 +1,12 @@
 import struct
 
+# Camera-side WebRTC message enum recovered from lp_app 3.1.6
+# (translateWebRtcMsgTypeUintToString / SendWebRTCMessage).
+WEBRTC_REQUEST = 1
+WEBRTC_ANSWER = 2
+WEBRTC_OFFER = 3
+WEBRTC_CANDIDATE = 4
+
 class Float32:
     def __init__(self, value):
         self.value = float(value)
@@ -81,3 +88,38 @@ def decode_message(data):
         else:
             break
     return fields
+
+
+def decode_camera_webrtc_message(data):
+    """Decode the flat WebRTC envelope used between Connect and the camera.
+
+    This is deliberately different from the nested viewer-side WebRtcSignal
+    protobuf used by the web client. The signaling service translates between
+    the two schemas before delivering an event to the camera.
+    """
+    fields = decode_message(data)
+    return {
+        'request_id': fields.get(1, ''),
+        'msg_type': fields.get(2, 0),
+        'client_id': fields.get(3, ''),
+        'payload': fields.get(4, ''),
+        'transport_policy': fields.get(5, 0),
+        'ttl': fields.get(6, 0),
+        'video_cfg': fields.get(7, 0),
+        'plan': fields.get(8, 0),
+        'quality': fields.get(9, ''),
+        'fps': fields.get(10, 0),
+        'scope': fields.get(12, 0),
+        'raw': fields,
+    }
+
+
+def encode_camera_webrtc_message(request_id, msg_type, payload):
+    """Encode an answer/candidate using the firmware's outbound field layout."""
+    if msg_type not in (WEBRTC_ANSWER, WEBRTC_CANDIDATE):
+        raise ValueError(f'unsupported outbound WebRTC message type: {msg_type}')
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError('request_id must be a non-empty string')
+    if not isinstance(payload, str) or not payload:
+        raise ValueError('payload must be a non-empty string')
+    return encode_message({1: request_id, 2: msg_type, 3: payload})

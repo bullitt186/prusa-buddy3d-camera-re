@@ -107,6 +107,28 @@ backend feature-rollout gate genuinely not yet enabled for this account/camera c
 Everything protocol-level that we *can* influence from software has been corrected to match a
 real camera; none of it changes this outcome.
 
+### 2026-09-18 — 3.1.6 exhaustive audit and live gate retest
+
+The initial sampled 3.1.5→3.1.6 comparison was expanded to every Ghidra-defined function:
+10,548 functions in 3.1.5 and 10,552 in 3.1.6, with zero decompiler failures. Exact
+relocation-insensitive Function-ID and call-target hashes match for `/c/info`, nanopb encoding,
+WebRTC dispatch/gating, WebRTC answer/candidate encoding, numeric message-type translation, and
+ICE candidate emission. The only relevant OEM logic delta remains the expanded hardware-version
+range table; 3.1.6 contains no streaming enrollment or signaling change. **[confirmed]**
+
+A fresh read-only test using the logged-in Connect session returned the deployed camera as
+`origin: OTHER`, `registered: true`, firmware `3.1.6`, with its full WebRTC feature list. The same
+camera token still returns `404` from `camera-service-api /v1/cameras/<token>`, while the account
+successfully receives current TURN/STUN configuration. A fresh Socket.IO viewer probe connected
+but `client_authentication` again returned ACK `5`. **[confirmed after deployment and reboot]**
+The rejection therefore still happens before any offer can reach camera code.
+
+The audit did expose a separate latent impersonator bug: it treated camera-side message types as
+strings and read inbound SDP from field 3. Firmware uses numeric values
+`1=request, 2=answer, 3=offer, 4=candidate`, inbound SDP in field 4, and outbound payload in field
+3. The implementation now uses the recovered flat camera schema and has wire-format unit tests.
+This is necessary for an offer to work after enrollment is unblocked, but cannot change ACK `5`.
+
 ---
 
 ## Status at a glance
@@ -134,8 +156,9 @@ real camera; none of it changes this outcome.
   (`fingerprint`, `token`); server ACKs a bare `1`.
 - **`/c/info` metadata upload** — the corrected schema (almost everything nested under
   `config`, `features`/`capabilities` as JSON **arrays**) returns 200 and populates the
-  camera's name, firmware `3.1.5`, model `Buddy3D-C1`, and Wi-Fi details. Full body in
-  [`protocol.md` §8](protocol.md).
+  camera's name, firmware, model `Buddy3D-C1`, and Wi-Fi details. This was live-verified with
+  `3.1.5`; current code advertises `3.1.6` after the static regression check, but has not yet
+  been redeployed. Full body in [`protocol.md` §8](protocol.md).
 - **Local RTSP** — `rpicam-vid` (userspace HW H.264) → TCP → GStreamer `GstRtspServer`.
   Continuous video (needs `do-timestamp=true` on `tcpclientsrc`). Single upstream client;
   see [RTSP notes in `protocol.md` §12](protocol.md). Default **1080p @ 30 fps**, `--rotation 180`
@@ -260,7 +283,7 @@ All corrected and matched against a real camera / the buddy3d-proxy captures. Fu
 inverted → `--rotation 180` on all capture paths). App in
 `~/prusa-cam/` (venv `--system-site-packages`). Paired to a Prusa CORE One. Live token in
 `~/prusa-cam/config.ini` (secret; not in repo). **2026-07-09:** switched to a freshly-registered
-`origin: OTHER` camera (id `573240`, see the origin-ruled-out experiment above) — the prior
+`origin: OTHER` camera (currently id `577960`, see the origin-ruled-out experiment above) — the prior
 `origin: WEB` camera (id `572286`) is deregistered from active use but still exists on the
 account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 
@@ -299,8 +322,9 @@ Design to make an abrupt cut a non-event, layered:
 3. **FS/boot hardening** — ext4 `fsck.repair=yes`, `noatime`, zram swap (already); `/boot/firmware`
    → `ro`. **[partial]**
 4. **Read-only overlayfs root** — writes → tmpfs, discarded on reboot, so the SD can't be
-   corrupted at runtime. Needs `overlayroot`+`initramfs-tools`+`auto_initramfs=1` on this minimal
-   Debian. Deploy is then overlay-aware via `pi-impersonator/deploy.sh`. **[pending]**
+   corrupted at runtime. Uses `overlayroot`+`initramfs-tools`+`auto_initramfs=1` on this minimal
+   Debian. Deploy is overlay-aware via `pi-impersonator/deploy.sh`; 3.1.6 deployment and a full
+   reboot were verified on 2026-09-18. **[done]**
 5. Hardware UPS/GPIO clean-shutdown — optional, documented only.
 
 ⚠️ **2026-07-14 incident:** an abrupt-shutdown *test* via `sysrq b` (unsynced reset) corrupted
@@ -321,8 +345,10 @@ Pi is recovered.
   wasn't this session — see `next-steps.md` P.1 for the headless fallback that was used
   instead), then `struct field_xrefs`/`rename_field` per offset. Helpers in
   [`../research/`](../research/).
-- **`webrtc.py` end-to-end** — offer/answer/ICE + `rpicam-vid` H.264 pipeline is implemented but
-  **never exercised against a real offer** (no offer ever arrives). Treat as unverified.
+- **`webrtc.py` end-to-end** — offer/answer/ICE + `rpicam-vid` H.264 pipeline is implemented, and
+  its camera-side protobuf envelope now matches firmware 3.1.6 with unit-test coverage, but it is
+  **never exercised against a real offer** (no offer ever arrives). Treat media negotiation as
+  unverified.
 - **Direct registration** — whether `camera-service-api.prusa3d.com` exposes a registration
   endpoint (e.g. `POST /v1/cameras` with a bearer JWT) that would place our camera in the
   registry. Unexplored.
@@ -385,10 +411,11 @@ Buddy3D hardware to compare against, or significantly more invasive phone toolin
 1. ~~**Probe `camera-service-api` for a direct registration path**~~ — **done 2026-07-09, negative.**
    No hidden endpoint, no informative error; see "camera-service-api surface probed directly"
    above. Also confirmed the genuine ESP32Cam is absent from this registry too.
-2. **Check firmware/rollout timing** — the 2025 Prusa blog post describing staged local-then-cloud
-   WebRTC rollout doesn't give an exact date or firmware-version cutoff; worth checking whether
-   3.1.5 (ours) predates or postdates general cloud-WebRTC availability, e.g. via changelog/OTA
-   metadata or forum reports from real Buddy3D owners about when live-view started working.
+2. ~~**Check the next firmware for a protocol/rollout change**~~ — **done 2026-09-17.** A direct
+   3.1.5→3.1.6 binary diff found no signaling, WebRTC-gate, protobuf, feature, endpoint, or
+   `/c/info` change. The app delta is hardware-version classification; see
+   [`firmware-3.1.6.md`](firmware-3.1.6.md). This rules out a client-side 3.1.6 protocol fix, but
+   cannot rule out a server-side staged rollout.
 3. **SSL-unpinning on a jailbroken device**, if one becomes available — the only way left to see
    the real app's actual `connect.prusa3d.com`/`camera-service-api` traffic.
 4. **Get real Buddy3D hardware** to compare directly (the ESP32Cam on the account doesn't count —

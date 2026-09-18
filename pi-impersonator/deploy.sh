@@ -40,6 +40,25 @@ wait_for_ssh() {  # block until the Pi answers again after a reboot (~90s budget
 
 overlay_on() { "${SSH[@]}" 'findmnt -no FSTYPE / | grep -q overlay'; }
 
+preflight_persistent_ssh() {
+  # An authorized_keys file created while overlayroot is active can live only in
+  # tmpfs. Disabling the overlay would then boot a healthy Pi that rejects the
+  # very key needed to finish the deployment. Compare the live and persistent
+  # files through overlayroot-chroot before taking that maintenance reboot.
+  log "preflight persistent SSH access"
+  "${SSH[@]}" "set -e
+    command -v overlayroot-chroot >/dev/null
+    test -s /home/$PI_USER/.ssh/authorized_keys
+    sudo overlayroot-chroot test -s /home/$PI_USER/.ssh/authorized_keys
+    live=\$(mktemp)
+    trap 'rm -f \"\$live\"' EXIT
+    sed '/^[[:space:]]*#/d;/^[[:space:]]*\$/d' /home/$PI_USER/.ssh/authorized_keys | sort -u > \"\$live\"
+    sudo overlayroot-chroot cat /home/$PI_USER/.ssh/authorized_keys \
+      | sed '/^[[:space:]]*#/d;/^[[:space:]]*\$/d' | sort -u \
+      | cmp -s \"\$live\" -" \
+    || { echo "ERROR: persistent authorized_keys differs from the live overlay; refusing maintenance reboot"; return 1; }
+}
+
 set_overlay() {  # $1 = enabled|disabled ; toggles via cmdline.txt on the FAT /boot (no RO-root write)
   local want="$1"
   "${SSH[@]}" "sudo mount -o remount,rw /boot/firmware && \
@@ -99,6 +118,9 @@ enable_overlay() {
     echo "  initramfs OK: $img ($(stat -c%s "$img") bytes)"' \
     || { echo "ERROR: pre-reboot gate FAILED — overlay left OFF, safe to retry. NOT rebooting."; exit 1; }
 
+  log "removing any overlayroot=disabled maintenance override"
+  set_overlay enabled
+
   log "gate passed — rebooting into overlay"
   reboot_pi
   if overlay_on; then
@@ -124,6 +146,7 @@ main() {
   esac
   if overlay_on; then
     log "overlay is ON (prod). Entering maintenance mode."
+    preflight_persistent_ssh
     set_overlay disabled; reboot_pi
     overlay_on && { echo "ERROR: overlay still on after disable"; exit 1; }
     push_and_restart

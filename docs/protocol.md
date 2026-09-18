@@ -1,6 +1,7 @@
 # Prusa Buddy3D Camera Protocol Specification
 
-Firmware 3.1.5, Protocol Schema 4.4. Reversed from `lp_app` ARM binary via Ghidra.
+Firmware 3.1.5, regression-checked against 3.1.6; Protocol Schema 4.4. Reversed from `lp_app`
+ARM binaries via Ghidra. See [`firmware-3.1.6.md`](firmware-3.1.6.md) for the update delta.
 
 REST endpoints below (registration, `/c/snapshot`, `/c/info`) are cross-checked against Prusa's
 official Camera API OpenAPI spec (v0.22.0, saved at [`openapi.yaml`](openapi.yaml)) and the
@@ -256,7 +257,7 @@ message ProtobufSchemaVersion {
 message CameraSupportedFeatures {
     // field 1: not sent
     string token = 2;             // http.token
-    string firmware = 3;          // "3.1.5"
+    string firmware = 3;          // currently "3.1.6"
     string hardware = 4;          // "Pi Zero 2 W" / HW model string
     string protocol_version = 5;  // "4.4"
     string features = 6;          // bracket-wrapped JSON array: ["SocketCom",...]
@@ -393,10 +394,15 @@ Outgoing SDP answers only need fields 1, 2, and 3:
 ```protobuf
 message WebRTCMessage {
     string request_id = 1;  // echoed from inbound offer
-    uint32 msg_type = 2;    // msg_type; for answer frames use the answer type value
+    uint32 msg_type = 2;    // 2=answer; 4=candidate
     string sdp = 3;         // SDP answer body
 }
 ```
+
+The camera-side enum is `1=request`, `2=answer`, `3=offer`, `4=candidate`. Inbound offers use
+field 4 for SDP and field 3 for `client_id`; outbound answers/candidates use field 3 for their
+SDP/candidate payload. The signaling service translates this flat camera envelope to/from the
+different nested `WebRtcSignal` envelope used by viewers.
 
 ### WebRtcConnectionType (6 fields)
 
@@ -482,7 +488,7 @@ JSON **arrays**, not CSV strings (that assumption was the root cause of every ea
     "name": "Buddy3D Camera",
     "driver": "private",
     "model": "Buddy3D-C1",
-    "firmware": "3.1.5",
+    "firmware": "3.1.6",
     "manufacturer": "Niceboy",
     "trigger_scheme": "THIRTY_SEC",
     "resolution": {
@@ -541,7 +547,7 @@ Host: connect-ota.prusa3d.com
 User-Agent: Buddy3D Camera
 X-Camera-Token: <token>
 X-Camera-Fingerprint: <fingerprint>
-X-Camera-FW-Version: 3.1.5
+X-Camera-FW-Version: 3.1.6
 ```
 
 Note: OTA endpoint uses `X-Camera-*` prefixed headers (different from snapshot/info).
