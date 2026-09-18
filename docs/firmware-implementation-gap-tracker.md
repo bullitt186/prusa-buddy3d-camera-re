@@ -66,11 +66,11 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Snapshot upload | Working | Endpoint and identity headers match; capture quality, scheduling, and control behavior differ. |
 | Socket.IO authentication | Working | Wire message authenticates, but ACK validation is too permissive. |
 | Initial metadata messages | Mostly matched | Core envelopes work; dynamic status and request correlation are incomplete. |
-| Trigger handling | Partial | Recovered descriptor `0x3f6f14` now decodes each trigger and dispatches only the requested action; policy actions (OTA/reboot/timelapse) and `client_trigger` result codes remain unimplemented. |
+| Trigger handling | Partial | Recovered descriptor `0x3f6f14` now decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); policy actions (OTA/timelapse) and `client_trigger` result codes remain unimplemented. |
 | Configuration handling | Partial | Quality partly works; most settings are logged or ignored. |
 | RTSP | Partial | Local stream works but port, startup state, and command semantics differ. |
 | WebRTC | Wire envelope matched; behavior incomplete | Connect ICE/TURN settings, lifecycle, camera sharing, and connection reporting are missing. |
-| OTA/timelapse/device controls | Not matched | Advertised but mostly unsupported. |
+| OTA/timelapse/device controls | Partial | Reboot implemented behind a 60 s rate limit; OTA/timelapse remain unsupported; IR/speaker/fan/MicroSD are represented as unavailable and controls never fake success. |
 
 ## How to use the decompiled firmware evidence
 
@@ -1005,19 +1005,32 @@ closing the gap.
 
 ### GAP-DEVICE-01 — Reboot command behavior
 
-- [ ] **P2 · Open; safety policy required**
+- [~] **P2 · Implemented; live reboot unverified**
 - **Firmware behavior:** remote reboot trigger reboots the device and reports the appropriate result
   before disconnect. **[confirmed]**
 - **Current behavior:** advertises `CameraReboot` but does not dispatch the trigger.
 - **Connect impact:** the Connect reboot control silently fails.
 - **Implementation choice:** either authorize a narrowly scoped systemd reboot path with rate
-  limiting and acknowledgment, or remove the advertised capability.
+  limiting and acknowledgment, or remove the advertised capability. Owner chose implement.
 - **Acceptance:** command is authenticated, rate-limited, acknowledged, and invokes only the intended
   reboot action in an integration harness.
+- **Implementation (staged, commit pending):** [`device_control.py`](../pi-impersonator/device_control.py)
+  holds a pure predicate `can_reboot(last, now, min_interval)` and `request_reboot(state, reboot_fn,
+  now=None)`, which records the accepted monotonic time on the shared `CameraState`
+  (`state.last_reboot_monotonic`) before invoking the injected `reboot_fn`. The minimum spacing is
+  `DEFAULT_REBOOT_MIN_INTERVAL_SECONDS = 60` (long enough for the Pi to drop the Socket.IO
+  connection and come back). `main.py`'s dispatcher sends `trigger.REBOOT` through
+  `request_reboot` with a narrowly scoped `reboot_device()` that runs only
+  `['sudo','systemctl','reboot']`; the outcome is logged and success is never faked. A second
+  request inside the window, a `False` return, and a raised exception all return `False` without
+  rebooting. Tests: `test_pi_device_control.py` (`RebootGuardTests`, `MainWiringTests`).
+  **Remaining:** the live
+  reboot is obviously unverified, and the firmware-style per-action `client_trigger` result code
+  (GAP-SIO-01) is still not sent.
 
 ### GAP-DEVICE-02 — IR, speaker, fan and MicroSD feature truthfulness
 
-- [ ] **P2 · Open; likely remove or emulate state only**
+- [~] **P2 · Partially implemented; nested status descriptor still required**
 - **Firmware behavior:** applies IR/day-night mode, speaker volume, fan control, and MicroSD status
   where hardware supports them. **[confirmed]**
 - **Current behavior:** advertises these capabilities; IR is logged and ignored, and the others have
@@ -1027,6 +1040,19 @@ closing the gap.
 - **Implementation:** remove unsupported hardware capabilities unless Buddy classification requires
   them; otherwise return truthful unavailable state rather than fake successful application.
 - **Acceptance:** Connect UI and status expose only supportable operations, with no silent success.
+- **Implementation (staged, commit pending):** `CameraState` now carries explicit
+  `ir_available`/`speaker_available`/`fan_available`/`microsd_available = False` and
+  `ir_mode = None`. [`device_control.py`](../pi-impersonator/device_control.py)
+  `apply_light_control` maps the recovered `configuration.light_control` values
+  (`auto`/`day`/`night` -> 1/2/3, `FW-CONFIG:193-228`), logs that the Pi has no IR illuminator,
+  returns `False`, and leaves `ir_mode` unavailable instead of claiming the mode was applied;
+  `main.py`'s configuration handler routes `light_control` through it. Tests:
+  `test_pi_device_control.py` (`HardwareAvailabilityTests`). **Limitation:** the nested
+  `camera_status` tag-to-field mapping remains `descriptor required`, so the hardcoded IR/speaker
+  bytes in [`status.py`](../pi-impersonator/status.py) are left unchanged rather than guessed
+  (pinned by `test_status_hardware_bytes_unchanged_pending_descriptor`); capability removal under
+  GAP-CAP-01 is likewise not done, so Connect can still display these controls even though they now
+  never report success.
 
 ### GAP-WEBRTC-07 — Decide audio-track compatibility
 

@@ -311,7 +311,12 @@ without them). Inbound `configuration`/`trigger`/`set_rtsp_server_mode`/`set_web
 (configured `webrtc_mode` and runtime `webrtc_status` tracked separately, offers rejected only
 when both are zero); RTSP keeps configured `rtsp_mode` and actual service state separate, with
 the direct event and the `configuration` `rtsp` field sharing one start/stop path; `webrtc` is
-wired to `webrtc.py`.
+wired to `webrtc.py`. Trigger tag 9 (reboot) dispatches through a rate-limited (60 s), narrowly
+scoped `systemctl reboot` path in `device_control.py`; a second request inside the window or a
+failed command is logged and never reported as success. IR/speaker/fan/MicroSD are represented as
+unavailable on `CameraState`, and `configuration.light_control` is logged and rejected instead of
+being reported as applied; the `camera_status` hardware bytes remain unchanged pending the nested
+descriptor (`GAP-DEVICE-02`).
 
 **Single-camera contention:** libcamera allows one client. The snapshot loop now gates on active
 RTSP clients (via `/proc/net/tcp` on :8888) and on the WebRTC flag, so local RTSP viewing no

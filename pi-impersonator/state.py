@@ -58,6 +58,18 @@ class CameraState:
         self.webrtc_status = 1      # 0=stopped / 1=running
         self.streaming = False      # true while a WebRTC peer is active
         self.info_dirty = True
+        # GAP-DEVICE-02: explicit hardware availability. The Pi has no IR
+        # illuminator, speaker, fan, or MicroSD slot, so no control path may
+        # imply otherwise or report a fake applied mode. ``ir_mode`` stays None
+        # (no mode applied) while ``ir_available`` is False.
+        self.ir_available = False
+        self.speaker_available = False
+        self.fan_available = False
+        self.microsd_available = False
+        self.ir_mode = None
+        # GAP-DEVICE-01: monotonic time of the last accepted reboot request,
+        # kept on the shared state so the rate-limit guard survives triggers.
+        self.last_reboot_monotonic = None
         # Woken by set_snapshot_interval so snapshot_loop can re-read the cadence
         # without a process restart (GAP-SNAPSHOT-01).
         self.snapshot_interval_changed = asyncio.Event()

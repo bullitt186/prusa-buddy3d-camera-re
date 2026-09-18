@@ -46,6 +46,13 @@ def build_status_message(state, *, token='', mac='', ip='', ssid='',
         7: Float32(0.0),
     })
 
+    # GAP-DEVICE-02: fields 5/6 carry the hardware-implying IR-mode/speaker
+    # values under the current mapping. The recovered descriptor does not pin
+    # the nested tag-to-field mapping yet, so per the tracker rule ("do not
+    # invent or guess nested status tags") these bytes are left unchanged even
+    # though the Pi has no such hardware (CameraState.*_available is False and
+    # device_control.apply_light_control never claims a mode). Changing this
+    # encoding requires the descriptor fixture.
     camera_status = encode_message({
         3: 1,
         4: state.snapshot_interval,

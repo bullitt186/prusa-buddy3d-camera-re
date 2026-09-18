@@ -30,6 +30,7 @@ from proto import (
     encode_camera_webrtc_message,
     encode_message,
 )
+import device_control
 import quality
 import quality_control
 import rtsp_control
@@ -166,6 +167,15 @@ def get_network_info():
     except OSError:
         ssid = ''
     return mac, ip, ssid, fingerprint
+
+
+def reboot_device():
+    """Narrowly scoped reboot: only the intended systemd command (GAP-DEVICE-01).
+
+    Returns True only when systemctl reports success; the caller never fakes it.
+    """
+    result = subprocess.run(['sudo', 'systemctl', 'reboot'], capture_output=True)
+    return result.returncode == 0
 
 
 def rtsp_service_start():
@@ -400,9 +410,10 @@ async def main():
         """Perform exactly one planned trigger action (GAP-TRIGGER-01).
 
         Actions are selected by ``trigger.trigger_actions`` from the recovered
-        descriptor; this function only executes them. ``fw_update``/``reboot``/
-        ``timelapse_*`` are recognized but intentionally unimplemented and must
-        not perform an unrelated action or fake success.
+        descriptor; this function only executes them. ``reboot`` is a
+        rate-limited, narrowly scoped systemd reboot (GAP-DEVICE-01).
+        ``fw_update``/``timelapse_*`` are recognized but intentionally
+        unimplemented and must not perform an unrelated action or fake success.
         """
         if action == trigger.STATUS:
             await sig.send_status(request_id=request_id)
@@ -438,6 +449,12 @@ async def main():
                 persist=rtsp_control.write_mode,
             )
             log.info(f'Trigger {action}: mode={state.rtsp_mode} running={state.rtsp_running}')
+        elif action == trigger.REBOOT:
+            # GAP-DEVICE-01: the trigger dispatcher is the only path here. The
+            # guard rejects a second request inside its window and never fakes
+            # success when the systemd command fails.
+            accepted = device_control.request_reboot(state, reboot_device)
+            log.info(f'Trigger reboot: accepted={accepted}')
         else:
             log.warning(
                 f'Trigger action {action!r} recognized but not implemented on the '
@@ -528,7 +545,11 @@ async def main():
                     log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
             lc = msg.get('light_control') or msg.get(6)
             if lc:
-                log.info(f'Config: light_control → {lc!r} (Pi has no IR, ignored)')
+                # GAP-DEVICE-02: no IR illuminator on the Pi; the policy logs the
+                # request and rejects it, leaving state.ir_mode unavailable. Never
+                # report a mode that was not applied.
+                applied = device_control.apply_light_control(lc, state)
+                log.info(f'Config: light_control {lc!r} applied={applied}')
             rtsp = msg.get('rtsp') or msg.get(2)
             if rtsp is not None:
                 # GAP-RTSP-02: configuration form and direct event share one path.
