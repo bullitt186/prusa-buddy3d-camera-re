@@ -11,7 +11,7 @@ from upload import make_session, upload_snapshot, upload_info
 from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
-from identity import identity_from_mac_or_fallback
+from identity import resolve_fingerprint
 from state import CameraState, ENUM_TO_RAW, snapshot_interval_from_config
 from http_result import SUCCESS
 from info_service import (
@@ -135,21 +135,24 @@ def load_config():
     cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini'))
     return cfg
 
-def get_network_info():
+def get_network_info(configured_fingerprint=None):
     """Return ``(mac, ip, ssid, fingerprint)``.
 
-    GAP-IDENTITY-01: when the ``wlan0`` MAC cannot be read or normalized, derive
-    the fingerprint from the persisted fallback seed (firmware ``FW-ID-SEED``)
-    instead of raising at startup. ``mac`` is reported empty because there is no
-    hardware address to report; the normal path stays byte-exact.
+    Fingerprint precedence: an explicit ``config.ini`` ``[identity] fingerprint``
+    wins (the registered token is bound to it), then the firmware-style
+    MAC-derived value, then the persisted fallback seed when the ``wlan0`` MAC is
+    unreadable (GAP-IDENTITY-01). ``mac`` is reported empty when there is no
+    hardware address to report.
     """
     try:
         raw_mac = open('/sys/class/net/wlan0/address').read().strip()
     except OSError as e:
-        log.warning(f'wlan0 MAC unreadable ({e}); using persisted fallback identity')
+        log.warning(f'wlan0 MAC unreadable ({e}); using configured or fallback identity')
         raw_mac = ''
-    mac, fingerprint = identity_from_mac_or_fallback(raw_mac)
-    if not mac:
+    mac, fingerprint = resolve_fingerprint(configured_fingerprint, raw_mac)
+    if configured_fingerprint:
+        log.info('Using fingerprint from config.ini [identity] fingerprint')
+    elif not mac:
         log.warning(
             'Using persisted fallback identity: fingerprint derived from a stored '
             'seed, not a hardware MAC'
@@ -360,9 +363,7 @@ async def main():
         f'(1=disabled/2=enabled) running={state.rtsp_running}'
     )
 
-    mac, ip, ssid, fingerprint = get_network_info()
-    if mac:
-        log.info('Using firmware-style fingerprint derived from the normalized wlan0 MAC')
+    mac, ip, ssid, fingerprint = get_network_info(cfg['identity'].get('fingerprint'))
 
     # GAP-HTTP-03: one session for the whole application lifetime, reused by the
     # info service loop, snapshots and the OTA check-in; closed on shutdown.

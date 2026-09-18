@@ -3,8 +3,12 @@
 ; token       - camera registration token from Prusa Connect
 ;               (Web UI or app > Camera > Token, or the "add camera" QR screen).
 ;               This is the credential that authenticates this device AS the camera.
-; fingerprint - generated automatically from wlan0 exactly like firmware 3.1.6:
-;               md5("AA:BB:CC:DD:EE:FF").hexdigest(). Do not configure it here.
+; fingerprint - OPTIONAL but normally required. The fingerprint the token is bound
+;               to. To impersonate an existing camera, set it to that camera's
+;               fingerprint: Connect rejects a token used with a different value
+;               ("Invalid fingerprint"). If omitted, it is derived from this Pi's
+;               wlan0 MAC exactly like firmware 3.1.6:
+;               md5("AA:BB:CC:DD:EE:FF").hexdigest().
 ;
 ; [upload] interval - snapshot upload interval in seconds, 10..600 (default 10).
 ;                     Out-of-range or non-integer values fall back to 10 with a warning.
@@ -15,6 +19,7 @@
 
 [identity]
 token = <REGISTRATION_TOKEN>
+; fingerprint = <REGISTERED_FINGERPRINT>
 
 [upload]
 interval = 10

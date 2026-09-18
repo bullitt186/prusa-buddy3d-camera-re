@@ -104,3 +104,23 @@ def identity_from_mac_or_fallback(raw_mac, fallback_path=None):
         seed = load_or_create_fallback_seed(fallback_path)
         return '', fingerprint_from_seed(seed)
     return mac, fingerprint_from_mac(mac)
+
+
+def resolve_fingerprint(configured, raw_mac, fallback_path=None):
+    """Resolve the wire fingerprint, preferring an explicitly configured value.
+
+    The deployed ``config.ini`` stores the fingerprint the registration token was
+    bound to (``[identity] fingerprint``). That value MUST win over the
+    MAC-derived one: switching a registered token to a different fingerprint is
+    rejected by Connect as ``{"detail":"Invalid fingerprint"}`` (observed live
+    2026-09-18 after the first deploy dropped the config value). Only when it is
+    absent do we derive from the ``wlan0`` MAC (GAP-IDENTITY-01) or the persisted
+    fallback seed.
+    """
+    if configured:
+        try:
+            mac = normalize_wifi_mac(raw_mac or '')
+        except (TypeError, ValueError, AttributeError):
+            mac = ''
+        return mac, configured
+    return identity_from_mac_or_fallback(raw_mac, fallback_path)

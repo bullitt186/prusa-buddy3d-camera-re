@@ -61,7 +61,7 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Surface | State | Summary |
 |---|---|---|
 | Enrollment/token | Matched | Token is opaque Connect input; no firmware token-generation algorithm exists. |
-| Fingerprint derivation | Source matched; deployment pending | Current source hashes the uppercase colon-separated `wlan0` MAC exactly like firmware. The live token is still bound to the previous fingerprint. |
+| Fingerprint derivation | Working; live-verified | Precedence: an explicit `config.ini` `[identity] fingerprint` (the token-bound value) wins, else firmware-style MAC derivation, else a persisted fallback seed. Live-verified 2026-09-18: `/c/info` 200 (`origin='OTHER', registered=True`), snapshots 200. Migrating to the MAC-derived value still requires a fresh token. |
 | `/c/info` | Core schema matched | Initial upload succeeds, but refresh/retry behavior and dynamic values are incomplete. |
 | Snapshot upload | Working | Endpoint and identity headers match; capture quality, scheduling, and control behavior differ. |
 | Socket.IO authentication | Working | Wire message authenticates, but ACK validation is too permissive. |
@@ -1076,7 +1076,7 @@ closing the gap.
 
 ### GAP-IDENTITY-01 — Firmware fallback when `wlan0` MAC retrieval fails
 
-- [~] **P3 · Implemented; live verification pending**
+- [~] **P3 · Implemented and live-verified (config precedence)**
 - **Firmware behavior:** formats `wlan0` MAC as uppercase colon-separated text and hashes it with MD5;
   if MAC retrieval fails, it generates a random ten-character seed and hashes that. **[confirmed]**
 - **Current behavior:** exact normal MAC path is implemented, but a missing/invalid `wlan0` MAC raises
@@ -1092,21 +1092,28 @@ closing the gap.
   `fingerprint_from_seed` (lowercase MD5 of the exact seed text), `generate_fallback_seed`, and
   `load_or_create_fallback_seed`, which persists the seed at `/etc/prusa-cam/identity.fallback`
   (`PRUSA_IDENTITY_FALLBACK` override) and reuses a valid existing seed verbatim so a bound token's
-  fingerprint is never silently rotated. `main.get_network_info` uses it when the MAC is missing or
-  invalid instead of raising, and reports an empty MAC. **Assumption:** the exact firmware alphabet
+  fingerprint is never silently rotated. `main.get_network_info` now resolves the fingerprint via
+  `identity.resolve_fingerprint`: an explicit `config.ini` `[identity] fingerprint` wins (the value
+  the registered token is bound to; live-verified 2026-09-18), then the MAC derivation, then this
+  persisted seed. It reports an empty MAC when none is read. **Assumption:** the exact firmware alphabet
   of `FUN_000997f8(..., 10, 1)` is unrecovered; alphanumeric is used. On the read-only overlay the
   seed survives only after deployment, so a restart without the file regenerates it (with a warning).
   Tests: `test_pi_identity.py` (`FallbackSeedTests`).
 
 ### GAP-IDENTITY-02 — Deploy exact fingerprint only with a fresh token
 
-- [~] **P3 source complete; live migration pending**
+- [~] **P3 · Implemented and live-verified; optional fresh-token migration open**
 - **Firmware/source behavior:** lowercase MD5 of exact uppercase `AA:BB:CC:DD:EE:FF` text.
   **[confirmed]**
-- **Deployment state:** repository source derives this correctly, but the deployed token remains
-  bound to the previous static fingerprint. Changing only the fingerprint produces HTTP `403`.
-- **Implementation/operation:** issue a fresh Connect token and deploy token plus derived fingerprint
-  together using the overlay-aware deployment procedure.
+- **Deployment state:** the deployed token is bound to the **static fingerprint in
+  `config.ini`**; the source now honors that value (`identity.resolve_fingerprint`) so the
+  registered identity keeps working. **Live-verified 2026-09-18:** `/c/info` → `200`
+  (`origin='OTHER', registered=True`), snapshots → `200`, `camera_authentication` ACK `1`. A
+  deploy that switched to the MAC-derived fingerprint instead caused
+  `400 {"detail":"Invalid fingerprint"}` / `403`; the configured value was restored.
+- **Implementation/operation (optional):** to move to the firmware-style MAC-derived fingerprint,
+  issue a fresh Connect token and deploy token plus derived fingerprint together using the
+  overlay-aware deployment procedure (removing the `[identity] fingerprint` line).
 - **Acceptance:** `/c/info`, snapshot, and `camera_authentication` all succeed using the derived
   fingerprint under the fresh token; then repeat the viewer registry/auth checks.
 

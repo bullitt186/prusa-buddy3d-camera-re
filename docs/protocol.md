@@ -94,8 +94,21 @@ TLS: Required
 The 3.1.6 fingerprint path is distinct from token creation. `FUN_00096cd8` obtains `wlan0`'s MAC
 with `SIOCGIFHWADDR` and formats it as `%02X:%02X:%02X:%02X:%02X:%02X`; if that fails it creates
 a random 10-character seed. `FUN_00097a4c` MD5-hashes that seed and emits 16 bytes as lowercase
-`%02x` hex for the wire fingerprint. The impersonator now performs the same normalization and
-derivation automatically from `wlan0`, and reports that normalized MAC in camera metadata.
+`%02x` hex for the wire fingerprint.
+
+The impersonator's wire-fingerprint precedence is:
+
+1. an explicit `[identity] fingerprint` in `config.ini` (returned verbatim) — this is the
+   fingerprint the registration token is bound to, so it **wins**; using the MAC-derived value
+   instead makes Connect reject the camera (`PUT /c/snapshot` → `400 {"detail":"Invalid
+   fingerprint"}`; `PUT /c/info` → `403`). Verified live 2026-09-18: with the configured
+   fingerprint, `/c/info` → `200` (`origin='OTHER', registered=True`) and snapshots → `200`.
+2. otherwise the firmware-style MAC derivation from `wlan0` (normalized uppercase
+   colon-separated MAC, lowercase MD5), and
+3. otherwise a persisted fallback seed (`GAP-IDENTITY-01`).
+
+The normalized MAC is reported in camera metadata only when it is actually read (it is empty when
+the MAC is unreadable).
 
 ---
 

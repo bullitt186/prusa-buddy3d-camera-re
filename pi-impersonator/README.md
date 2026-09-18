@@ -48,16 +48,18 @@ PI=pi@<PI_IP> pi-impersonator/deploy.sh --enable-overlay
 | Key | Value |
 |---|---|
 | `token` | Camera registration token from Prusa Connect (Web UI → Camera → *Token*) |
+| `fingerprint` | Optional. The fingerprint the token is bound to; required to impersonate an existing camera (Connect returns `Invalid fingerprint` otherwise). If omitted, derived from `wlan0` |
 | `interval` | Snapshot upload interval in seconds, `10`–`600` (default `10`) |
 
 Resolution is not configured here: it follows the persisted video-quality tier
 (`/etc/prusa-cam/quality.env`) and the ephemeral live override
 (`/etc/prusa-cam/quality.live.env`), so snapshots, RTSP, WebRTC and status always agree.
 
-The fingerprint is generated automatically from `wlan0` exactly like firmware 3.1.6: normalize
-the MAC as uppercase colon-separated ASCII and send its lowercase MD5 digest. Connect binds this
-fingerprint on a token's first use, so use a fresh token when migrating from an older deployment
-that configured a static fingerprint.
+Fingerprint precedence: an explicit `[identity] fingerprint` wins, so an already-registered token
+keeps working. With no configured value, the fingerprint is generated automatically from `wlan0`
+exactly like firmware 3.1.6 (normalize the MAC as uppercase colon-separated ASCII, send its
+lowercase MD5 digest). Connect binds the fingerprint on a token's first use, so changing the
+fingerprint requires a fresh token.
 
 ## Architecture
 

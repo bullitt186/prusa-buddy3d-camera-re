@@ -18,6 +18,7 @@ from identity import (  # noqa: E402
     identity_from_mac_or_fallback,
     load_or_create_fallback_seed,
     normalize_wifi_mac,
+    resolve_fingerprint,
 )
 
 
@@ -129,6 +130,71 @@ class IdentityResolutionTests(unittest.TestCase):
         first = identity_from_mac_or_fallback('bad', self.path)
         second = identity_from_mac_or_fallback('bad', self.path)
         self.assertEqual(first, second)
+
+
+class ResolveFingerprintTests(unittest.TestCase):
+    """A registered config.ini fingerprint must win over the MAC-derived one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self._tmp.name, 'identity.fallback')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_configured_fingerprint_wins_and_is_returned_verbatim(self):
+        configured = 'd54ac883deadbeefdeadbeefdeadbeef'
+        mac, fingerprint = resolve_fingerprint(configured, 'd8:3a:dd:32:1c:ac', self.path)
+        self.assertEqual(mac, 'D8:3A:DD:32:1C:AC')
+        self.assertEqual(fingerprint, configured)
+        # A configured identity must never create the fallback seed file.
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_configured_fingerprint_with_unreadable_mac_still_wins(self):
+        configured = 'd54ac883deadbeefdeadbeefdeadbeef'
+        for raw in ('', 'not-a-mac', None):
+            with self.subTest(raw=raw):
+                mac, fingerprint = resolve_fingerprint(configured, raw, self.path)
+                self.assertEqual(mac, '')
+                self.assertEqual(fingerprint, configured)
+                self.assertFalse(os.path.exists(self.path))
+
+    def test_absent_configured_fingerprint_falls_back_to_mac(self):
+        mac, fingerprint = resolve_fingerprint(None, 'd8:3a:dd:32:1c:ac', self.path)
+        self.assertEqual(mac, 'D8:3A:DD:32:1C:AC')
+        self.assertEqual(fingerprint, fingerprint_from_mac(mac))
+
+    def test_absent_configured_and_bad_mac_uses_persisted_seed(self):
+        mac, fingerprint = resolve_fingerprint(None, 'bad', self.path)
+        self.assertEqual(mac, '')
+        seed = load_or_create_fallback_seed(self.path)
+        self.assertEqual(fingerprint, fingerprint_from_seed(seed))
+
+
+class MainWiringTests(unittest.TestCase):
+    """Guard against re-introducing the live identity regression.
+
+    main() must pass the configured ``[identity] fingerprint`` into
+    ``get_network_info`` so a registered token keeps its bound fingerprint. This
+    is the second identity regression in a row, so pin the wiring with an AST
+    check (main.py cannot be imported here: it needs aiohttp/socketio/gi).
+    """
+
+    def test_main_passes_configured_fingerprint(self):
+        import ast
+
+        src = (Path(__file__).resolve().parents[1] / 'pi-impersonator' / 'main.py').read_text()
+        calls = [
+            node for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == 'get_network_info'
+        ]
+        self.assertEqual(len(calls), 1, 'expected exactly one get_network_info call')
+        self.assertEqual(len(calls[0].args), 1, 'get_network_info must receive the config value')
+        arg_src = ast.unparse(calls[0].args[0])
+        self.assertIn('identity', arg_src)
+        self.assertIn('fingerprint', arg_src)
 
 
 if __name__ == '__main__':

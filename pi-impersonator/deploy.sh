@@ -47,7 +47,6 @@ preflight_persistent_ssh() {
   # files through overlayroot-chroot before taking that maintenance reboot.
   log "preflight persistent SSH access"
   "${SSH[@]}" "set -e
-    command -v overlayroot-chroot >/dev/null
     test -s /home/$PI_USER/.ssh/authorized_keys
     sudo overlayroot-chroot test -s /home/$PI_USER/.ssh/authorized_keys
     live=\$(mktemp)
