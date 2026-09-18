@@ -306,8 +306,12 @@ account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 `camera_authentication`; `status` with fields 2/3/4/5/8/9/11 (real network + telemetry, defaults
 elsewhere); `protobuf_version` (token in field 1, `"4.4"` in field 7); `features` (bracket-wrapped
 array, field 7 = MD5 hash); inter-emit `sleep(0.2–0.3)` (required — the server disconnects
-without them). Inbound `configuration`/`trigger`/`set_rtsp_server_mode`/`change_video_size` are
-handled; `set_webrtc_mode` self-enables `webrtc_mode/status`; `webrtc` is wired to `webrtc.py`.
+without them). Inbound `configuration`/`trigger`/`set_rtsp_server_mode`/`set_webrtc_mode`/
+`change_video_size` are handled; `set_webrtc_mode` applies the firmware enable/disable gate
+(configured `webrtc_mode` and runtime `webrtc_status` tracked separately, offers rejected only
+when both are zero); RTSP keeps configured `rtsp_mode` and actual service state separate, with
+the direct event and the `configuration` `rtsp` field sharing one start/stop path; `webrtc` is
+wired to `webrtc.py`.
 
 **Single-camera contention:** libcamera allows one client. The snapshot loop now gates on active
 RTSP clients (via `/proc/net/tcp` on :8888) and on the WebRTC flag, so local RTSP viewing no

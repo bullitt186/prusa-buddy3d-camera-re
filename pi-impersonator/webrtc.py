@@ -24,7 +24,14 @@ class PrusaWebRTC:
         self._glib_thread = None
         self._proc = None
 
+    @property
+    def is_running(self):
+        """True while the GLib main loop owning the WebRTC pipeline is active."""
+        return self._glib_loop is not None
+
     def start(self):
+        if self._glib_loop is not None:
+            return
         self._glib_loop = GLib.MainLoop()
         self._glib_thread = threading.Thread(target=self._glib_loop.run, daemon=True)
         self._glib_thread.start()

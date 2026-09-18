@@ -11,7 +11,7 @@ from upload import make_session, upload_snapshot, upload_info
 from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
-from identity import fingerprint_from_mac, normalize_wifi_mac
+from identity import identity_from_mac_or_fallback
 from state import CameraState, ENUM_TO_RAW, snapshot_interval_from_config
 from http_result import SUCCESS
 from info_service import (
@@ -32,6 +32,8 @@ from proto import (
 )
 import quality
 import quality_control
+import rtsp_control
+import webrtc_control
 import local_http
 
 logging.basicConfig(
@@ -145,13 +147,74 @@ def load_config():
     return cfg
 
 def get_network_info():
-    raw_mac = open('/sys/class/net/wlan0/address').read().strip()
-    mac = normalize_wifi_mac(raw_mac)
-    ip = subprocess.run(['ip', '-4', 'addr', 'show', 'wlan0'], capture_output=True, text=True).stdout
-    ip = [l.split()[1].split('/')[0] for l in ip.splitlines() if 'inet ' in l][0]
-    ssid_out = subprocess.run(['nmcli', '-t', '-f', 'active,ssid', 'dev', 'wifi'], capture_output=True, text=True).stdout
-    ssid = next((l.split(':', 1)[1] for l in ssid_out.splitlines() if l.startswith('yes:')), '')
-    return mac, ip, ssid
+    """Return ``(mac, ip, ssid, fingerprint)``.
+
+    GAP-IDENTITY-01: when the ``wlan0`` MAC cannot be read or normalized, derive
+    the fingerprint from the persisted fallback seed (firmware ``FW-ID-SEED``)
+    instead of raising at startup. ``mac`` is reported empty because there is no
+    hardware address to report; the normal path stays byte-exact.
+    """
+    try:
+        raw_mac = open('/sys/class/net/wlan0/address').read().strip()
+    except OSError as e:
+        log.warning(f'wlan0 MAC unreadable ({e}); using persisted fallback identity')
+        raw_mac = ''
+    mac, fingerprint = identity_from_mac_or_fallback(raw_mac)
+    if not mac:
+        log.warning(
+            'Using persisted fallback identity: fingerprint derived from a stored '
+            'seed, not a hardware MAC'
+        )
+    # The interface may be absent entirely on alternate/recovery hardware; keep
+    # startup alive with empty fields rather than raising after the MAC fallback.
+    try:
+        ip_out = subprocess.run(['ip', '-4', 'addr', 'show', 'wlan0'], capture_output=True, text=True).stdout
+        ip = next((l.split()[1].split('/')[0] for l in ip_out.splitlines() if 'inet ' in l), '')
+    except OSError:
+        ip = ''
+    try:
+        ssid_out = subprocess.run(['nmcli', '-t', '-f', 'active,ssid', 'dev', 'wifi'], capture_output=True, text=True).stdout
+        ssid = next((l.split(':', 1)[1] for l in ssid_out.splitlines() if l.startswith('yes:')), '')
+    except OSError:
+        ssid = ''
+    return mac, ip, ssid, fingerprint
+
+
+def rtsp_service_start():
+    subprocess.run(['sudo', 'systemctl', 'start', 'prusa-rtsp.service'], capture_output=True)
+
+
+def rtsp_service_stop():
+    subprocess.run(['sudo', 'systemctl', 'stop', 'prusa-rtsp.service'], capture_output=True)
+
+
+def rtsp_service_active():
+    """Return the real unit state, or None when it cannot be probed.
+
+    ``None`` (systemd missing, unit not installed, unknown output) makes the
+    caller fall back to the commanded state, which is what non-Pi hosts need.
+    """
+    try:
+        show = subprocess.run(
+            ['systemctl', 'show', 'prusa-rtsp.service', '--property=LoadState', '--value'],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if show.returncode != 0 or show.stdout.strip() in ('', 'not-found'):
+        return None
+    try:
+        result = subprocess.run(
+            ['systemctl', 'is-active', 'prusa-rtsp.service'], capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    value = result.stdout.strip()
+    if value in ('active', 'activating', 'reloading'):
+        return True
+    if value in ('inactive', 'failed', 'deactivating'):
+        return False
+    return None
 
 async def wait_for_deadline_or_change(deadline):
     """Sleep until an absolute monotonic deadline, waking early on interval change.
@@ -284,9 +347,24 @@ async def main():
         state.snapshot_interval_changed.clear()
         log.info(f'Loaded snapshot interval {state.snapshot_interval}s from config')
 
-    mac, ip, ssid = get_network_info()
-    fingerprint = fingerprint_from_mac(mac)
-    log.info('Using firmware-style fingerprint derived from the normalized wlan0 MAC')
+    # GAP-RTSP-02: load the configured mode and make boot behavior follow it.
+    # The mode is persisted at /etc/prusa-cam/rtsp.mode (overlay: durable only
+    # once deployed); at startup we read it and reconcile the real unit state.
+    configured_rtsp_mode = rtsp_control.read_mode()
+    rtsp_control.apply_mode(
+        configured_rtsp_mode, state,
+        start_service=rtsp_service_start,
+        stop_service=rtsp_service_stop,
+        query_service=rtsp_service_active,
+    )
+    log.info(
+        f'RTSP configured mode={state.rtsp_mode} '
+        f'(1=disabled/2=enabled) running={state.rtsp_running}'
+    )
+
+    mac, ip, ssid, fingerprint = get_network_info()
+    if mac:
+        log.info('Using firmware-style fingerprint derived from the normalized wlan0 MAC')
 
     # GAP-HTTP-03: one session for the whole application lifetime, reused by the
     # info service loop, snapshots and the OTA check-in; closed on shutdown.
@@ -319,6 +397,17 @@ async def main():
     webrtc = PrusaWebRTC(on_answer=on_webrtc_answer, on_ice_candidate=on_ice_candidate)
     webrtc.start()
 
+    def start_webrtc_service():
+        # GLib loop already running → just report status (GAP-WEBRTC-04).
+        if not webrtc.is_running:
+            webrtc.start()
+
+    def stop_webrtc_service():
+        if webrtc.is_running:
+            webrtc.stop()
+        # A stopped service has no peer; do not leave snapshots paused forever.
+        state.streaming = False
+
     async def handle_event(event, data):
         if event == 'webrtc' and isinstance(data, bytes):
             msg = decode_camera_webrtc_message(data)
@@ -330,6 +419,12 @@ async def main():
                 f'client={msg["client_id"][:16]}... payload_len={len(payload)}'
             )
             if msg_type == WEBRTC_OFFER:
+                if not webrtc_control.offer_allowed(state):
+                    log.warning(
+                        'WebRTC offer rejected: service disabled '
+                        f'(mode={state.webrtc_mode}, status={state.webrtc_status})'
+                    )
+                    return
                 if not request_id or not payload:
                     log.error('Ignoring malformed WebRTC offer without request ID or SDP')
                     return
@@ -401,41 +496,74 @@ async def main():
             if lc:
                 log.info(f'Config: light_control → {lc!r} (Pi has no IR, ignored)')
             rtsp = msg.get('rtsp') or msg.get(2)
-            if rtsp:
-                # GAP-INFO-01: mode is published in /c/info. Full RTSP mode
-                # semantics remain GAP-RTSP-02.
-                state.mark_info_dirty()
-                log.info(f'Config: rtsp → {rtsp!r}')
+            if rtsp is not None:
+                # GAP-RTSP-02: configuration form and direct event share one path.
+                rtsp_mode = rtsp_control.mode_from_config(rtsp)
+                if rtsp_mode is None:
+                    log.warning(f'Config: rtsp {rtsp!r} not recognized (expected on/off)')
+                else:
+                    rtsp_control.apply_mode(
+                        rtsp_mode, state,
+                        start_service=rtsp_service_start,
+                        stop_service=rtsp_service_stop,
+                        query_service=rtsp_service_active,
+                        persist=rtsp_control.write_mode,
+                    )
+                    log.info(
+                        f'Config: rtsp → mode={state.rtsp_mode} '
+                        f'running={state.rtsp_running}'
+                    )
             wrtc = msg.get('webrtc') or msg.get(3)
-            if wrtc:
-                # GAP-INFO-01: mode is published in /c/info. Full WebRTC mode
-                # semantics remain GAP-WEBRTC-04.
-                state.mark_info_dirty()
-                log.info(f'Config: webrtc → {wrtc!r}')
+            if wrtc is not None:
+                # GAP-WEBRTC-04: the recovered dispatch table maps webrtc on/off
+                # to set_webrtc_mode(1/0). The paired rule that `on` also forces
+                # RTSP disabled is not implemented here.
+                requested = None
+                if isinstance(wrtc, str):
+                    requested = {'on': 1, 'off': 0}.get(wrtc.strip().lower())
+                if requested is None:
+                    log.warning(f'Config: webrtc {wrtc!r} not recognized (expected on/off)')
+                elif webrtc_control.apply_mode(
+                    requested, state,
+                    start_service=start_webrtc_service,
+                    stop_service=stop_webrtc_service,
+                ):
+                    log.info(
+                        f'Config: webrtc → mode={state.webrtc_mode} '
+                        f'status={state.webrtc_status}'
+                    )
             fw = msg.get('start_fw_update') or msg.get(5)
             if fw:
                 log.warning('Config: start_fw_update requested — not supported on Pi impersonator')
         elif event == 'set_rtsp_server_mode':
-            val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
-            if val == 2:
-                log.info('set_rtsp_server_mode: enabling RTSP')
-                subprocess.run(['sudo', 'systemctl', 'start', 'prusa-rtsp.service'], capture_output=True)
-                state.mark_info_dirty()
-            elif val == 1:
-                log.info('set_rtsp_server_mode: disabling RTSP')
-                subprocess.run(['sudo', 'systemctl', 'stop', 'prusa-rtsp.service'], capture_output=True)
-                state.mark_info_dirty()
+            rtsp_mode = rtsp_control.decode_mode(data)
+            if rtsp_mode is None:
+                log.warning('set_rtsp_server_mode: invalid payload (expected field 1 = 1/2)')
             else:
-                log.warning(f'set_rtsp_server_mode: unknown value {val!r}')
+                rtsp_control.apply_mode(
+                    rtsp_mode, state,
+                    start_service=rtsp_service_start,
+                    stop_service=rtsp_service_stop,
+                    query_service=rtsp_service_active,
+                    persist=rtsp_control.write_mode,
+                )
+                log.info(
+                    f'set_rtsp_server_mode: mode={state.rtsp_mode} '
+                    f'running={state.rtsp_running}'
+                )
         elif event == 'set_webrtc_mode':
-            val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
-            # GAP-WEBRTC-04 (full mode/service semantics) stays open; GAP-INFO-01
-            # only requires the mode change to be republished in /c/info.
-            if val in (0, 1):
-                state.mark_info_dirty()
-                log.info(f'set_webrtc_mode: value {val} (republish /c/info)')
-            else:
-                log.warning(f'set_webrtc_mode: unknown value {val!r}')
+            requested = webrtc_control.decode_mode(data)
+            if requested is None:
+                log.warning('set_webrtc_mode: invalid payload (expected field 1 = 0/1)')
+            elif webrtc_control.apply_mode(
+                requested, state,
+                start_service=start_webrtc_service,
+                stop_service=stop_webrtc_service,
+            ):
+                log.info(
+                    f'set_webrtc_mode: mode={state.webrtc_mode} '
+                    f'status={state.webrtc_status}'
+                )
         elif event in ('change_video_size', 'save_video_size'):
             val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
             # GAP-QUALITY-01/02: raw 5/6/7 -> SD/HD/FHD, live apply always, persist

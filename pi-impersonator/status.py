@@ -18,8 +18,8 @@ def _uptime_string(seconds):
 
 def _rtsp_status(state):
     # Firmware boolean/service translation: internal 0 -> 2, 1 -> 1
-    # (FW-STATUS:183-192,246-265,296-301,365-384). GAP-STATUS-01 is partial:
-    # GAP-RTSP-02 (real service state) remains open.
+    # (FW-STATUS:183-192,246-265,296-301,365-384). GAP-RTSP-02 now drives
+    # state.rtsp_running from the actual service state (rtsp_control).
     return 1 if state.rtsp_running else 2
 
 

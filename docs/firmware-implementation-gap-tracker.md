@@ -591,7 +591,7 @@ closing the gap.
 
 ### GAP-WEBRTC-04 — Apply `set_webrtc_mode`
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented; live verification pending**
 - **Firmware behavior:** protobuf field 1 value `1` starts/enables the WebRTC service; `0` stops and
   disables it. Mode and runtime status are separate values and gate inbound offers. **[confirmed]**
 - **Current behavior:** the event is logged but has no state or service effect; status always reports
@@ -603,6 +603,13 @@ closing the gap.
   expected.
 - **Code:** [`signaling.py`](../pi-impersonator/signaling.py#L60-L66),
   [`signaling.py`](../pi-impersonator/signaling.py#L275-L278)
+- **Implementation (staged, commit pending):** [`webrtc_control.py`](../pi-impersonator/webrtc_control.py)
+  decodes field 1 (not the `0x08` tag byte), applies the `FUN_000b94ac` enable/disable state machine,
+  and exposes the `FUN_000b996c` gate (`offer_allowed`). `main.py`'s offer handler consults the gate,
+  and `set_webrtc_mode` / `configuration.webrtc` start/stop the `PrusaWebRTC` GLib loop with
+  `state.webrtc_mode` and `state.webrtc_status` tracked separately. Tests:
+  `test_pi_webrtc_control.py`. The paired rule where `configuration.webrtc=on` also forces RTSP
+  disabled is not implemented; WebRTC mode persistence across reboot is not implemented (in-memory).
 
 ### GAP-WEBRTC-05 — Honor transport policy, TTL, SDP plan, scoped quality, FPS and scope
 
@@ -811,7 +818,7 @@ closing the gap.
 
 ### GAP-RTSP-02 — Track configured mode separately from runtime state
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** handles disabled/enabled modes (`1`/`2` on the recovered direct event),
   starts/stops the server, tracks clients, and reports mode/status/URL dynamically. **[confirmed]**
 - **Current behavior:** direct start/stop calls systemd, but the service is enabled at boot and status
@@ -821,6 +828,16 @@ closing the gap.
   configuration-form commands through one path; choose boot behavior from mode.
 - **Acceptance:** disable survives the intended persistence boundary, status follows service state,
   and both command forms behave identically.
+- **Implementation (staged, commit pending):** [`rtsp_control.py`](../pi-impersonator/rtsp_control.py)
+  decodes the direct field-1 mode, maps `configuration.rtsp` `on`/`off` to `2`/`1`, and applies both
+  through one `apply_mode` path that starts/stops `prusa-rtsp.service`, sets `state.rtsp_mode`, and
+  resolves `state.rtsp_running` from `systemctl is-active` (falling back to the commanded state when
+  the unit cannot be probed). The configured mode persists at `/etc/prusa-cam/rtsp.mode`
+  (`PRUSA_RTSP_MODE_FILE` override) and is read at startup; on the read-only overlay a runtime write
+  is durable only once it reaches the lower filesystem via `deploy.sh`. Tests:
+  `test_pi_rtsp_control.py`. Default mode when the file is absent is `2` (enabled), matching the
+  shipped unit; the firmware's shipped default remains unrecovered. Client tracking is unchanged
+  (`/proc/net/tcp`).
 
 ### GAP-SNAPSHOT-03 — Match JPEG encoding quality
 
@@ -1011,7 +1028,7 @@ closing the gap.
 
 ### GAP-IDENTITY-01 — Firmware fallback when `wlan0` MAC retrieval fails
 
-- [ ] **P3 · Open**
+- [~] **P3 · Implemented; live verification pending**
 - **Firmware behavior:** formats `wlan0` MAC as uppercase colon-separated text and hashes it with MD5;
   if MAC retrieval fails, it generates a random ten-character seed and hashes that. **[confirmed]**
 - **Current behavior:** exact normal MAC path is implemented, but a missing/invalid `wlan0` MAC raises
@@ -1023,6 +1040,15 @@ closing the gap.
 - **Acceptance:** normal-path vectors remain exact; failure behavior is deterministic and documented.
 - **Code:** [`identity.py`](../pi-impersonator/identity.py),
   [`main.py`](../pi-impersonator/main.py#L120-L127)
+- **Implementation (staged, commit pending):** [`identity.py`](../pi-impersonator/identity.py) adds
+  `fingerprint_from_seed` (lowercase MD5 of the exact seed text), `generate_fallback_seed`, and
+  `load_or_create_fallback_seed`, which persists the seed at `/etc/prusa-cam/identity.fallback`
+  (`PRUSA_IDENTITY_FALLBACK` override) and reuses a valid existing seed verbatim so a bound token's
+  fingerprint is never silently rotated. `main.get_network_info` uses it when the MAC is missing or
+  invalid instead of raising, and reports an empty MAC. **Assumption:** the exact firmware alphabet
+  of `FUN_000997f8(..., 10, 1)` is unrecovered; alphanumeric is used. On the read-only overlay the
+  seed survives only after deployment, so a restart without the file regenerates it (with a warning).
+  Tests: `test_pi_identity.py` (`FallbackSeedTests`).
 
 ### GAP-IDENTITY-02 — Deploy exact fingerprint only with a fresh token
 
