@@ -24,6 +24,9 @@ class PrusaSignaling:
             reconnection=True,
             reconnection_attempts=0,
             reconnection_delay=5,
+            # Diagnostic only: PRUSA_SIO_DEBUG=1 surfaces engineio close reasons.
+            logger=os.environ.get('PRUSA_SIO_DEBUG') == '1',
+            engineio_logger=os.environ.get('PRUSA_SIO_DEBUG') == '1',
         )
         self._event_handler = None
         self._setup_handlers()
@@ -273,18 +276,32 @@ class PrusaSignaling:
         log.info(f'Sent features ({len(features_msg)} bytes{suffix})')
 
     async def _send_post_auth(self):
+        # Firmware parity: only emit while the session is actually alive. If the
+        # server closed the session mid-handshake, emitting the rest would queue
+        # messages that are then delivered on the *next* connection, which the
+        # server treats as a protocol violation and closes again.
         await asyncio.sleep(0.3)
+        if not self.sio.connected:
+            log.warning('post-auth aborted: session closed before send_sio_info')
+            return
         info_msg = encode_message({1: self.fingerprint, 2: self.token})
         await self.sio_emit('send_sio_info', info_msg)
         log.info(f'Sent send_sio_info ({len(info_msg)} bytes)')
 
         await asyncio.sleep(0.2)
+        if not self.sio.connected:
+            log.warning('post-auth aborted: session closed before status')
+            return
         await self.send_status()
 
         await asyncio.sleep(0.2)
+        if not self.sio.connected:
+            return
         await self.send_protobuf_version()
 
         await asyncio.sleep(0.2)
+        if not self.sio.connected:
+            return
         await self.send_features()
 
     async def connect(self):
