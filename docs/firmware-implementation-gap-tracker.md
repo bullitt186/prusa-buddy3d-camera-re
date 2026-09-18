@@ -441,12 +441,12 @@ These are explicit recovery prerequisites, not permission to guess:
 
 | Area | Known exactly | Still required before implementation |
 |---|---|---|
-| Trigger dispatcher | Complete semantic action list, action strings, and recovered descriptor `0x3f6f14` (tags 1–5, 8–15; `trigger.py` `decode_trigger`/`trigger_actions`) | Per-action `client_trigger` result subtype |
-| Configuration | Complete field/value/action table above | Exact on-wire tag numbers and presence rules |
-| Status | Top-level fields, struct size, many getters/translations, request correlation | Golden nested descriptor mapping for every claimed value |
-| ICE config | Parent WebRTC field 12, required semantics, TURN/STUN parameters | Nested protobuf subfield tags/cardinality |
-| Timelapse list | Dedicated 4-field descriptor, full sender, fragmentation threshold/loop | Entry/list field annotation and empty-list canonical bytes |
-| `client_trigger` | Dedicated 6-field descriptor and four sender variants | Subtype/result/error/progress enums and exact payload fixtures |
+| Trigger dispatcher | **Recovered 2026-09-18:** descriptor `0x3f6f14` (13 fields, tags 1–5/8–15) and the `FUN_000a963c` per-field `== 1`/`== 2` dispatch; `trigger.py` implements it | Tag 13 string semantics; multi-field processing order (firmware checks each field independently) |
+| Configuration | Complete field/value/action table above, and the dispatch table is keyed by **field name string** | The wire container is unresolved: the SIO `configuration` handler (lambda `0xa89e0`) `pb_decode`s a 9-field nested descriptor `0x3f73a4`, while the QR/config dispatcher `FUN_0006cf34` is reached only via `FUN_0006fb94`, whose parser `FUN_0006f9dc` looks JSON-like (`localeconv`). Neither path has been tied to the named `rtsp`/`webrtc`/`video_quality` dispatch with a captured payload |
+| Status | Top-level fields, struct size, many getters/translations, request correlation, and now the nested descriptor tables (dumpable) | Semantic tag-to-field annotation for every claimed nested value |
+| ICE config | The inbound `webrtc` message is 9 fields with nested submessages (`0x3f7680`), **not** the flat 12-field log string | Nested protobuf subfield tags/cardinality for the ICE submessages |
+| Timelapse list | Dedicated 4-string descriptor `0x3f701c`; full sender `FUN_000a1fa8` | Per-field annotation and canonical zero-entry bytes |
+| `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` with known types | Semantic names/result/progress enums and exact payload fixtures |
 | RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
 | WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
 
@@ -502,7 +502,7 @@ closing the gap.
 
 ### GAP-TRIGGER-01 — Decode and dispatch the requested trigger
 
-- [ ] **P0 · Open**
+- [~] **P0 · Implemented (9291968): recovered descriptor 0x3f6f14; policy actions (fw_update/timelapse) and client_trigger results still open**
 - **Firmware behavior:** decodes the trigger type and performs only the requested action: get
   features, get status, get protocol information, get snapshot, enable/disable snapshot upload,
   enable/disable timelapse, make timelapse video, list timelapse files, reboot, start firmware
@@ -658,7 +658,7 @@ closing the gap.
 
 ### GAP-STATUS-01 — Report actual dynamic camera state
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented (d1ec311, 9548e95): shared state drives quality/name/interval/WebRTC/RTSP; live verification pending**
 - **Firmware behavior:** constructs `CameraInfoMessage` from current snapshot state, upload interval,
   IR mode, speaker volume, RTSP mode/status/URL, WebRTC mode/status, service state, current quality,
   network state, timezone, and system telemetry. **[confirmed]**
@@ -675,7 +675,7 @@ closing the gap.
 
 ### GAP-STATUS-02 — Correct request correlation in `status`
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented and unit-tested (d1ec311); fixture/live comparison pending**
 - **Firmware behavior:** conditionally supplies field 10 from the request/correlation value when the
   corresponding presence flag is set. Initial live captures also show the Socket.IO SID in this
   position, so the exact source depends on send context. **[confirmed for conditional firmware
@@ -691,7 +691,7 @@ closing the gap.
 
 ### GAP-SNAPSHOT-01 — Apply snapshot upload interval changes
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented and unit-tested (d1ec311); live cadence verification pending**
 - **Firmware behavior:** accepts `snapshot_interval` in seconds, validates the inclusive range
   `10–600`, stores milliseconds in configuration, and changes the active upload cadence.
   **[confirmed]**
@@ -706,7 +706,7 @@ closing the gap.
 
 ### GAP-SNAPSHOT-02 — Implement snapshot enable/disable triggers
 
-- [ ] **P1 · Open**
+- [~] **P1 · Implemented and unit-tested (9291968); live verification pending**
 - **Firmware behavior:** `enable_snapshot_upload` and `disable_snapshot_upload` control the periodic
   uploader independently of immediate get-snapshot requests. **[confirmed]**
 - **Current behavior:** the periodic loop always runs unless locally paused for RTSP/WebRTC; trigger
@@ -770,7 +770,7 @@ closing the gap.
 
 ### GAP-QUALITY-01 — Correct the raw quality-byte mapping
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware parameter:** raw event/internal values are `5=SD`, `6=HD`, `7=FHD`; protobuf enums are
   `1=SD`, `2=HD`, `3=FHD`; dimensions are `640×480`, `1280×720`, `1920×1080`. **[confirmed directly
   from `FW-QUALITY-PB`, `FW-QUALITY-DIRECT`, and `FW-QUALITY-DIMS`]**
@@ -785,7 +785,7 @@ closing the gap.
 
 ### GAP-QUALITY-02 — Reproduce the quality persistence flag and recover event wiring
 
-- [ ] **P2 · Open**
+- [~] **P2 · Partial (d1ec311): live/persist split and failure rollback implemented and tested; event→flag wiring still unrecovered**
 - **Firmware behavior:** the recovered handler `FUN_00072f08` always attempts the live resolution
   change for raw values `5`, `6`, or `7`. It additionally calls the persistence setter only when
   `*param_3 != 0`, and updates its in-memory current value only after the live changer succeeds.
@@ -807,7 +807,7 @@ closing the gap.
 
 ### GAP-QUALITY-03 — Initialize and publish persisted quality
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware behavior:** starts from its stored quality and reports the translated current enum.
   **[confirmed]**
 - **Current behavior:** module state starts as FHD and status always encodes FHD even if
@@ -863,7 +863,7 @@ closing the gap.
 
 ### GAP-SNAPSHOT-03 — Match JPEG encoding quality
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware parameter:** snapshot JPEG conversion uses quality `95`. **[confirmed]**
 - **Current parameter:** GStreamer `jpegenc quality=85`.
 - **Connect impact:** different image quality and payload size; unlikely to affect authentication or
@@ -897,7 +897,7 @@ closing the gap.
 
 ### GAP-HTTP-01 — Snapshot `Expect: 100-continue`
 
-- [ ] **P2 · Open, low risk**
+- [~] **P2 · Implemented and unit-tested (d1ec311); live handshake verification pending**
 - **Firmware parameter:** sends `Expect: 100-continue` for JPEG snapshot uploads. **[confirmed]**
 - **Current parameter:** sends the body immediately without the header.
 - **Connect impact:** the live server already accepts current uploads; difference matters mainly for
@@ -948,7 +948,7 @@ closing the gap.
 
 ### GAP-AUTH-01 — Require successful authentication ACK
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware behavior:** continues its post-authentication flow only on the successful ACK path.
   **[confirmed]**
 - **Current behavior:** any ACK value returned without exception causes `send_sio_info`, `status`,
@@ -962,7 +962,7 @@ closing the gap.
 
 ### GAP-CONTROL-01 — Apply and publish camera-name changes
 
-- [ ] **P2 · Open**
+- [~] **P2 · Implemented and unit-tested (d1ec311, b6ec1ea); durable persistence under the overlay still open**
 - **Firmware behavior:** stores the new camera name and includes it in subsequent status and
   `/c/info`. **[confirmed]**
 - **Current behavior:** logs the value only; all outbound metadata stays `Buddy3D Camera`.
@@ -1157,7 +1157,7 @@ closing the gap.
 
 ### GAP-NETWORK-01 — Verify Wi-Fi signal conversion and secondary network block
 
-- [ ] **P3 · Open**
+- [~] **P3 · Partial (d1ec311): empty secondary submessage removed; signal conversion trace still open**
 - **Firmware behavior:** reports current WLAN identity/address/signal and has descriptor space for
   additional network state. **[confirmed]**
 - **Current behavior:** maps `/proc/net/wireless` quality linearly from 0–70 to 0–100 and emits an
@@ -1219,7 +1219,10 @@ closing the gap.
 - [x] Inbound WebRTC offer uses client ID field 3 and SDP field 4.
 - [x] Outbound WebRTC answer/candidate uses request ID field 1, numeric type field 2, payload field 3.
 - [x] Quality dimensions: protobuf enum `1=640×480`, `2=1280×720`, `3=1920×1080`.
-- [ ] Raw quality command mapping still needs correction: firmware uses `5=SD`, `6=HD`, `7=FHD`.
+- [x] Raw quality command mapping: firmware uses `5=SD`, `6=HD`, `7=FHD`; implemented in `state.py`/`quality_control.py` (`d1ec311`).
+- [x] Trigger message descriptor `0x3f6f14` (13 fields) and the `FUN_000a963c` per-field dispatch, recovered 2026-09-18 and implemented in `trigger.py` (`9291968`).
+- [x] `ClientTrigger` descriptor `0x3f6f58` types (strings 1/2/4, uvarints 3/5/6); semantics still unresolved.
+- [x] Timelapse file-list descriptor `0x3f701c` is four string fields; per-field annotation unresolved.
 - [x] H.264 intent: constrained baseline, level 3.1, packetization mode 1.
 - [x] Default snapshot interval is 10 seconds.
 - [x] `set_rtsp_server_mode` direct values handled as `1=disabled`, `2=enabled`.

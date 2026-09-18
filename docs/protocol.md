@@ -446,6 +446,30 @@ Processing path: `parseWebRtcMessage` → enable gate check (see §10) →
 enqueue to `singleton + 0x140` work queue). SDP answer emitted back on the
 `webrtc` Socket.IO event.
 
+**Correction (2026-09-18, direct 3.1.6 descriptor dump):** the table above is the *log
+format string* (`0x3f61c6`: `Client type: %d, Msg type: %d, ID len: %d, SDP len: %d,
+Transport policy: %d, TTL: %d, VideoCfg: %d, Plan: %d, Quality: %s, FPS: %d, TTL: %d,
+Scope: %d`) rendered as if it were the wire schema. The actual inbound message decoded by
+the SIO `webrtc` handler (lambda `0xa4a78`, `pb_decode` descriptor `0x3f7680`) has **9
+fields**, several of them nested, not 12 flat fields:
+
+| Tag | Type | Notes |
+|---|---|---|
+| 1 | string | |
+| 2 | string | |
+| 3 | string | |
+| 4 | submessage | 2 string fields |
+| 5 | uvarint | |
+| 6 | uvarint | |
+| 7 | uvarint | |
+| 8 | submessage | bytes + 2 uvarint |
+| 9 | submessage | 5 uvarint |
+
+The 12 named values in the log therefore come from the nested submessages (e.g. `Quality`
+is rendered through `FUN_000a11f4`, the protobuf-quality-to-string helper). The exact
+tag-to-log-value mapping is **not** yet recovered, so `GAP-WEBRTC-05` must not be
+implemented from the flat 12-field table. Do not guess the nested tags.
+
 ### WebRTCMessage — outbound answer
 
 Outgoing SDP answers only need fields 1, 2, and 3:
@@ -478,14 +502,34 @@ message WebRtcConnectionType {
 
 ### ClientTrigger (6 fields)
 
+Recovered 3.1.6 descriptor `0x3f6f58` (sender `FUN_000a2754`). Types are now known; the
+semantic names are not (the sender populates only a subset), so this remains
+`descriptor required` for meaning:
+
 ```protobuf
 message ClientTrigger {
     string field1 = 1;
     string field2 = 2;
-    bytes field3 = 3;
+    uint32 field3 = 3;
     string field4 = 4;
-    bytes field5 = 5;
-    bytes field6 = 6;
+    uint32 field5 = 5;
+    uint32 field6 = 6;
+}
+```
+
+### TimelapseFileList (4 fields)
+
+Recovered 3.1.6 descriptor `0x3f701c` (sender `FUN_000a1fa8`): four string fields.
+The sender assigns only a fragment string (one-based `i/n` prefix plus a substring) and a
+constant; the per-field annotations and the canonical zero-entry encoding remain
+unresolved, so `GAP-TIMELAPSE-01` must not encode an untyped empty message.
+
+```protobuf
+message TimelapseFileList {
+    string field1 = 1;
+    string field2 = 2;
+    string field3 = 3;
+    string field4 = 4;
 }
 ```
 
