@@ -336,18 +336,24 @@ class PrusaSignaling:
 
         The server can close the signaling WebSocket right after
         ``camera_authentication``. When that happens, drop the whole client and
-        open a new one so the next attempt cannot resume the dead session.
+        open a new one so the next attempt cannot resume the dead session. The
+        retry interval backs off exponentially (15s -> 120s cap) so a server-side
+        rejection is not hammered while it is in effect.
         """
+        delay = 15
         while True:
-            await asyncio.sleep(15)
+            await asyncio.sleep(delay)
             eio_state = getattr(self.sio.eio, 'state', '?')
             alive = bool(self.sio.connected) and eio_state == 'connected'
             if alive:
+                if delay != 15:
+                    log.info('signaling link recovered')
+                delay = 15
                 log.debug(f'signaling supervisor: connected (eio={eio_state})')
                 continue
             log.warning(
                 f'signaling link down (sio.connected={self.sio.connected}, eio={eio_state}); '
-                'reconnecting with a fresh session'
+                f'reconnecting with a fresh session (next retry in {delay}s)'
             )
             try:
                 await self.sio.disconnect()
@@ -359,6 +365,7 @@ class PrusaSignaling:
                 await self._connect_once()
             except Exception as e:
                 log.warning(f'signaling reconnect failed: {e}')
+            delay = min(delay * 2, 120)
 
     async def wait(self):
         await self.sio.wait()

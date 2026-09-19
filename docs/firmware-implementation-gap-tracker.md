@@ -750,7 +750,8 @@ closing the gap.
 
 ### GAP-CAP-01 — Stop overpromising unsupported features, or implement their wire behavior
 
-- [ ] **P1 · Open**
+- [ ] **P1 · Open — owner decision required**
+- **WP-8 note:** auditing the advertised feature list against implemented behavior shows the gaps are TimelapseEn/Interval/VideoMake/FileList, FwUpdate and the absent-hardware controls (IrMode/SpeakerVolume/FanControl/MicroSD). Pruning or keeping them is a product decision recorded in `.opencode/plans/fix-firmware-gaps.md`; the code does not overclaim success for the absent-hardware controls (GAP-DEVICE-02).
 - **Firmware behavior:** advertises features it implements: `SocketCom`, `UploadInterval`,
   `TimelapseEn`, `TimelapseInterval`, `TimelapseVideoMake`, `TimelapseFileList`, `VideoStream`,
   `RtspStream`, `GetSnapshot`, `IrMode`, `SpeakerVolume`, `WiFi`, `FwVer`, `HwVer`, `CameraName`,
@@ -1136,7 +1137,9 @@ closing the gap.
 
 ### GAP-STATUS-03 — Verify remaining status subfields against fixtures
 
-- [~] **P3 · Partial**
+- [~] **P3 · Nested schema recovered from the descriptor and three mismatches fixed**
+- **Implementation (WP-8):** dumped `CameraInfoMessage` @ `0x3f6e98` and its submessages and fixed three wire-type/tag mismatches in `status.py`: `timelapse_status` (descriptor `0x3f753c`) tag6 = fixed32/float, tag7 = uvarint (were swapped); `extended_status.4` (descriptor `0x3f72b0`) model string on tag 5 (was 6); `extended_status.6` (descriptor `0x3f7278`) RTSP URL on tag 3 (was 4). Tests: `tests/test_pi_status_schema.py`. Live-verified: `/c/info` 200, snapshots 200, status sent with no errors.
+- **Still open:** a golden fixture captured from a genuine 3.1.6 status (not available offline) and the semantic annotation of every remaining nested tag.
 - **Firmware behavior:** sends the recovered top-level fields 2, 3, 4, 5, 8, 9, 10 conditionally,
   and 11, with many nested values obtained from actual services/configuration. **[confirmed]**
 - **Current behavior:** top-level structure is substantially reconstructed, but several nested values
@@ -1153,7 +1156,9 @@ closing the gap.
 
 ### GAP-STATUS-04 — Timezone representation
 
-- [ ] **P3 · Open**
+- [~] **P3 · Firmware behavior recovered; implementation pending**
+- **Firmware behavior (WP-8):** `FUN_000b1dc8` detects the timezone from the web API (`timezone.prusa3d.com`), `FUN_000b170c` converts it, writes it to `/etc/TZ` (length-capped at 64), and falls back to UTC when empty. Strings: "Detecting timezone from web API: %s%s", "Converted timezone: %s", "Empty timezone in /etc/TZ, using UTC".
+- **Implementation:** mirror the API detection + `/etc/TZ` write and report the converted name in status tag 5.10.1 (currently `time.tzname[0]`, an abbreviation such as `CEST`, which is not the recovered representation).
 - **Firmware behavior:** detects timezone through its configured/web timezone service and reports
   firmware state. **[confirmed at service level; exact status string format needs fixture]**
 - **Current behavior:** sends `time.tzname[0]`, commonly an abbreviation such as `CET`/`CEST`, plus a
@@ -1166,6 +1171,7 @@ closing the gap.
 ### GAP-NETWORK-01 — Verify Wi-Fi signal conversion and secondary network block
 
 - [~] **P3 · Partial (d1ec311): empty secondary submessage removed; signal conversion trace still open**
+- **WP-8 note:** the network block is built from the singleton getter `FUN_000a0524` → `FUN_000a0438`; the exact signal-quality conversion formula is not yet recovered, so `signaling._signal_quality` (linear 0–70 → 0–100) is unchanged until it is.
 - **Firmware behavior:** reports current WLAN identity/address/signal and has descriptor space for
   additional network state. **[confirmed]**
 - **Current behavior:** maps `/proc/net/wireless` quality linearly from 0–70 to 0–100 and emits an

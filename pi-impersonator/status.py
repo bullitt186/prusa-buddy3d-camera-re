@@ -42,8 +42,10 @@ def build_status_message(state, *, token='', mac='', ip='', ssid='',
         3: 0,
         4: '',
         5: 0,
-        6: 0,
-        7: Float32(0.0),
+        # GAP-STATUS-03: descriptor 0x3f753c pins tag 6 = fixed32 (float) and
+        # tag 7 = uvarint; the previous build had these two swapped.
+        6: Float32(0.0),
+        7: 0,
     })
 
     # GAP-DEVICE-02: fields 5/6 carry the hardware-implying IR-mode/speaker
@@ -80,12 +82,16 @@ def build_status_message(state, *, token='', mac='', ip='', ssid='',
             2: 0,
             3: 0,
             4: 0,
-            6: MODEL,
+            # GAP-STATUS-03: descriptor 0x3f72b0 has tags 1-4 uvarint and tag 5
+            # string; the model string belongs on tag 5 (was tag 6).
+            5: MODEL,
         }),
         6: encode_message({
             1: state.rtsp_mode,
             2: _rtsp_status(state),
-            4: f'rtsp://{ip}:8554/live' if ip else '',
+            # GAP-STATUS-03: descriptor 0x3f7278 has tags 1-2 uvarint and tag 3
+            # string; the RTSP URL belongs on tag 3 (was tag 4).
+            3: f'rtsp://{ip}:8554/live' if ip else '',
         }),
         7: encode_message({
             1: 1,
