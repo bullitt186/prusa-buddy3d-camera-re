@@ -67,11 +67,13 @@ those are `timelapse_status` field-2 getters, not this block, and `MODEL` never 
 on tag 5. `timelapse.storage_status` reports the emulated SD at `/mnt/sdcard` and
 `signaling` supplies it. **Confirmed in Connect 2026-09-19:** timelapse is available, the
 storage page shows size/used/free, and the interval is configurable. **Live end-to-end test
-2026-09-19:** enable/disable works via trigger tag 5 and 9 frames were captured to
-`/mnt/sdcard/timelapse`; the app's interval change arrives as `configuration {2: <seconds>}`,
-which is the firmware's `set_timelaps_interval` (dispatcher `FUN_000a7940`) and is now wired
-to `state.timelapse_interval`. Make-video and file-list were not exercised; the file-list
-response envelope (`0x3f701c`) is still unannotated.
+2026-09-19:** enable/disable works via trigger tag 5 and frames are captured to
+`/mnt/sdcard/timelapse`; the app's interval change arrives as `configuration {2: <seconds>}`
+(=`set_timelaps_interval`, dispatcher `FUN_000a7940`), and after wiring it the log shows
+`Config: timelapse_interval → 30s` with frames exactly 35 s apart. **Limitation:**
+`/mnt/sdcard` is on the read-only overlay root, so recordings are lost on reboot (retrievable
+over SMB until then). Make-video and file-list were not exercised; the file-list response
+envelope (`0x3f701c`) is still unannotated.
 
 ---
 
