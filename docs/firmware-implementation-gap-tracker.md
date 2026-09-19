@@ -535,8 +535,10 @@ closing the gap.
 
 ### GAP-CONFIG-01 — Replace guessed configuration decoding with the recovered schema
 
-- [~] **P0 · Format resolved and implemented (JSON); golden capture pending**
-- **Format (resolved 2026-09-19):** the configuration payload is **JSON**, not protobuf. The binary links `nlohmann::json` (`./xhr_tools/nlohmann/json.hpp`, `json_abi_v3_11_3`) and the SIO `configuration` handler `FUN_000c4718` → `FUN_0006fb94` → parser `FUN_0006f9dc` (nlohmann number parsing via `localeconv`) → dispatcher `FUN_0006cf34`. The tracker's earlier "dump the nanopb descriptor" instruction was based on a mistaken protobuf assumption.
+- [~] **P0 · Corrected 2026-09-19: the SIO `configuration` event is a nested protobuf, NOT JSON; video_quality mapped, others in progress**
+- **Correction (live-verified):** the earlier "JSON" conclusion was wrong for the Socket.IO path. Live Connect setting changes arrive as a **nested protobuf** (descriptor `0x3f73a4`, 9 fields; handler `FUN_000a89e0` decodes it and dispatches by name — `'video_quality'`, `'light_control'`, `'motor_controll'`, `'set_snapshot_upload_interval'`). The JSON parser (`nlohmann`, `FUN_0006f9dc`) is only the QR/manual-config path. The JSON handler rejected every live setting change ("not valid JSON").
+- **Mapped (live):** `tag8.1` = video quality enum (1=SD/2=HD/3=FHD) — implemented in `main.py` via `handle_quality`.
+- **In progress:** `tag3` carries the remaining settings (subfields 4/11/12 observed live); the tag→name mapping is being recovered from `FUN_000a89e0` / `FUN_000a7170` (timelapse).
 - **Implementation:** `main.py`'s `configuration` handler now parses JSON only (the generic protobuf fallback and all numeric-tag lookups are removed) and dispatches the recovered table exactly: `rtsp` on/off, `webrtc` on/off (with the paired `webrtc on → RTSP disabled` rule), `video_quality` sd/hd/fhd, `light_control` auto/night/day, `camera_name`, `snapshot_interval` 10..600, `start_fw_update` start, and the leading `code` rejecting `"42"`/`"66"`.
 - **Still open:** a redacted golden JSON capture from a genuine 3.1.6 device to pin exact value casing; `start_fw_update` remains a truthful no-op (owner decision).
 - **Firmware behavior:** decodes a protobuf configuration message and dispatches named settings
