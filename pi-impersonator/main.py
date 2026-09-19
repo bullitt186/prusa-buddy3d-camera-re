@@ -703,6 +703,20 @@ async def main():
                         f'Config: video_quality → enum {vq[1]} '
                         f'({state.resolution()})'
                     )
+            # GAP-CONFIG-01: top-level field 2 = set_timelaps_interval. Recovered
+            # from the configuration dispatcher FUN_000a7940 (field 2 at struct
+            # offset 0x14 dispatches the name "set_timelaps_interval", logging
+            # "Timelapse interval: %d seconds"). Live Connect sends {2: <seconds>}
+            # when the timelapse interval changes; it does not arrive via trigger.
+            tl_interval = msg.get(2)
+            if tl_interval is not None:
+                if state.set_timelapse_interval(tl_interval):
+                    log.info(f'Config: timelapse_interval → {state.timelapse_interval}s')
+                else:
+                    log.warning(
+                        f'Config: timelapse_interval {tl_interval!r} rejected '
+                        f'({timelapse.INTERVAL_MIN}..{timelapse.INTERVAL_MAX})'
+                    )
             # tag3 carries the remaining settings. tag3.4 = light_control (the
             # "sun" icon): FUN_000a89e0 reads struct offset 0x38 (iStack_90) and
             # dispatches 'light_control'. The Pi has no IR illuminator, so this

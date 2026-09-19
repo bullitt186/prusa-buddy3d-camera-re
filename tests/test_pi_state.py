@@ -88,6 +88,25 @@ class SnapshotIntervalConfigTests(unittest.TestCase):
                 self.assertIsNone(snapshot_interval_from_config(raw))
 
 
+class TimelapseIntervalTests(unittest.TestCase):
+    """GAP-CONFIG-01: config field 2 = set_timelaps_interval (FUN_000a7940)."""
+
+    def test_accepts_timelapse_module_range(self):
+        state = CameraState()
+        for seconds in (1, 30, 3600):
+            with self.subTest(seconds=seconds):
+                self.assertTrue(state.set_timelapse_interval(seconds))
+                self.assertEqual(state.timelapse_interval, seconds)
+
+    def test_rejects_out_of_range_and_non_int(self):
+        state = CameraState()
+        state.set_timelapse_interval(30)
+        for invalid in (0, 3601, -1, '30', 30.0, 30.5, None, True):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(state.set_timelapse_interval(invalid))
+                self.assertEqual(state.timelapse_interval, 30)
+
+
 class CameraNameTests(unittest.TestCase):
     def test_accepts_non_empty_and_strips(self):
         state = CameraState()

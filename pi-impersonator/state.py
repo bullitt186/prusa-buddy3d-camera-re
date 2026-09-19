@@ -15,6 +15,8 @@ Quality representations recovered from firmware 3.1.6
 """
 import asyncio
 
+import timelapse
+
 # Exact firmware raw-event-byte -> protobuf-enum mapping (GAP-QUALITY-01).
 RAW_TO_ENUM = {5: 1, 6: 2, 7: 3}
 ENUM_TO_RAW = {1: 5, 2: 6, 3: 7}
@@ -103,6 +105,22 @@ class CameraState:
         # GAP-INFO-01: a cadence change is a published attribute, so the
         # /c/info service loop must republish it.
         self.mark_info_dirty()
+        return True
+
+    def set_timelapse_interval(self, seconds):
+        """Set the timelapse capture cadence (GAP-CONFIG-01).
+
+        The Socket.IO ``configuration`` top-level field 2 is the firmware's
+        ``set_timelaps_interval`` (recovered from dispatcher ``FUN_000a7940``,
+        which logs ``"Timelapse interval: %d seconds"``). Accepts int seconds in
+        the timelapse module's 1..3600 range; anything else is rejected and the
+        previous value kept.
+        """
+        if type(seconds) is not int:
+            return False
+        if timelapse.valid_interval(seconds) is None:
+            return False
+        self.timelapse_interval = seconds
         return True
 
     def set_camera_name(self, name):
