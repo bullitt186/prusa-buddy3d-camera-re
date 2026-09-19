@@ -121,15 +121,25 @@ class PrusaSignaling:
         try:
             ack = await self.sio.call('camera_authentication', auth_msg, timeout=10)
         except Exception as e:
-            log.error(f'Auth failed: {e}')
+            log.error(f'Auth failed: {e}; dropping session for supervised retry')
+            await self._drop_session()
             return
         log.info(f'Auth ACK: {ack!r}')
         # GAP-AUTH-01: only the exact integer 1 is a successful ACK; anything else
-        # (0, 5, malformed, bool) must not emit post-auth messages.
+        # (0, 5, malformed, bool) must not emit post-auth messages. Drop the
+        # session so the supervisor retries with a fresh client + backoff.
         if not auth_ack_is_success(ack):
-            log.warning(f'Auth not accepted (ACK={ack!r}); skipping post-auth messages')
+            log.warning(f'Auth not accepted (ACK={ack!r}); dropping session for supervised retry')
+            await self._drop_session()
             return
         await self._send_post_auth()
+
+    async def _drop_session(self):
+        """Close the current client so ``supervise`` reconnects on its backoff."""
+        try:
+            await self.sio.disconnect()
+        except Exception:
+            pass
 
     def _log_ack(self, event):
         def cb(*args):

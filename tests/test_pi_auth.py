@@ -36,12 +36,16 @@ class _FakeSio:
         self._ack = ack
         self._error = error
         self.calls = []
+        self.disconnects = 0
 
     async def call(self, event, data, timeout=None):
         self.calls.append((event, data, timeout))
         if self._error is not None:
             raise self._error
         return self._ack
+
+    async def disconnect(self):
+        self.disconnects += 1
 
 
 class _FakeSignaling:
@@ -54,6 +58,11 @@ class _FakeSignaling:
     async def _send_post_auth(self):
         self.post_auth_count += 1
 
+    async def _drop_session(self):
+        # Mirrors PrusaSignaling._drop_session so the supervised-retry path can
+        # be asserted without importing the socketio runtime.
+        await self.sio.disconnect()
+
 
 class AuthenticateFlowTests(unittest.TestCase):
     def _authenticate(self, sio):
@@ -65,20 +74,26 @@ class AuthenticateFlowTests(unittest.TestCase):
         sig = self._authenticate(_FakeSio(ack=1))
         self.assertEqual(sig.post_auth_count, 1)
         self.assertEqual(sig.sio.calls[0][0], 'camera_authentication')
+        self.assertEqual(sig.sio.disconnects, 0)
 
     def test_rejected_acks_emit_no_post_auth(self):
         for ack in (0, 5, True, '1', None, b'', [], {}):
             with self.subTest(ack=ack):
                 sig = self._authenticate(_FakeSio(ack=ack))
                 self.assertEqual(sig.post_auth_count, 0)
+                # WP-1 hardening: a rejected ACK drops the session so the
+                # supervisor retries with a fresh client + backoff.
+                self.assertEqual(sig.sio.disconnects, 1)
 
     def test_timeout_emits_no_post_auth(self):
         sig = self._authenticate(_FakeSio(error=TimeoutError('auth timeout')))
         self.assertEqual(sig.post_auth_count, 0)
+        self.assertEqual(sig.sio.disconnects, 1)
 
     def test_exception_emits_no_post_auth(self):
         sig = self._authenticate(_FakeSio(error=RuntimeError('boom')))
         self.assertEqual(sig.post_auth_count, 0)
+        self.assertEqual(sig.sio.disconnects, 1)
 
 
 if __name__ == '__main__':

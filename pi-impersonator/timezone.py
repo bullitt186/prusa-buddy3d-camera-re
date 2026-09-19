@@ -55,7 +55,12 @@ def read_tz_file(path=TZ_FILE):
 
 
 def write_tz_file(value, path=TZ_FILE):
-    """Write ``value`` to ``/etc/TZ``. Rejects empty/over-long values (firmware cap)."""
+    """Write ``value`` to ``/etc/TZ``. Rejects empty/over-long values (firmware cap).
+
+    ``/etc/TZ`` is root-owned while the service runs as an unprivileged user, so
+    fall back to the passwordless ``sudo tee`` the unit already relies on for
+    systemctl. Non-default paths (tests) never use sudo.
+    """
     if not value or len(value) > TZ_MAX_LEN:
         return False
     try:
@@ -63,6 +68,18 @@ def write_tz_file(value, path=TZ_FILE):
             f.write(value + '\n')
         return True
     except OSError:
+        pass
+    if path != TZ_FILE:
+        return False
+    try:
+        import subprocess
+        subprocess.run(
+            ['sudo', '-n', 'tee', path],
+            input=(value + '\n').encode('ascii', 'ignore'),
+            capture_output=True, timeout=5, check=True,
+        )
+        return True
+    except Exception:
         return False
 
 
