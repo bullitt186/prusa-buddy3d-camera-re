@@ -2,6 +2,7 @@ import asyncio
 import logging
 import subprocess
 import quality
+import webrtc_lifecycle
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstWebRTC', '1.0')
@@ -68,9 +69,10 @@ def _strip_sprop(sdp_text):
 
 
 class PrusaWebRTC:
-    def __init__(self, on_offer, on_ice_candidate):
+    def __init__(self, on_offer, on_ice_candidate, on_stream_ended=None):
         self._on_offer = on_offer
         self._on_ice = on_ice_candidate
+        self._on_stream_ended = on_stream_ended
         self._pipe = None
         self._webrtc = None
         self._request_id = None
@@ -78,6 +80,10 @@ class PrusaWebRTC:
         self._glib_loop = None
         self._glib_thread = None
         self._proc = None
+        self._ice_connected = False
+        self._ended_notified = False
+        self._disconnect_timeout_id = None
+        self._connect_watchdog_id = None
 
     @property
     def is_running(self):
@@ -98,6 +104,18 @@ class PrusaWebRTC:
             self._glib_loop = None
 
     def _teardown(self):
+        self._cancel_timeout('_disconnect_timeout_id')
+        self._cancel_timeout('_connect_watchdog_id')
+        self._ice_connected = False
+        self._ended_notified = False
+        # Disconnect the old pipeline's ICE-state handler BEFORE NULL so a stale
+        # CLOSED signal cannot set _ended_notified and suppress the next session's
+        # genuine end notification (GAP-WEBRTC-03 review note).
+        if self._webrtc is not None:
+            try:
+                self._webrtc.disconnect_by_func(self._on_ice_state_change)
+            except Exception:
+                pass
         if self._pipe:
             self._pipe.set_state(Gst.State.NULL)
             self._pipe = None
@@ -165,13 +183,26 @@ class PrusaWebRTC:
         )
 
         self._webrtc.connect('on-ice-candidate', self._on_ice_candidate_cb)
+        self._webrtc.connect(
+            'on-ice-connection-state-change', self._on_ice_state_change
+        )
         self._webrtc.connect('on-negotiation-needed', self._on_negotiation_needed)
         self._offer_started = False
+        self._ice_connected = False
+        self._ended_notified = False
+        self._disconnect_timeout_id = None
+        self._connect_watchdog_id = None
         self._pipe.set_state(Gst.State.PLAYING)
         log.info('Pipeline set to PLAYING')
         # Standard webrtcbin flow: the offer is created from the
         # on-negotiation-needed signal. Keep a fallback in case it does not fire.
         GLib.timeout_add(3000, self._create_offer_timeout)
+        # GAP-WEBRTC-03: bound the time to the first successful ICE connection.
+        # Pi-side policy — GStreamer has no peer TTL and the firmware's exact TTL
+        # worker is untraced, so this only prevents a permanently paused service.
+        self._connect_watchdog_id = GLib.timeout_add_seconds(
+            30, self._connect_watchdog
+        )
 
     def handle_answer(self, request_id, sdp_text):
         """Apply the viewer's answer to the existing peer connection."""
@@ -223,6 +254,75 @@ class PrusaWebRTC:
             self._loop.call_soon_threadsafe(
                 asyncio.ensure_future,
                 self._on_ice(self._request_id, candidate, mline_index)
+            )
+
+    def _cancel_timeout(self, attr):
+        timeout_id = getattr(self, attr, None)
+        if timeout_id is not None:
+            try:
+                GLib.source_remove(timeout_id)
+            except Exception as e:
+                log.warning(f'could not remove timeout {attr}={timeout_id}: {e}')
+            setattr(self, attr, None)
+
+    def _on_ice_state_change(self, element, state):
+        """Handle GstWebRTC's on-ice-connection-state-change (GLib thread).
+
+        CONNECTED/COMPLETED means media can flow; DISCONNECTED gets a grace
+        period because ICE may recover, while FAILED/CLOSED are terminal.
+        """
+        try:
+            state_value = int(state)
+        except (TypeError, ValueError):
+            state_value = state
+        log.info(f'ICE connection state: {state_value}')
+
+        if state_value in webrtc_lifecycle.ICE_CONNECTED:
+            self._ice_connected = True
+            self._cancel_timeout('_disconnect_timeout_id')
+            self._cancel_timeout('_connect_watchdog_id')
+            return
+
+        reason = webrtc_lifecycle.end_reason(state_value)
+        if reason == 'ice-disconnected':
+            if self._disconnect_timeout_id is None:
+                self._disconnect_timeout_id = GLib.timeout_add_seconds(
+                    15, self._check_disconnected
+                )
+        elif reason in ('ice-failed', 'ice-closed'):
+            self._notify_stream_ended(reason)
+
+    def _check_disconnected(self):
+        """Resolve a DISCONNECTED grace period after the timeout (GLib thread)."""
+        self._disconnect_timeout_id = None
+        state = None
+        if self._webrtc is not None:
+            try:
+                state = int(self._webrtc.get_property('ice-connection-state'))
+            except Exception as e:
+                log.warning(f'could not read ICE connection state: {e}')
+        if (not self._ice_connected
+                or state in webrtc_lifecycle.ICE_ENDED
+                or state == webrtc_lifecycle.ICE_DISCONNECTED):
+            self._notify_stream_ended('ice-disconnected')
+        return False
+
+    def _connect_watchdog(self):
+        """Fail the session if ICE never connected (GLib thread)."""
+        self._connect_watchdog_id = None
+        if not self._ice_connected:
+            self._notify_stream_ended('no-ice-connection')
+        return False
+
+    def _notify_stream_ended(self, reason):
+        """Report the end of the session once, marshalled to the asyncio loop."""
+        if self._ended_notified:
+            return
+        self._ended_notified = True
+        log.info(f'WebRTC stream ended ({reason})')
+        if self._loop and self._on_stream_ended:
+            self._loop.call_soon_threadsafe(
+                asyncio.ensure_future, self._on_stream_ended(reason)
             )
 
     def _on_offer_created(self, promise):

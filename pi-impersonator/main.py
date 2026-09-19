@@ -31,6 +31,7 @@ from proto import (
     decode_message,
     encode_camera_webrtc_message,
     encode_message,
+    find_webrtc_candidate,
 )
 import device_control
 import quality
@@ -311,37 +312,10 @@ def decline_firmware_update(source):
 def _find_candidate(msg):
     """Return the ICE candidate text from a decoded WebRTC message, or ''.
 
-    The viewer trickles candidates as ``a=candidate:...`` (SDP attribute form);
-    GStreamer's add-ice-candidate wants the value without the ``a=`` prefix.
+    Thin wrapper over ``proto.find_webrtc_candidate`` so the extraction is
+    host-testable without importing this module's aiohttp/socketio deps.
     """
-    def normalize(text):
-        if text.startswith('a='):
-            text = text[2:]
-        return text if text.startswith('candidate:') else ''
-
-    def scan(value):
-        if isinstance(value, bytes):
-            found = normalize(value.decode('utf-8', 'replace'))
-            if found:
-                return found
-            try:
-                inner = decode_message(value)
-            except Exception:
-                return ''
-            if isinstance(inner, dict):
-                for v in inner.values():
-                    found = scan(v)
-                    if found:
-                        return found
-        elif isinstance(value, str):
-            return normalize(value)
-        return ''
-
-    for value in msg.get('raw', {}).values():
-        found = scan(value)
-        if found:
-            return found
-    return ''
+    return find_webrtc_candidate(msg)
 
 
 async def timelapse_loop():
@@ -565,7 +539,19 @@ async def main():
         )
         await sig.sio_emit('webrtc', msg)
 
-    webrtc = PrusaWebRTC(on_offer=on_webrtc_offer, on_ice_candidate=on_ice_candidate)
+    async def on_stream_ended(reason):
+        # GAP-WEBRTC-03: a failed/closed/disconnected peer must resume snapshots.
+        if state.streaming:
+            state.streaming = False
+            log.info(f'Resuming snapshots after WebRTC stream ended ({reason})')
+        else:
+            log.debug(f'WebRTC stream ended ({reason}); snapshots already running')
+
+    webrtc = PrusaWebRTC(
+        on_offer=on_webrtc_offer,
+        on_ice_candidate=on_ice_candidate,
+        on_stream_ended=on_stream_ended,
+    )
     webrtc.start()
 
     def start_webrtc_service():

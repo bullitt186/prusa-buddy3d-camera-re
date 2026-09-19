@@ -104,13 +104,27 @@ def decode_camera_webrtc_message(data):
         tag7 uvarint
         tag8 submsg  ICE server configuration (repeated {id, host, port, type})
         tag9 submsg  (5 uvarints)
+
+    ``field4_fields`` carries the raw tag4 submessage decoded as
+    ``{1: value, 2: value}``. The existing ``field4`` key is kept as decoded by
+    ``decode_message`` (a ``str`` when the submessage bytes are valid UTF-8, as
+    the ASCII candidate/SDP payloads always are).
     """
     fields = decode_message(data)
+    field4_fields = {}
+    for field, wire, value in _iter_fields(data):
+        if field == 4 and wire == 2:
+            try:
+                field4_fields = decode_message(value)
+            except Exception:
+                field4_fields = {}
+            break
     return {
         'request_id': fields.get(1, ''),
         'client_id': fields.get(2, ''),
         'session_id': fields.get(3, ''),
         'field4': fields.get(4, ''),
+        'field4_fields': field4_fields,
         'field5': fields.get(5, 0),
         'field6': fields.get(6, 0),
         'field7': fields.get(7, 0),
@@ -118,6 +132,57 @@ def decode_camera_webrtc_message(data):
         'field9': fields.get(9, b''),
         'raw': fields,
     }
+
+
+def find_webrtc_candidate(msg):
+    """Return the ICE candidate text from a decoded WebRTC message, or ''.
+
+    The viewer trickles candidates as ``a=candidate:...`` (SDP attribute form);
+    GStreamer's ``add-ice-candidate`` wants the value without the ``a=`` prefix.
+
+    ``decode_message`` collapses a nested length-delimited field to ``str`` when
+    its bytes happen to be valid UTF-8. The tag4 ``{1: candidate, 2: mid}``
+    submessage is pure ASCII, so it arrives as a ``str`` and must be re-encoded
+    and decoded as a protobuf submessage before it is discarded.
+    """
+    def normalize(text):
+        if text.startswith('a='):
+            text = text[2:]
+        return text if text.startswith('candidate:') else ''
+
+    def scan(value, depth=0):
+        if depth > 8:
+            return ''
+        if isinstance(value, (bytes, bytearray)):
+            raw = bytes(value)
+            found = normalize(raw.decode('utf-8', 'replace'))
+            if found:
+                return found
+        elif isinstance(value, str):
+            found = normalize(value)
+            if found:
+                return found
+            raw = value.encode('utf-8')
+        else:
+            return ''
+        try:
+            inner = decode_message(raw)
+        except Exception:
+            return ''
+        if isinstance(inner, dict):
+            for nested in inner.values():
+                found = scan(nested, depth + 1)
+                if found:
+                    return found
+        return ''
+
+    if not isinstance(msg, dict):
+        return ''
+    for value in msg.get('raw', {}).values():
+        found = scan(value)
+        if found:
+            return found
+    return ''
 
 
 def _iter_fields(data):

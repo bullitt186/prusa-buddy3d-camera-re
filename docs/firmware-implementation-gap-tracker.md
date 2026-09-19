@@ -618,6 +618,17 @@ closing the gap.
   pipeline and resume snapshots.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L216-L231),
   [`webrtc.py`](../pi-impersonator/webrtc.py#L32-L51)
+- **Implementation (staged, commit pending):** `webrtc.py` now connects
+  `on-ice-connection-state-change` and maps states through the stdlib-only
+  [`webrtc_lifecycle.py`](../pi-impersonator/webrtc_lifecycle.py): FAILED/CLOSED notify
+  immediately, DISCONNECTED is re-checked after a 15 s grace period, and a 30 s connect watchdog
+  fires when ICE never connects. `main.py`'s `on_stream_ended` clears `state.streaming` and
+  resumes periodic snapshots. Viewer trickle candidates are extracted by the host-testable
+  [`proto.find_webrtc_candidate`](../pi-impersonator/proto.py), which also unwraps the
+  UTF-8-collapsed tag4 `str` (the live 14-of-21 drop). Tests:
+  `test_pi_proto.py::FindWebRtcCandidateTests`, `test_pi_webrtc_lifecycle.py`. The firmware's
+  exact peer TTL worker remains untraced, so the watchdog is explicitly Pi-side policy; live
+  Connect verification and explicit TTL tests are still pending.
 
 ## P1 — Connect-visible control and state gaps
 
