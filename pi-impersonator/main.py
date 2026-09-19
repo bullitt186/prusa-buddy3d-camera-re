@@ -703,10 +703,21 @@ async def main():
                         f'Config: video_quality → enum {vq[1]} '
                         f'({state.resolution()})'
                     )
-            # tag3 carries the remaining settings (subfields 4/11/12 observed);
-            # the field→setting mapping is still being recovered from the
-            # firmware handler FUN_000a89e0 (it calls the timelapse handler
-            # FUN_000a7170). Logged above until mapped.
+            # tag3 carries the remaining settings. tag3.4 = light_control (the
+            # "sun" icon): FUN_000a89e0 reads struct offset 0x38 (iStack_90) and
+            # dispatches 'light_control'. The Pi has no IR illuminator, so this
+            # is a truthful unavailable result (never a fake applied state).
+            t3 = msg.get(3)
+            if isinstance(t3, dict):
+                lc = t3.get(4)
+                if lc is not None:
+                    applied = device_control.apply_light_control(lc, state)
+                    log.info(f'Config: light_control (tag3.4) {lc!r} applied={applied}')
+                if 11 in t3 or 12 in t3:
+                    log.info(
+                        f'Config: tag3 rtsp candidate {{11: {t3.get(11)!r}, '
+                        f'12: {t3.get(12)!r}}} (mapping pending)'
+                    )
             # FW-CONFIG:49-74,286-300: the leading `code` rejects "42"/"66".
             code = msg.get('code')
             if code is not None and str(code) in ('42', '66'):
