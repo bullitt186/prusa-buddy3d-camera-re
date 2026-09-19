@@ -780,3 +780,58 @@ Port: dynamic
 | OTA Updates | `connect-ota.prusa3d.com` |
 | Timezone | `timezone.prusa3d.com` |
 | NTP | `prusa3d.pool.ntp.org` |
+
+## WebRTC camera-side protocol (recovered 2026-09-19)
+
+Recovered from the 3.1.6 binary (`FUN_000a3e90`, `FUN_000bf180`, `FUN_000b996c`,
+`FUN_000b75e0`, `FUN_000bc0ec`) and confirmed against live Connect traffic.
+
+### Flow
+1. The viewer presses play. Connect sends the camera an **ICE config** `webrtc`
+   message (type `1`).
+2. The camera builds a peer connection from the ICE config and sends an
+   **offer** `webrtc` message (type `3`).
+3. The viewer sends an **answer** `webrtc` message (type `2`).
+4. Both sides **trickle ICE candidates** (`webrtc` messages of type `4`).
+
+The camera is the **offerer** (`"expected HaveLocalOffer"`,
+`"Sending initial WebRTC %s (Trickle ICE)"`); `FUN_000bf180` strips
+`a=candidate:` / `a=end-of-candidates` from the local SDP (trickle ICE).
+
+### `webrtc` message (9-field descriptor `0x3f7680`)
+
+| tag | type | offer | answer | candidate | ICE config |
+|---|---|---|---|---|---|
+| 1 | string | token | token | token | token |
+| 2 | string | request_id | request_id | **mid** | client_id |
+| 3 | string | fingerprint | fingerprint | session | session_id |
+| 4 | submsg | `{1: SDP}` | `{1: SDP}` | `{1: candidate}` | — |
+| 5 | uvarint | 3 (offer) | 2 (answer) | 4 (candidate) | 1 (request) |
+| 7 | uvarint | 1 | 2 | 2 | 2 |
+| 8 | submsg | — | — | — | ICE config |
+| 9 | submsg | — | — | — | 5 uvarints |
+
+### ICE config (tag8)
+`tag8 = {1: <blob>}`; the blob is a repeated `0x0a <len>` sequence of either a
+plain ICE server `{1: id, 2: host, 3: port, 4: type}` or a TURN block
+`{1: <servers>, 2: username, 3: credential, ...}`. `type`: 1 = STUN, 2 = TURN,
+3 = TURNS. Live values: 9 × `stun*.l.google.com`, `coturn.prusa3d.com:3478`
+(types 1/2/3), TURN username `1789811200:43202` (time-limited) and base64
+credential. `FUN_000bc0ec` logs `"Adding TURN: %s:%d User: %s (Type: %d)"`.
+
+### H264
+Codec is H264 (`H264CameraSource`). A reference offer generated with
+**libdatachannel** (the firmware's WebRTC library) uses payload 96,
+`a=sendonly`, `a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;
+level-asymmetry-allowed=1`, `a=mid` first in the m-section, plus
+`a=msid-semantic:WMS *` and `a=group:LS`.
+
+### Live verification findings
+- The signaling server ACKs `camera_authentication` then closes unless the auth
+  is sent as `field1 = token, field2 = fingerprint` and the ACK is `0`
+  (`FUN_000a05e4`/`FUN_0009e53c`).
+- The viewer trickles candidates as `a=candidate:...` (SDP attribute form) with
+  `tag2 = mid`; the impersonator must strip the `a=` prefix before
+  `add-ice-candidate`.
+- The Connect answerer is itself a libdatachannel endpoint (`a=setup:active`,
+  `a=ice-options:trickle renomination`, `a=recvonly`).

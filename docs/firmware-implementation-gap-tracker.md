@@ -557,7 +557,8 @@ closing the gap.
 
 ### GAP-WEBRTC-01 — Consume Connect-provided ICE server configuration
 
-- [ ] **P0 · Open · BLOCKED for live end-to-end verification**
+- [~] **P0 · Implemented (ICE config consumed); live media negotiation still open**
+- **Recovered 2026-09-19 (live):** the `webrtc` ICE config is tag8 = `{1: <blob>}` with a repeated list of `{id, host, port, type}` (1=STUN/2=TURN/3=TURNS) plus a TURN block carrying a time-limited username and base64 credential (`FUN_000bc0ec`). `proto.decode_ice_config` parses it; `webrtc.create_offer` configures `webrtcbin`'s `stun-server` and `turn-server` (escaped credentials) with it. Verified live: 12 servers + `coturn.prusa3d.com:3478` + credentials applied.
 - **Firmware behavior:** parses the incoming WebRTC ICE submessage, configures every supplied STUN
   and TURN server, including hostname, port, username, credential, and server type; falls back to
   its defaults only when no servers were supplied. **[confirmed]**
@@ -574,7 +575,8 @@ closing the gap.
 
 ### GAP-WEBRTC-02 — Share the existing camera encoder instead of opening libcamera twice
 
-- [ ] **P0 · Open · BLOCKED for live Connect offer**
+- [~] **P0 · Implemented (shared mux source); live verification pending**
+- **Recovered 2026-09-19:** `webrtc.create_offer` now reads the always-running mux stream (`tcpclientsrc 127.0.0.1:8888`) instead of spawning a second `rpicam-vid` (which died defunct — libcamera is single-consumer). The encoder also runs H264 `--profile baseline --level 3.1` to match the firmware's `H264CameraSource`.
 - **Firmware behavior:** WebRTC, RTSP, and snapshots consume coordinated outputs from the existing
   hardware video pipeline. **[confirmed]**
 - **Current behavior:** `rpicam-source.service` continuously owns the camera, while WebRTC starts a
@@ -590,7 +592,8 @@ closing the gap.
 
 ### GAP-WEBRTC-03 — Implement session lifecycle and teardown
 
-- [ ] **P0 · Open · BLOCKED for live Connect offer**
+- [~] **P0 · Partial: offer/answer/candidate lifecycle implemented; teardown + live media still open**
+- **Recovered 2026-09-19 (live):** the full camera-side flow is implemented — ICE config → camera **offer** (type 3) → viewer **answer** (type 2) → **trickle candidates** (type 4). The viewer's candidates arrive as `a=candidate:...` with `tag2 = mid` and are now applied via `add-ice-candidate` (they were previously dropped, which is why the connection never completed). Offer/answer reach the viewer; the Connect answerer still answers `m=video 0`, so the media negotiation is not yet accepted.
 - **Firmware behavior:** tracks clients and connection state, enforces lifetime/scope, tears down
   disconnected/expired peers, and restores scoped video settings. **[confirmed]**
 - **Current behavior:** the global `streaming` flag becomes true on the first offer and is never
