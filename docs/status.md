@@ -57,7 +57,7 @@ The JSON parser is only the QR/manual-config path.
 `/c/info` features (no hardware); `MicroSd` kept and backed by an emulated SD at
 `/mnt/sdcard` (SMB share `sdcard`, verified accessible).
 
-**Timelapse storage (deployed; Pi-side live-verified, app-side confirmation pending):** the
+**Timelapse storage (live-confirmed 2026-09-19; capture/list round-trip pending):** the
 app reads storage from the `status` message (`extended_status.4` storage block, descriptor
 `0x3f72b0`). The descriptor is **tags 1-4 uvarint + tag 5 string**: tag1 = mounted
 state (1=mounted, 2=absent; `FUN_000744ac`), tags 2/3/4 = total/free/used MB
@@ -65,10 +65,10 @@ state (1=mounted, 2=absent; `FUN_000744ac`), tags 2/3/4 = total/free/used MB
 `FUN_00073914`). The earlier getter mapping (`FUN_000abcb0`/`FUN_000abaf4`) was wrong:
 those are `timelapse_status` field-2 getters, not this block, and `MODEL` never belonged
 on tag 5. `timelapse.storage_status` reports the emulated SD at `/mnt/sdcard` and
-`signaling` supplies it. **Deployed 2026-09-19:** `/mnt/sdcard` is owned by the service
-user and writable, `storage_status()` returns `(1, …, 'RW')`, `smbd` is active, and
-`status` is sent with the block; the app-side "storage not detected" confirmation is
-still pending — see `next-steps.md`.
+`signaling` supplies it. **Confirmed in Connect 2026-09-19:** timelapse is available, the
+storage page shows size/used/free, and the interval is configurable. Whether the app's
+enable/interval reach the Pi (the `configuration` tag3 timelapse subfields are unmapped —
+GAP-CONFIG-01) and frame capture/make/file-list still need an end-to-end test.
 
 ---
 

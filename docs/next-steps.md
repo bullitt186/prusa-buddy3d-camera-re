@@ -22,7 +22,7 @@ firmware-parity bugs (auth field order + ACK `0`, TURN credentials, offerer
 direction + candidate handling, and the H.264 SPS profile). See `status.md`'s
 2026-09-19 section.
 
-**Timelapse storage (deployed 2026-09-19; Pi-side live-verified, app-side confirmation
+**Timelapse storage (live-confirmed in Connect 2026-09-19; capture/list round-trip
 pending).** The app says *"Time lapse not available, camera storage not detected, insert
 SD card"* and reads storage from the `status` message, block `extended_status.4`
 (descriptor `0x3f72b0`).
