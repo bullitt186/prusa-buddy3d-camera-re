@@ -49,6 +49,24 @@ def _munge_offer(sdp_text):
     return '\r\n'.join(session + out) + '\r\n'
 
 
+def _strip_sprop(sdp_text):
+    """Drop ``sprop-parameter-sets`` from the H264 fmtp.
+
+    The firmware's libdatachannel offer omits it (``FUN_000bf180`` strips
+    candidate lines only); the stream carries SPS/PPS inline (rpicam-vid
+    ``--inline``), so it is redundant and the libdatachannel-based Connect
+    answerer rejects the m-line when it is present.
+    """
+    out = []
+    for line in sdp_text.replace('\r\n', '\n').split('\n'):
+        if line.startswith('a=fmtp:96 ') and 'sprop-parameter-sets' in line:
+            params = [p for p in line[len('a=fmtp:96 '):].split(';')
+                      if not p.startswith('sprop-parameter-sets=')]
+            line = 'a=fmtp:96 ' + ';'.join(params)
+        out.append(line)
+    return '\r\n'.join(out)
+
+
 class PrusaWebRTC:
     def __init__(self, on_offer, on_ice_candidate):
         self._on_offer = on_offer
@@ -217,6 +235,9 @@ class PrusaWebRTC:
         log.info(f'Offer SDP text ready ({len(sdp_text)} chars, m-lines={mlines})')
         self._webrtc.emit('set-local-description', offer, None)
         log.info('Local description set')
+
+        # Match libdatachannel's H264 fmtp (no sprop-parameter-sets).
+        sdp_text = _strip_sprop(sdp_text)
 
         if self._loop and self._on_offer:
             self._loop.call_soon_threadsafe(
