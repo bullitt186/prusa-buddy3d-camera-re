@@ -6,6 +6,7 @@ import logging
 import hashlib
 import time
 from auth import auth_ack_is_success
+import network
 from proto import encode_message, decode_message
 from status import build_status_message
 from features import PROTOCOL_VERSION, FEATURES, FIRMWARE_VERSION, MODEL, MANUFACTURER, HW_VERSION
@@ -192,16 +193,9 @@ class PrusaSignaling:
         await self.sio.emit(event, data, callback=callback)
 
     def _signal_quality(self):
-        try:
-            with open('/proc/net/wireless') as f:
-                for line in f:
-                    if line.strip().startswith('wlan0:'):
-                        fields = line.split()
-                        quality = float(fields[2].strip('.'))
-                        return max(0, min(100, round(quality * 100 / 70)))
-        except Exception:
-            pass
-        return 0
+        # GAP-NETWORK-01: firmware FUN_00097b38 converts the RSSI (dBm) 'level'
+        # column of /proc/net/wireless, not the 0-70 'link' quality column.
+        return network.signal_quality_from_wireless()
 
     def _cpu_temperature(self):
         try:

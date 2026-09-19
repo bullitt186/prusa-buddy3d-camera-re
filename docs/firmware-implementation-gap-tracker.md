@@ -1181,8 +1181,9 @@ closing the gap.
 
 ### GAP-NETWORK-01 — Verify Wi-Fi signal conversion and secondary network block
 
-- [~] **P3 · Partial (d1ec311): empty secondary submessage removed; signal conversion trace still open**
-- **WP-8 note:** the network block is built from the singleton getter `FUN_000a0524` → `FUN_000a0438`; the exact signal-quality conversion formula is not yet recovered, so `signaling._signal_quality` (linear 0–70 → 0–100) is unchanged until it is.
+- [~] **P3 · Signal conversion fixed to the firmware formula**
+- **WP-8/network:** recovered `FUN_00097b38`: the input is the **RSSI (dBm)** `level` column of `/proc/net/wireless`, converted as `rssi==0 || rssi<-99 -> 0`, `rssi>-51 -> 100`, else `(rssi+100)*2`. `network.py` implements `rssi_to_quality`/`parse_wireless_level`/`signal_quality_from_wireless`, and `signaling._signal_quality` now uses it instead of the previous linear 0–70 link-quality mapping. Tests: `tests/test_pi_network.py`.
+- **Still open:** a golden live status capture to confirm the exact value against a genuine camera; the empty secondary network submessage stays omitted (fixed earlier).
 - **Firmware behavior:** reports current WLAN identity/address/signal and has descriptor space for
   additional network state. **[confirmed]**
 - **Current behavior:** maps `/proc/net/wireless` quality linearly from 0–70 to 0–100 and emits an
