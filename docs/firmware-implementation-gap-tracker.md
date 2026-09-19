@@ -449,7 +449,7 @@ These are explicit recovery prerequisites, not permission to guess:
 | `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` with known types | Semantic names/result/progress enums and exact payload fixtures |
 | RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
 | WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
-| Signaling session lifecycle (live blocker) | The server ACKs `camera_authentication` then closes the WebSocket in the same tick for the running service (`Server sent close packet data 0`); the client now supervises reconnection with a fresh client per attempt (`signaling.supervise`) | Why the full service is closed while isolated clients with identical auth sometimes stay. The handshake URL is ruled out: `FUN_0038d3c8` builds the extra query from a `std::map<key,value>` (`&key=urlencoded(value)`), but its caller `FUN_00381b64` passes an **empty** map, so only `&t=<time>` is appended — which python-engineio already adds. Remaining candidates: a server-side single-session-per-token policy, or a header/transport difference not yet isolated. |
+| Signaling session lifecycle (live blocker) | The server ACKs `camera_authentication` then closes the WebSocket in the same tick for the running service (`Server sent close packet data 0`); the client supervises reconnection with a fresh client per attempt and exponential backoff (15s→120s), and drops the session on a rejected ACK/exception so the supervisor retries (`signaling.supervise`/`_drop_session`) | Why the full service is closed while isolated clients with identical auth sometimes stay. The handshake URL is ruled out: `FUN_0038d3c8` builds the extra query from a `std::map<key,value>` (`&key=urlencoded(value)`), but its caller `FUN_00381b64` passes an **empty** map, so only `&t=<time>` is appended — which python-engineio already adds. Remaining candidates: a server-side single-session-per-token policy, or a header/transport difference not yet isolated. |
 
 ### Gap-to-firmware cross-reference
 
@@ -1156,9 +1156,11 @@ closing the gap.
 
 ### GAP-STATUS-04 — Timezone representation
 
-- [~] **P3 · Firmware behavior recovered; implementation pending**
-- **Firmware behavior (WP-8):** `FUN_000b1dc8` detects the timezone from the web API (`timezone.prusa3d.com`), `FUN_000b170c` converts it, writes it to `/etc/TZ` (length-capped at 64), and falls back to UTC when empty. Strings: "Detecting timezone from web API: %s%s", "Converted timezone: %s", "Empty timezone in /etc/TZ, using UTC".
-- **Implementation:** mirror the API detection + `/etc/TZ` write and report the converted name in status tag 5.10.1 (currently `time.tzname[0]`, an abbreviation such as `CEST`, which is not the recovered representation).
+- [~] **P3 · Implemented and live-verified**
+- **Firmware behavior (WP-8):** `FUN_000b1dc8` detects the timezone from the web API (`timezone.prusa3d.com`, JSON `timezone` when `status == success`, follows a 301 `Location`), `FUN_000b1620` swaps the `UTC+`/`UTC-` prefix into the POSIX form, `FUN_000b170c` writes `/etc/TZ` (64-char cap), and `FUN_000b130c` reads it back for status tag 5.10.1.
+- **Implementation:** `timezone.py` (detect/parse/convert/read/write), `CameraState.tz_name`, `main.detect_timezone` (runs at startup over the shared aiohttp session), `status` reports the detected value; `write_tz_file` falls back to the unit's passwordless `sudo tee` so `/etc/TZ` is actually written. Tests: `tests/test_pi_timezone.py`.
+- **Live-verified 2026-09-19:** `timezone: API 'UTC+2' -> reported 'UTC-2'`, `/etc/TZ` = `UTC-2`, status sent, `/c/info` 200.
+- **Still open:** golden capture from a genuine 3.1.6 device (not available offline); non-UTC± (IANA) values pass through unchanged.
 - **Firmware behavior:** detects timezone through its configured/web timezone service and reports
   firmware state. **[confirmed at service level; exact status string format needs fixture]**
 - **Current behavior:** sends `time.tzname[0]`, commonly an abbreviation such as `CET`/`CEST`, plus a
