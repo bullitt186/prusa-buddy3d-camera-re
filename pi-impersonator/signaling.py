@@ -351,33 +351,48 @@ class PrusaSignaling:
         open a new one so the next attempt cannot resume the dead session. The
         retry interval backs off exponentially (15s -> 120s cap) so a server-side
         rejection is not hammered while it is in effect.
+
+        A half-open connection needs no extra probe: engineio's read loop times
+        out after ``ping_interval + ping_timeout`` (25s + 20s) and resets the
+        state, which this loop then observes. The body is guarded so an
+        unexpected error can never kill reconnection.
         """
         delay = 15
+        failures = 0
         while True:
-            await asyncio.sleep(delay)
-            eio_state = getattr(self.sio.eio, 'state', '?')
-            alive = bool(self.sio.connected) and eio_state == 'connected'
-            if alive:
-                if delay != 15:
-                    log.info('signaling link recovered')
-                delay = 15
-                log.debug(f'signaling supervisor: connected (eio={eio_state})')
-                continue
-            log.warning(
-                f'signaling link down (sio.connected={self.sio.connected}, eio={eio_state}); '
-                f'reconnecting with a fresh session (next retry in {delay}s)'
-            )
             try:
-                await self.sio.disconnect()
-            except Exception:
-                pass
-            self.sio = self._new_client()
-            self._setup_handlers()
-            try:
-                await self._connect_once()
+                await asyncio.sleep(delay)
+                eio_state = getattr(self.sio.eio, 'state', '?')
+                alive = bool(self.sio.connected) and eio_state == 'connected'
+                if alive:
+                    if failures:
+                        log.info(f'signaling link recovered after {failures} failed attempt(s)')
+                    failures = 0
+                    delay = 15
+                    continue
+                failures += 1
+                log.warning(
+                    f'signaling link down (sio.connected={self.sio.connected}, '
+                    f'eio={eio_state}, attempt {failures}); reconnecting with a fresh '
+                    f'session (next retry in {delay}s)'
+                )
+                try:
+                    await self.sio.disconnect()
+                except Exception:
+                    pass
+                self.sio = self._new_client()
+                self._setup_handlers()
+                try:
+                    await self._connect_once()
+                except Exception as e:
+                    log.warning(f'signaling reconnect failed: {e}')
+                delay = min(delay * 2, 120)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                log.warning(f'signaling reconnect failed: {e}')
-            delay = min(delay * 2, 120)
+                # Never let an unexpected error end reconnection.
+                log.error(f'signaling supervisor error: {e}; continuing')
+                await asyncio.sleep(5)
 
     async def wait(self):
         await self.sio.wait()
