@@ -371,6 +371,28 @@ class MainTimelapseWiringTests(unittest.TestCase):
             for n in ast.walk(fn)
         ))
 
+    def test_config_handler_maps_tag3_5_to_snapshot_interval(self):
+        # GAP-CONFIG-01: configuration tag3.5 = set_snapshot_upload_interval
+        # (FUN_000a7940, 10..600). Connect's update-interval slider sends it.
+        fn = self._function('handle_event')
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        self.assertTrue(any(
+            isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'set_snapshot_interval'
+            for n in calls
+        ))
+        self.assertTrue(any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'get'
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == 't3'
+            and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value == 5
+            for n in calls
+        ))
+
 
 class StorageStatusTests(unittest.TestCase):
     """GAP-TIMELAPSE-01: emulated-SD telemetry for extended_status.4."""

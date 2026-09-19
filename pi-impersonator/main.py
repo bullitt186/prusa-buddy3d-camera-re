@@ -12,7 +12,13 @@ from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
 from identity import resolve_fingerprint
-from state import CameraState, ENUM_TO_RAW, snapshot_interval_from_config
+from state import (
+    CameraState,
+    ENUM_TO_RAW,
+    SNAPSHOT_INTERVAL_MAX,
+    SNAPSHOT_INTERVAL_MIN,
+    snapshot_interval_from_config,
+)
 from http_result import SUCCESS
 from info_service import (
     countdown_after_result,
@@ -758,6 +764,24 @@ async def main():
                 if lc is not None:
                     applied = device_control.apply_light_control(lc, state)
                     log.info(f'Config: light_control (tag3.4) {lc!r} applied={applied}')
+                # GAP-CONFIG-01: tag3.5 = set_snapshot_upload_interval. Direct 3.1.6
+                # evidence: the configuration dispatcher FUN_000a7940 reads the tag3.5
+                # value, logs "Upload interval: %d seconds" / "Setting upload interval:
+                # %d seconds", rejects outside 10..600 ("Invalid upload interval: %d"),
+                # and dispatches the name 'set_snapshot_upload_interval'. Connect's
+                # cameras page "Displayed Frame Update Interval" slider sends this.
+                up = t3.get(5)
+                if up is not None:
+                    if state.set_snapshot_interval(up):
+                        log.info(
+                            f'Config: snapshot_upload_interval (tag3.5) → '
+                            f'{state.snapshot_interval}s'
+                        )
+                    else:
+                        log.warning(
+                            f'Config: snapshot_upload_interval (tag3.5) {up!r} rejected '
+                            f'({SNAPSHOT_INTERVAL_MIN}..{SNAPSHOT_INTERVAL_MAX})'
+                        )
                 if 11 in t3 or 12 in t3:
                     log.info(
                         f'Config: tag3 rtsp candidate {{11: {t3.get(11)!r}, '
