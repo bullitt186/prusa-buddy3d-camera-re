@@ -79,6 +79,13 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
   "${SSH[@]}" "sudo install -d -o $PI_USER -g $PI_USER /etc/prusa-cam && \
     [ -f /etc/prusa-cam/quality.env ] || printf 'CAM_WIDTH=1920\nCAM_HEIGHT=1080\n' > /etc/prusa-cam/quality.env"
 
+  # WebRTC live view needs webrtcbin's ICE plugin (libgstnice.so). Install it here
+  # so it lands on the real disk (this runs with the overlay disabled / in dev),
+  # not just the tmpfs upper layer. Non-fatal (apt can be memory-tight on a 512 MB Pi).
+  log "ensure gstreamer1.0-nice (WebRTC ICE plugin)"
+  "${SSH[@]}" 'command -v gst-inspect-1.0 >/dev/null && gst-inspect-1.0 nice >/dev/null 2>&1 \
+    || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gstreamer1.0-nice >/dev/null 2>&1 || true'
+
   log "install rpicam-source.service if changed (template User=pi → $PI_USER)"
   sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/rpicam-source.service" \
     | "${SSH[@]}" "sudo tee /etc/systemd/system/rpicam-source.service >/dev/null && sudo systemctl daemon-reload"
