@@ -120,7 +120,11 @@ class HardwareAvailabilityTests(unittest.TestCase):
         self.assertEqual(device_control.light_control_mode('day'), 2)
         self.assertEqual(device_control.light_control_mode('night'), 3)
         self.assertEqual(device_control.light_control_mode(' NIGHT '), 3)
-        for invalid in ('off', '', 1, None, b'auto', {'mode': 1}):
+        # The SIO configuration protobuf sends the mode as an integer.
+        self.assertEqual(device_control.light_control_mode(1), 1)
+        self.assertEqual(device_control.light_control_mode(2), 2)
+        self.assertEqual(device_control.light_control_mode(3), 3)
+        for invalid in ('off', '', 0, 9, None, True, b'auto', {'mode': 1}):
             with self.subTest(invalid=invalid):
                 self.assertIsNone(device_control.light_control_mode(invalid))
 

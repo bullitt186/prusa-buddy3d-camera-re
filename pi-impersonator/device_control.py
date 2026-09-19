@@ -75,10 +75,17 @@ def request_reboot(state, reboot_fn, now=None):
 
 
 def light_control_mode(value):
-    """Map a ``configuration.light_control`` string to its recovered mode, or None."""
-    if not isinstance(value, str):
-        return None
-    return LIGHT_CONTROL_MODES.get(value.strip().lower())
+    """Map a ``configuration.light_control`` value to its recovered mode, or None.
+
+    The SIO configuration protobuf sends the mode as an integer (live-verified:
+    ``tag3.4`` = 2 for "day"); the QR/manual-config path uses the strings. Modes:
+    1 = auto, 2 = day, 3 = night.
+    """
+    if isinstance(value, str):
+        return LIGHT_CONTROL_MODES.get(value.strip().lower())
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if value in LIGHT_CONTROL_MODES.values() else None
+    return None
 
 
 def apply_light_control(value, state):
