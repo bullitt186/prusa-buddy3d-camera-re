@@ -147,6 +147,16 @@ class PrusaWebRTC:
         if self._webrtc is None or getattr(self, '_offer_started', False):
             return
         self._offer_started = True
+        # The camera is a pure sender; offer sendonly rather than sendrecv.
+        try:
+            trans = self._webrtc.emit('get-transceiver', 0)
+            if trans is not None:
+                trans.set_property(
+                    'direction', GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
+                )
+                log.info('Transceiver direction set to sendonly')
+        except Exception as e:
+            log.warning(f'could not set transceiver direction: {e}')
         promise = Gst.Promise.new_with_change_func(self._on_offer_created)
         self._webrtc.emit('create-offer', None, promise)
 
@@ -167,7 +177,10 @@ class PrusaWebRTC:
             return
         sdp_text = offer.sdp.as_text()
         mlines = [line for line in sdp_text.splitlines() if line.startswith('m=')]
+        alines = [line for line in sdp_text.splitlines()
+                  if line.startswith(('a=rtpmap', 'a=fmtp', 'a=send', 'a=recv', 'a=mid'))]
         log.info(f'Offer SDP text ready ({len(sdp_text)} chars, m-lines={mlines})')
+        log.info(f"Offer SDP:\n{sdp_text}")
         self._webrtc.emit('set-local-description', offer, None)
         log.info('Local description set')
 
