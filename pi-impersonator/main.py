@@ -37,6 +37,7 @@ import rtsp_control
 import trigger
 import webrtc_control
 import local_http
+import timezone
 
 logging.basicConfig(
     # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
@@ -278,6 +279,31 @@ async def ota_checkin(token, fingerprint, session):
         log.warning(f'OTA check-in failed: {e}')
 
 
+async def detect_timezone(session):
+    """GAP-STATUS-04: detect the timezone from the web API and persist ``/etc/TZ``.
+
+    Firmware ``FUN_000b1dc8`` GETs ``timezone.prusa3d.com/`` and reads the JSON
+    ``timezone`` field; ``FUN_000b1620`` swaps the ``UTC+``/``UTC-`` prefix into
+    the POSIX form and ``FUN_000b170c`` writes ``/etc/TZ``. The status message
+    reports that content (``FUN_000b130c``).
+    """
+    try:
+        async with session.get(timezone.TIMEZONE_URL) as resp:
+            if resp.status != 200:
+                log.warning(f'timezone API: HTTP {resp.status}')
+                return
+            body = await resp.text()
+    except Exception as e:
+        log.warning(f'timezone API error: {e}')
+        return
+    raw = timezone.parse_timezone_response(body)
+    if not raw:
+        log.warning('timezone API: no usable timezone in response')
+        return
+    state.tz_name = timezone.resolve_tz_name(raw)
+    log.info(f'timezone: API {raw!r} -> reported {state.tz_name!r}')
+
+
 async def info_service_loop(token, fingerprint, server, session, mac, ip, ssid):
     """One-second ``/c/info`` dirty/retry service loop (GAP-INFO-01).
 
@@ -380,6 +406,7 @@ async def main():
     registered = summary.get('registered') if isinstance(summary, dict) else None
     log.info(f'/c/info response: origin={origin!r} registered={registered!r} summary={summary!r}')
     await ota_checkin(token, fingerprint, session)
+    await detect_timezone(session)
 
     sig = PrusaSignaling(fingerprint, token, state, mac=mac, ip=ip, ssid=ssid)
     loop = asyncio.get_event_loop()

@@ -58,6 +58,9 @@ class CameraState:
         self.webrtc_status = 1      # 0=stopped / 1=running
         self.streaming = False      # true while a WebRTC peer is active
         self.info_dirty = True
+        # GAP-STATUS-04: detected timezone (the /etc/TZ content) reported in
+        # status; empty until the web API detection runs at startup.
+        self.tz_name = ''
         # GAP-DEVICE-02: explicit hardware availability. The Pi has no IR
         # illuminator, speaker, fan, or MicroSD slot, so no control path may
         # imply otherwise or report a fake applied mode. ``ir_mode`` stays None

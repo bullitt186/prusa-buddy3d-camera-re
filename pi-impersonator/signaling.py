@@ -250,7 +250,9 @@ class PrusaSignaling:
             process_count=self._process_count(),
             request_id=request_id,
             sid=self.sio.get_sid() or self.sio.sid or '',
-            tz_name=time.tzname[0] if time.tzname else '',
+            # GAP-STATUS-04: report the detected /etc/TZ content (firmware reads
+            # it back); fall back to the process abbreviation only if undetected.
+            tz_name=state.tz_name or (time.tzname[0] if time.tzname else ''),
         )
 
     async def send_status(self, request_id=None):
