@@ -26,7 +26,7 @@ from proto import (
     WEBRTC_OFFER,
     WEBRTC_REQUEST,
     decode_camera_webrtc_message,
-    decode_ice_servers,
+    decode_ice_config,
     encode_camera_webrtc_message,
     encode_message,
 )
@@ -477,7 +477,8 @@ async def main():
 
     async def on_ice_candidate(request_id, candidate, mline_index):
         msg = encode_camera_webrtc_message(
-            token, request_id, fingerprint, WEBRTC_CANDIDATE, candidate=candidate
+            token, request_id, fingerprint, WEBRTC_CANDIDATE,
+            candidate=candidate, mid=str(mline_index),
         )
         await sig.sio_emit('webrtc', msg)
 
@@ -586,8 +587,12 @@ async def main():
                 # (tag8 = repeated {id, host, port, type}). The camera is the
                 # WebRTC OFFERER (firmware FUN_000b996c): create the peer
                 # connection with these servers and send an offer.
-                servers = decode_ice_servers(msg['ice_config'])
-                log.info(f'WebRTC ICE servers: {servers}')
+                servers, turn_user, turn_cred = decode_ice_config(msg['ice_config'])
+                log.info(
+                    f'WebRTC ICE servers: {servers} '
+                    f'(turn_user={"set" if turn_user else "none"}, '
+                    f'cred={"set" if turn_cred else "none"})'
+                )
                 if not webrtc_control.offer_allowed(state):
                     log.warning(
                         'WebRTC start rejected: service disabled '
@@ -600,7 +605,12 @@ async def main():
                 state.streaming = True
                 log.info('Pausing snapshots for WebRTC stream')
                 await asyncio.sleep(1)
-                webrtc.create_offer(msg['request_id'], servers, loop)
+                # The server routes the offer to the viewer using the inbound
+                # client/session id (tag2/tag3), not the camera token.
+                webrtc.create_offer(
+                    msg['client_id'] or msg['session_id'] or msg['request_id'],
+                    servers, loop, turn_user, turn_cred,
+                )
             elif _find_sdp(msg):
                 # The viewer's answer to our offer.
                 webrtc.handle_answer(msg['request_id'], _find_sdp(msg))

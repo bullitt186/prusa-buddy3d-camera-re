@@ -120,46 +120,97 @@ def decode_camera_webrtc_message(data):
     }
 
 
-def decode_ice_servers(data):
-    """Decode the tag8 ICE-config submessage into a list of server dicts.
+def _iter_fields(data):
+    """Yield (field, wire, value) for a protobuf byte string.
 
-    Layout (from the live message): tag8.field1 is a repeated submessage
-    ``{1: id, 2: host, 3: port, 4: type}``.
+    ``value`` is bytes for wire type 2 and an int for wire type 0. Needed because
+    ``decode_message`` collapses repeated fields (last wins), which loses the
+    ICE server list.
     """
-    if not data:
-        return []
-    outer = decode_message(data)
-    blob = outer.get(1)
-    if blob is None:
-        return []
-    if isinstance(blob, str):
-        blob = blob.encode('utf-8')
-    servers = []
     offset = 0
-    while offset < len(blob):
-        tag, offset = decode_varint(blob, offset)
-        if (tag & 0x07) != 2:
-            break
-        length, offset = decode_varint(blob, offset)
-        entry = blob[offset:offset + length]
-        offset += length
-        e = decode_message(entry)
-        servers.append({
-            'id': e.get(1, 0),
-            'host': e.get(2, ''),
-            'port': e.get(3, 0),
-            'type': e.get(4, 0),
-        })
-    return servers
+    while offset < len(data):
+        tag, offset = decode_varint(data, offset)
+        field, wire = tag >> 3, tag & 7
+        if wire == 0:
+            value, offset = decode_varint(data, offset)
+            yield field, wire, value
+        elif wire == 2:
+            length, offset = decode_varint(data, offset)
+            yield field, wire, data[offset:offset + length]
+            offset += length
+        elif wire == 5:
+            yield field, wire, data[offset:offset + 4]
+            offset += 4
+        elif wire == 1:
+            yield field, wire, data[offset:offset + 8]
+            offset += 8
+        else:
+            return
+
+
+def decode_ice_config(data):
+    """Parse the tag8 ICE-config blob into (servers, username, credential).
+
+    Live structure (FUN_000bc0ec): tag8 = {1: <blob>}; the blob is a repeated
+    ``0x0a <len>`` sequence whose elements are either a plain ICE server
+    ``{1: id, 2: host, 3: port, 4: type}`` or a TURN block
+    ``{1: <repeated servers>, 2: username, 3: credential, ...}``.
+    type: 1 = STUN, 2 = TURN, 3 = TURNS.
+    """
+    servers = []
+    username = ''
+    credential = ''
+
+    def walk(blob):
+        nonlocal username, credential
+        for _field, wire, value in _iter_fields(blob):
+            if wire != 2:
+                continue
+            text = None
+            try:
+                text = value.decode('utf-8')
+            except Exception:
+                pass
+            # TURN time-limited username "timestamp:user" or base64 credential.
+            if text and ':' in text and text.replace(':', '').isdigit():
+                username = text
+                continue
+            if text and len(text) >= 16 and text.endswith('=') and ' ' not in text:
+                credential = text
+                continue
+            try:
+                inner = decode_message(value)
+            except Exception:
+                inner = None
+            if (isinstance(inner, dict) and isinstance(inner.get(2), str)
+                    and isinstance(inner.get(3), int) and isinstance(inner.get(4), int)):
+                servers.append({
+                    'id': inner.get(1, 0), 'host': inner[2],
+                    'port': inner[3], 'type': inner[4],
+                })
+            else:
+                walk(value)
+
+    walk(bytes(data) if isinstance(data, (bytes, bytearray)) else data)
+    return servers, username, credential
+
+
+def decode_ice_servers(data):
+    """Return just the ICE server list from the tag8 blob (compat helper)."""
+    return decode_ice_config(data)[0]
 
 
 def encode_camera_webrtc_message(token, request_id, fingerprint, msg_type,
-                                 sdp='', candidate=''):
+                                 sdp='', candidate='', mid=''):
     """Encode a camera-side WebRTC message (recovered 9-field schema 0x3f7680).
 
     Recovered from ``FUN_000a3e90``: tag1 = token, tag2 = request_id,
-    tag3 = fingerprint, tag4.1 = SDP / tag4.2 = candidate, tag5 = type
+    tag3 = fingerprint, tag4 = {tag4.1, tag4.2}, tag5 = type
     (1 request / 2 answer / 3 offer / 4 candidate), tag7 = 1.
+
+    For an offer/answer tag4.1 = SDP. For a candidate the firmware's
+    ``FUN_000b75e0`` logs "generated local candidate: %s, mid: %s", so
+    tag4.1 = candidate and tag4.2 = mid (m-line id).
     """
     if msg_type not in (WEBRTC_REQUEST, WEBRTC_ANSWER, WEBRTC_OFFER, WEBRTC_CANDIDATE):
         raise ValueError(f'unsupported outbound WebRTC message type: {msg_type}')
@@ -169,5 +220,5 @@ def encode_camera_webrtc_message(token, request_id, fingerprint, msg_type,
     if sdp:
         fields[4] = encode_message({1: sdp, 2: ''})
     elif candidate:
-        fields[4] = encode_message({1: '', 2: candidate})
+        fields[4] = encode_message({1: candidate, 2: mid})
     return encode_message(fields)

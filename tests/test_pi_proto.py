@@ -64,14 +64,17 @@ class CameraWebRtcProtocolTests(unittest.TestCase):
         self.assertEqual(decode_message(nested)[1], 'v=0\r\n')
 
     def test_encodes_candidate_in_tag4(self):
+        # Firmware FUN_000b75e0: tag4.1 = candidate, tag4.2 = mid.
         wire = encode_camera_webrtc_message(
             'tok', 'request-12345678', 'fp', WEBRTC_CANDIDATE,
-            candidate='candidate:1 1 UDP 1 10.0.0.1 9 typ host',
+            candidate='candidate:1 1 UDP 1 10.0.0.1 9 typ host', mid='0',
         )
         fields = decode_message(wire)
         self.assertEqual(fields[5], WEBRTC_CANDIDATE)
         nested = fields[4].encode('utf-8') if isinstance(fields[4], str) else fields[4]
-        self.assertIn('candidate:1', decode_message(nested)[2])
+        inner = decode_message(nested)
+        self.assertIn('candidate:1', inner[1])
+        self.assertEqual(inner[2], '0')
 
     def test_rejects_non_firmware_outbound_type(self):
         with self.assertRaises(ValueError):

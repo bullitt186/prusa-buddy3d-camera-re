@@ -51,12 +51,13 @@ class PrusaWebRTC:
             self._proc.terminate()
             self._proc = None
 
-    def create_offer(self, request_id, ice_servers, loop):
+    def create_offer(self, request_id, ice_servers, loop, username='', credential=''):
         """Camera-side offer (firmware is the offerer; FUN_000b996c).
 
         Connect first sends the ICE server configuration; the camera then builds
-        the peer connection with those servers and emits an offer. The viewer
-        returns an answer (``handle_answer``) and ICE is trickled.
+        the peer connection with those servers (STUN + TURN, including the
+        time-limited TURN credentials) and emits an offer. The viewer returns an
+        answer (``handle_answer``) and ICE is trickled.
         """
         self._request_id = request_id
         self._loop = loop
@@ -66,27 +67,50 @@ class PrusaWebRTC:
         # GAP-WEBRTC-02: reuse the always-running mux stream (port 8888) instead
         # of opening libcamera a second time — rpicam-source owns the sensor, so a
         # second rpicam-vid cannot capture and webrtcbin would have no media.
-        stun = ''
+        stun_url = ''
+        turn_host = ''
         for server in ice_servers or []:
-            if server.get('host') and server.get('type') in (1, 3):
-                stun = f" stun-server=stun://{server['host']}:{server['port']}"
-                break
+            host = server.get('host')
+            port = server.get('port')
+            if not host or not port:
+                continue
+            if server.get('type') in (1, 3) and not stun_url:
+                stun_url = f'stun://{host}:{port}'
+            elif server.get('type') == 2 and not turn_host:
+                turn_host = f'{host}:{port}'
         pipeline_str = (
             'tcpclientsrc host=127.0.0.1 port=8888 do-timestamp=true '
             '! h264parse config-interval=-1 '
             '! rtph264pay config-interval=1 pt=96 '
             '! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 '
-            f'! webrtcbin name=webrtc bundle-policy=max-bundle{stun}'
+            '! webrtcbin name=webrtc bundle-policy=max-bundle'
         )
 
         self._pipe = Gst.parse_launch(pipeline_str)
         self._webrtc = self._pipe.get_by_name('webrtc')
 
+        # Configure the Connect-provided ICE servers. The TURN username is the
+        # time-limited "timestamp:username" form, so escape ':' (and the base64
+        # credential) as webrtcbin's turn-server property requires.
+        if stun_url:
+            self._webrtc.set_property('stun-server', stun_url)
+        if turn_host and username and credential:
+            from urllib.parse import quote
+            turn_url = (
+                f'turn://{quote(username, safe="")}:{quote(credential, safe="")}'
+                f'@{turn_host}'
+            )
+            self._webrtc.set_property('turn-server', turn_url)
+        log.info(
+            f'ICE configured: stun={stun_url or "none"} turn={turn_host or "none"} '
+            f'user={"set" if username else "none"} cred={"set" if credential else "none"}'
+        )
+
         self._webrtc.connect('on-ice-candidate', self._on_ice_candidate_cb)
         self._webrtc.connect('on-negotiation-needed', self._on_negotiation_needed)
         self._offer_started = False
         self._pipe.set_state(Gst.State.PLAYING)
-        log.info(f'Pipeline set to PLAYING (stun={stun.strip() or "none"})')
+        log.info('Pipeline set to PLAYING')
         # Standard webrtcbin flow: the offer is created from the
         # on-negotiation-needed signal. Keep a fallback in case it does not fire.
         GLib.timeout_add(3000, self._create_offer_timeout)
@@ -142,7 +166,8 @@ class PrusaWebRTC:
             log.error('Offer creation returned no reply')
             return
         sdp_text = offer.sdp.as_text()
-        log.info(f'Offer SDP text ready ({len(sdp_text)} chars)')
+        mlines = [line for line in sdp_text.splitlines() if line.startswith('m=')]
+        log.info(f'Offer SDP text ready ({len(sdp_text)} chars, m-lines={mlines})')
         self._webrtc.emit('set-local-description', offer, None)
         log.info('Local description set')
 
