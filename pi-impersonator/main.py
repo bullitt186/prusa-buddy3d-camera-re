@@ -26,6 +26,7 @@ from proto import (
     WEBRTC_OFFER,
     WEBRTC_REQUEST,
     decode_camera_webrtc_message,
+    decode_config_message,
     decode_ice_config,
     decode_message,
     encode_camera_webrtc_message,
@@ -679,20 +680,20 @@ async def main():
             for action in actions:
                 await dispatch_trigger_action(action, request_id)
         elif event == 'configuration' and isinstance(data, bytes):
-            # GAP-CONFIG-01: the configuration wire format is JSON, confirmed
-            # from the binary (nlohmann::json: ./xhr_tools/nlohmann/json.hpp and
-            # the parser FUN_0006f9dc reached via the SIO handler FUN_000c4718 ->
-            # FUN_0006fb94 -> FUN_0006cf34). The previous generic protobuf
-            # fallback and numeric-tag lookups were guesses; both are removed.
-            try:
-                msg = json.loads(data)
-            except Exception as e:
-                log.warning(f'Configuration: not valid JSON ({e}); ignoring')
-                return
+            # GAP-CONFIG-01 (corrected): the SIO `configuration` event is a
+            # NESTED PROTOBUF (descriptor 0x3f73a4, 9 fields), not JSON — the
+            # nlohmann JSON parser is only the QR/manual-config path
+            # (FUN_0006fb94). The JSON handler rejected every live setting change.
+            msg = decode_config_message(data)
             if not isinstance(msg, dict):
-                log.warning(f'Configuration: expected a JSON object, got {type(msg).__name__}')
+                log.warning('Configuration: could not decode protobuf')
                 return
-            log.info(f'Configuration: {redact_secrets(msg, token, fingerprint)!r}')
+            log.info(
+                f'Configuration (protobuf): '
+                f'{redact_secrets(msg, token, fingerprint)!r}'
+            )
+            # Dispatch is by numeric field; the field->setting mapping is being
+            # captured from live Connect changes (see docs/protocol.md).
             # FW-CONFIG:49-74,286-300: the leading `code` rejects "42"/"66".
             code = msg.get('code')
             if code is not None and str(code) in ('42', '66'):

@@ -200,6 +200,39 @@ def decode_ice_servers(data):
     return decode_ice_config(data)[0]
 
 
+def decode_config_message(data):
+    """Recursively decode the SIO `configuration` protobuf (descriptor 0x3f73a4).
+
+    Unlike the QR/config path (JSON, `FUN_0006cf34`), the Socket.IO
+    `configuration` event is a nested protobuf. This walks every length-delimited
+    field as a potential submessage so the numbered fields are visible for
+    mapping to settings (resolution/rtsp/timelapse/aperture).
+    """
+    def walk(raw):
+        try:
+            fields = decode_message(raw)
+        except Exception:
+            return None
+        if not isinstance(fields, dict):
+            return None
+        out = {}
+        for key, value in fields.items():
+            nested = None
+            if isinstance(value, bytes):
+                nested = walk(value)
+            elif isinstance(value, str):
+                try:
+                    nested = walk(value.encode('utf-8'))
+                except Exception:
+                    nested = None
+            out[key] = nested if nested else value
+        return out
+
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    return walk(data)
+
+
 def encode_camera_webrtc_message(token, request_id, fingerprint, msg_type,
                                  sdp='', candidate='', mid=''):
     """Encode a camera-side WebRTC message (recovered 9-field schema 0x3f7680).
