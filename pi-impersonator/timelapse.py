@@ -10,11 +10,64 @@ Stdlib-only and side-effect free on import so the logic is host-testable.
 import os
 import time
 
+SD_MOUNT = '/mnt/sdcard'   # emulated SD, the firmware's storage path
 TIMELAPSE_DIR = '/mnt/sdcard/timelapse'   # emulated SD (see the SMB share)
 DEFAULT_INTERVAL = 10   # seconds between frames
 DEFAULT_FPS = 10        # playback rate of the assembled MJPEG
 INTERVAL_MIN, INTERVAL_MAX = 1, 3600
 FPS_MIN, FPS_MAX = 1, 30
+
+
+def sd_present(path=SD_MOUNT):
+    """True when the emulated SD is usable.
+
+    Pi policy for the firmware's ``isDevicePresent && canAccessMountPoint &&
+    /proc/mounts`` check: the Pi has no block device, so ``/mnt/sdcard`` is a
+    real directory provisioned by ``deploy.sh`` and usability is a read+write
+    check. Returns False on ``OSError``.
+    """
+    try:
+        return os.path.isdir(path) and os.access(path, os.R_OK | os.W_OK)
+    except OSError:
+        return False
+
+
+def sd_space(path=SD_MOUNT):
+    """Return ``(total_mb, free_mb, used_mb)`` from ``statvfs64``.
+
+    Matches ``FUN_000745e0``: ``(f_bsize * f_blocks) >> 20`` (total),
+    ``(f_bsize * f_bfree) >> 20`` (free), and
+    ``(f_bsize * (f_blocks - f_bfree)) >> 20`` (used). Returns ``(0, 0, 0)``
+    on ``OSError``.
+    """
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return (0, 0, 0)
+    total = (st.f_bsize * st.f_blocks) >> 20
+    free = (st.f_bsize * st.f_bfree) >> 20
+    used = (st.f_bsize * (st.f_blocks - st.f_bfree)) >> 20
+    return (total, free, used)
+
+
+def sd_mode(path=SD_MOUNT):
+    """SD mount-mode string (``FUN_00073914``): ``RW``/``RO``/``UNKNOWN``."""
+    if not sd_present(path):
+        return 'UNKNOWN'
+    return 'RW' if os.access(path, os.W_OK) else 'RO'
+
+
+def storage_status(path=SD_MOUNT):
+    """5-tuple shaped for ``extended_status.4`` (descriptor ``0x3f72b0``).
+
+    ``(present, total_mb, free_mb, used_mb, mode)``; absent storage reports the
+    firmware mounted-state ``2`` (1 = mounted) with zero space and
+    ``'UNKNOWN'`` mode.
+    """
+    if not sd_present(path):
+        return (2, 0, 0, 0, 'UNKNOWN')
+    total, free, used = sd_space(path)
+    return (1, total, free, used, sd_mode(path))
 
 
 def valid_interval(value):

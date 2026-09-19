@@ -22,18 +22,21 @@ firmware-parity bugs (auth field order + ACK `0`, TURN credentials, offerer
 direction + candidate handling, and the H.264 SPS profile). See `status.md`'s
 2026-09-19 section.
 
-**Next session task — make Connect timelapse work.** The app says *"Time lapse not
-available, camera storage not detected, insert SD card"*. It reads storage from the
-`status` message, block `extended_status.4` (descriptor `0x3f72b0`).
+**Timelapse storage (implemented locally 2026-09-19; live verification pending).**
+The app says *"Time lapse not available, camera storage not detected, insert SD card"*
+and reads storage from the `status` message, block `extended_status.4` (descriptor
+`0x3f72b0`).
 
-- Ours: `{1:2, 2:0, 3:0, 4:0, 5:MODEL}`.
-- Firmware: `{1:1, 2:FUN_000abcb0(), 3:FUN_000abaf4(), 4:<uvarint>, 5:<string>}`
-  — the two getters read a shared singleton (`+0x4`, `+0x50`) populated from
-  `/sys/class/block/mmcblk{0,1}` (`lp_app.strings:1684-1685`; `getSdCardSpace`
-  at `:11874`; `FUN_00071180` reads the block devices).
-- **Do not guess the numeric "present"/space value.** Either trace the singleton
-  (`FUN_000abcb0`/`FUN_000abaf4` callers and the populate site) or set the block to
-  the firmware's shape and observe whether the app reports the SD.
+- Firmware (descriptor re-trace, **[confirmed]**): `{1:<mounted 1|2>, 2:totalMB,
+  3:freeMB, 4:usedMB, 5:<mode string>}` — tag1 `FUN_000744ac` (1=mounted, 2=absent),
+  tags 2-4 `FUN_000745e0` (`statvfs` MB, `>> 20`), tag5 `FUN_00073914`
+  (`"RW"`/`"RO"`/`"UNKNOWN"`). The earlier note's `FUN_000abcb0`/`FUN_000abaf4`
+  getters belong to `timelapse_status` (field 2), not this block, and `MODEL` was
+  never tag 5.
+- Ours now: `timelapse.storage_status()` reports the emulated `/mnt/sdcard`
+  (`{1:1,2:total,3:free,4:used,5:"RW"}` when present, `{1:2,2:0,3:0,4:0,5:"UNKNOWN"}`
+  otherwise) and `signaling` supplies it. Confirm live that Connect stops reporting
+  "storage not detected".
 
 Already done for timelapse:
 - Emulated SD at `/mnt/sdcard/timelapse` (the firmware path), shared over SMB

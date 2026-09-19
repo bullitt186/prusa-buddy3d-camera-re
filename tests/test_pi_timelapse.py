@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PI_DIR = Path(__file__).resolve().parents[1] / 'pi-impersonator'
 sys.path.insert(0, str(PI_DIR))
@@ -72,6 +73,53 @@ class TimelapseStorageTests(unittest.TestCase):
 
     def test_build_mjpeg_empty_returns_none(self):
         self.assertIsNone(timelapse.build_mjpeg(self.dir, os.path.join(self.dir, 'out.mjpeg')))
+
+
+class StorageStatusTests(unittest.TestCase):
+    """GAP-TIMELAPSE-01: emulated-SD telemetry for extended_status.4."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_sd_present_true_for_writable_dir(self):
+        self.assertTrue(timelapse.sd_present(self.dir))
+
+    def test_sd_present_false_for_missing_path(self):
+        self.assertFalse(timelapse.sd_present(os.path.join(self.dir, 'nope')))
+
+    def test_sd_space_returns_consistent_megabytes(self):
+        total, free, used = timelapse.sd_space(self.dir)
+        for value in (total, free, used):
+            self.assertIsInstance(value, int)
+            self.assertGreaterEqual(value, 0)
+        # FUN_000745e0 floors each MB value independently, so `used` computed
+        # from (f_blocks - f_bfree) can differ from (total - free) by at most
+        # 1 MB. Assert the firmware relationship without that rounding artifact.
+        self.assertLessEqual(abs(used - (total - free)), 1)
+
+    def test_storage_status_present(self):
+        present, total, free, used, mode = timelapse.storage_status(self.dir)
+        self.assertEqual(present, 1)
+        self.assertEqual(mode, 'RW')
+        self.assertEqual(total, timelapse.sd_space(self.dir)[0])
+        self.assertLessEqual(abs(used - (total - free)), 1)
+
+    def test_storage_status_absent(self):
+        self.assertEqual(
+            timelapse.storage_status(os.path.join(self.dir, 'nope')),
+            (2, 0, 0, 0, 'UNKNOWN'),
+        )
+
+    def test_sd_mode_read_only(self):
+        # Patch sd_present directly so the RO branch is reached without relying
+        # on os.access side effects inside sd_present.
+        with patch('timelapse.sd_present', return_value=True), \
+                patch('timelapse.os.access', return_value=False):
+            self.assertEqual(timelapse.sd_mode(self.dir), 'RO')
 
 
 if __name__ == '__main__':

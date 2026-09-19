@@ -451,6 +451,25 @@ The `FUN_00071ce0()` singleton accessor has 86 call sites across the binary — 
 features-list builder — confirming it's the shared camera-identity/device-info object used
 throughout, not something CameraInfoMessage-specific.
 
+**`extended_status.4` storage block (descriptor `0x3f72b0`) — traced 2026-09-19 from
+firmware 3.1.6 [confirmed]:**
+
+| Tag | Wire type | Semantic | Firmware source |
+|---|---|---|---|
+| 1 | uvarint | SD mounted state: **1 = mounted/present, 2 = not mounted** (translation `0->2`, `1->1`, else `0`) | `FUN_000744ac` (SD-monitor singleton `FUN_00072e98`) |
+| 2 | uvarint | total SD space in MB, `(f_bsize * f_blocks) >> 20` | `FUN_000745e0(obj, 1, 0)`, `statvfs64("/mnt/sdcard")` |
+| 3 | uvarint | free SD space in MB, `(f_bsize * f_bfree) >> 20` | `FUN_000745e0(obj, 0)` |
+| 4 | uvarint | used SD space in MB, `(f_bsize * (f_blocks - f_bfree)) >> 20` | `FUN_000745e0(obj, 2, 0)` |
+| 5 | string | SD mount-mode string: `"UNKNOWN"` (not mounted), `"RW"` (writable), or `"RO"` (read-only) | `FUN_00073914` = SD-monitor `+0x50`, set by `FUN_000744ac`/`FUN_00074218` |
+
+**Corrected mapping:** the earlier note that placed the TimelapseService getters
+`FUN_000abcb0`/`FUN_000abaf4` in this block was wrong — they belong to top-level
+`timelapse_status` (field 2). Likewise `MODEL` was previously (mis)encoded on tag 5;
+tag 5 is the mount-mode string. The Pi impersonator maps this block to
+`timelapse.storage_status` over the emulated SD at `/mnt/sdcard`
+**[assumption]** — a Pi policy, not firmware: mounted `1` when the directory is
+readable+writable, else absent `2` with zero space and `"UNKNOWN"`.
+
 ### WebRTCMessage — inbound offer field list
 
 Decoded from `parseWebRtcMessage` (VMA `0xa36a4`). The log format string at

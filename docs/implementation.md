@@ -115,14 +115,16 @@ def encode_protobuf(fields):
 # - field 11: video_quality wrapper, field 1 enum (1=SD, 2=HD, 3=FHD)
 #
 # The simple encoder must support wire type 5 for Float32 values.
+# timelapse_status (descriptor 0x3f753c): tags 1-3/5/7 uvarint, tag4 string,
+# tag6 fixed32(float). tag1 = 1 enabled / 2 disabled, tag2 = interval seconds.
 timelapse_status = encode_protobuf({
     1: 2,
-    2: 0,
+    2: 10,
     3: 0,
     4: "",
     5: 0,
-    6: 0,
-    7: Float32(0.0),
+    6: Float32(0.0),
+    7: 0,
 })
 camera_status = encode_protobuf({
     3: 1,   # IR auto
@@ -137,14 +139,23 @@ network_info = encode_protobuf({
         3: wifi_ipv4,
         5: signal_quality,
     }),
-    2: encode_protobuf({}),
 })
 extended_status = encode_protobuf({
     1: firmware_version,
     2: hardware_name,
     3: camera_name,
-    4: encode_protobuf({1: 2, 2: 0, 3: 0, 4: 0, 6: model}),
-    6: encode_protobuf({1: 1, 2: 2, 4: rtsp_url}),
+    # extended_status.4 (descriptor 0x3f72b0): SD storage block. tag1 = mounted
+    # state (1=present, 2=absent), tags 2-4 = total/free/used MB, tag5 = mount
+    # mode string ("RW"/"RO"/"UNKNOWN"). See timelapse.storage_status().
+    4: encode_protobuf({
+        1: sd_present,
+        2: sd_total_mb,
+        3: sd_free_mb,
+        4: sd_used_mb,
+        5: sd_mode,
+    }),
+    # extended_status.6 (descriptor 0x3f7278): tags 1-2 uvarint, tag3 string.
+    6: encode_protobuf({1: rtsp_mode, 2: rtsp_status, 3: rtsp_url}),
     7: encode_protobuf({1: 1, 2: 0}),
     9: encode_protobuf({1: image_host, 2: signaling_host, 3: connect_host}),
     10: encode_protobuf({1: timezone_name, 2: 1}),

@@ -41,11 +41,26 @@ class StatusSchemaTests(unittest.TestCase):
         self.assertEqual(len(tl[6]), 4)
         self.assertIsInstance(tl[7], int, 'tag7 must be uvarint')
 
-    def test_extended_status_model_is_tag5_string(self):
+    def test_timelapse_enable_and_interval(self):
+        tl = decode_message(_nested(self.top, 2))
+        self.assertEqual(tl[1], 2, 'disabled timelapse maps to 2 (FUN_000abcdc)')
+        self.assertEqual(tl[2], 10, 'default interval is 10 (FUN_000abcb0)')
+
+    def test_extended_status_storage_block_defaults(self):
         ext = decode_message(_nested(self.top, 5))
-        model = decode_message(_nested(ext, 4))
-        self.assertIn(5, model, 'model string must be extended_status.4.5')
-        self.assertNotIn(6, model, 'tag6 must not exist in descriptor 0x3f72b0')
+        storage = decode_message(_nested(ext, 4))
+        self.assertEqual(storage[1], 2, 'absent storage mounted-state is 2')
+        self.assertEqual(storage[2], 0)
+        self.assertEqual(storage[3], 0)
+        self.assertEqual(storage[4], 0)
+        self.assertEqual(storage[5], 'UNKNOWN', 'tag5 is the SD mount-mode string')
+        self.assertNotIn(6, storage, 'tag6 must not exist in descriptor 0x3f72b0')
+
+    def test_extended_status_storage_block_explicit(self):
+        status = build_status_message(CameraState(), storage=(1, 100, 40, 60, 'RW'))
+        ext = decode_message(_nested(decode_message(status), 5))
+        storage = decode_message(_nested(ext, 4))
+        self.assertEqual(storage, {1: 1, 2: 100, 3: 40, 4: 60, 5: 'RW'})
 
     def test_extended_status_rtsp_url_is_tag3_string(self):
         ext = decode_message(_nested(self.top, 5))

@@ -18,10 +18,11 @@ works** (verified live). The earlier "backend gate / no offer relayed" story is
 superseded; see the 2026-09-19 section below.
 
 Current open item: **timelapse storage**. The app says *"Time lapse not available,
-camera storage not detected, insert SD card"* because our `status` does not report the
-SD/storage state. A Pi-backed emulated SD exists (`/mnt/sdcard`, shared over SMB) but
-the status field that reports it is still to be wired. Details and exact leads in the
-2026-09-19 section and `firmware-implementation-gap-tracker.md` (`GAP-TIMELAPSE-01`).
+camera storage not detected, insert SD card"* because our `status` did not report the
+SD/storage state. A Pi-backed emulated SD exists (`/mnt/sdcard`, shared over SMB), and
+the `extended_status.4` storage block is now wired to it **locally (2026-09-19);
+live Connect verification is pending**. Details and exact leads in the 2026-09-19
+section and `firmware-implementation-gap-tracker.md` (`GAP-TIMELAPSE-01`).
 
 ### 2026-09-19 — live WebRTC works; config is protobuf; emulated SD added
 
@@ -56,12 +57,15 @@ The JSON parser is only the QR/manual-config path.
 `/c/info` features (no hardware); `MicroSd` kept and backed by an emulated SD at
 `/mnt/sdcard` (SMB share `sdcard`, verified accessible).
 
-**Timelapse open:** the app reads storage from the `status` message
-(`extended_status.4` storage block, descriptor `0x3f72b0`). We emit
-`{1:2,2:0,3:0,4:0,5:MODEL}`; the firmware emits `{1:1, 2:FUN_000abcb0(),
-3:FUN_000abaf4(), 4:…, 5:string}` where the getters read a singleton (`+0x4`,
-`+0x50`) populated from `/sys/class/block/mmcblk{0,1}`. Wiring the SD-present /
-free-space value is the next step — see `next-steps.md`.
+**Timelapse storage (implemented locally; live verification pending):** the app reads
+storage from the `status` message (`extended_status.4` storage block, descriptor
+`0x3f72b0`). The descriptor is **tags 1-4 uvarint + tag 5 string**: tag1 = mounted
+state (1=mounted, 2=absent; `FUN_000744ac`), tags 2/3/4 = total/free/used MB
+(`FUN_000745e0`, `statvfs` MB), tag5 = mount mode (`"RW"`/`"RO"`/`"UNKNOWN"`;
+`FUN_00073914`). The earlier getter mapping (`FUN_000abcb0`/`FUN_000abaf4`) was wrong:
+those are `timelapse_status` field-2 getters, not this block, and `MODEL` never belonged
+on tag 5. `timelapse.storage_status` now reports the emulated SD at `/mnt/sdcard` and
+`signaling` supplies it. Live Connect confirmation is pending — see `next-steps.md`.
 
 ---
 

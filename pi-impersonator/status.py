@@ -26,19 +26,29 @@ def _rtsp_status(state):
 def build_status_message(state, *, token='', mac='', ip='', ssid='',
                          signal_quality=0, cpu_temperature=0.0, uptime=0,
                          load_average='', memory=None, process_count=0,
-                         request_id=None, sid='', tz_name=''):
+                         request_id=None, sid='', tz_name='', storage=None):
     """Encode the firmware-shaped status message from shared state + telemetry.
 
     GAP-STATUS-02: request-triggered status correlates on ``request_id``; the
     unsolicited initial status falls back to the Socket.IO SID.
     GAP-NETWORK-01: the empty secondary network submessage is not emitted.
+    GAP-TIMELAPSE-01: ``storage`` is the 5-tuple produced by
+    ``timelapse.storage_status`` for ``extended_status.4``; it defaults to the
+    absent state when no live telemetry is supplied.
     """
     if memory is None:
         memory = {'MemTotal': 0, 'MemFree': 0, 'Shmem': 0, 'Buffers': 0}
+    if storage is None:
+        storage = (2, 0, 0, 0, 'UNKNOWN')
+    storage_present, storage_total, storage_free, storage_used, storage_mode = storage
 
     timelapse_status = encode_message({
-        1: 2,
-        2: 0,
+        # GAP-TIMELAPSE-01: descriptor 0x3f753c tags 1/2 are the directly-traced
+        # enable/interval getters (FUN_000abcdc translation: enabled->1,
+        # disabled->2; FUN_000abcb0 interval, default 10). Tags 3-7 remain
+        # unannotated (GAP-STATUS-03), so they are left as-is.
+        1: 1 if state.timelapse_enabled else 2,
+        2: state.timelapse_interval,
         3: 0,
         4: '',
         5: 0,
@@ -78,13 +88,17 @@ def build_status_message(state, *, token='', mac='', ip='', ssid='',
         2: MODEL,
         3: state.camera_name,
         4: encode_message({
-            1: 2,
-            2: 0,
-            3: 0,
-            4: 0,
-            # GAP-STATUS-03: descriptor 0x3f72b0 has tags 1-4 uvarint and tag 5
-            # string; the model string belongs on tag 5 (was tag 6).
-            5: MODEL,
+            # GAP-TIMELAPSE-01 / GAP-STATUS-03: extended_status.4 is the SD storage
+            # block (descriptor 0x3f72b0, traced 2026-09-19 from FW-STATUS). tag1 =
+            # mounted state (1=mounted, 2=absent), tag2/3/4 = total/free/used MB
+            # (FUN_000745e0, f_bsize*f_blocks>>20), tag5 = mount-mode string
+            # (FUN_00073914 -> "RW"/"RO"/"UNKNOWN"). The previous MODEL-on-tag5 was a
+            # prior-session misread of the getters and is removed.
+            1: storage_present,
+            2: storage_total,
+            3: storage_free,
+            4: storage_used,
+            5: storage_mode,
         }),
         6: encode_message({
             1: state.rtsp_mode,

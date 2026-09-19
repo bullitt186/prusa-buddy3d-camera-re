@@ -9,6 +9,7 @@ from auth import auth_ack_is_success
 import network
 from proto import encode_message, decode_message
 from status import build_status_message
+from timelapse import storage_status
 from features import PROTOCOL_VERSION, FEATURES, FIRMWARE_VERSION, MODEL, MANUFACTURER, HW_VERSION
 
 log = logging.getLogger('prusa-cam.signaling')
@@ -260,6 +261,8 @@ class PrusaSignaling:
             # GAP-STATUS-04: report the detected /etc/TZ content (firmware reads
             # it back); fall back to the process abbreviation only if undetected.
             tz_name=self.state.tz_name or (time.tzname[0] if time.tzname else ''),
+            # GAP-TIMELAPSE-01: live emulated-SD telemetry for extended_status.4.
+            storage=storage_status(),
         )
 
     async def send_status(self, request_id=None):
