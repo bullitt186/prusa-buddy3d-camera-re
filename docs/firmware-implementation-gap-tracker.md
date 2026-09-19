@@ -759,13 +759,8 @@ closing the gap.
 
 ### GAP-CAP-01 — Stop overpromising unsupported features, or implement their wire behavior
 
-- [~] **P1 · Decided (owner default: keep advertising); audit complete**
-- **Decision 2026-09-19:** keep the advertised feature set (no pruning). The audit result: every advertised feature now has either working behavior or an explicit truthful response —
-  - working: SocketCom, UploadInterval, GetSnapshot, RtspStream, CameraName, VideoQuality, VideoStream/WebRtc (mode control), CameraReboot (rate-limited), McuTemp, WiFi, FwVer/HwVer, trigger_scheme;
-  - Pi storage-backed: TimelapseEn/Interval/VideoMake (file list returns an explicit unsupported result, envelope annotation unresolved);
-  - truthful decline: FwUpdate;
-  - truthful unavailable (no hardware): IrMode, SpeakerVolume, FanControl, MicroSD.
-- **Still open:** live verification that Connect accepts the truthful unsupported/unavailable responses (needs the signaling link).
+- [x] **P1 · Resolved 2026-09-19: prune the hardware-absent features**
+- **Decision:** stop advertising features the Pi cannot honor. `/c/info` now advertises only what is implemented: `SocketCom, UploadInterval, TimelapseEn/Interval/VideoMake/FileList, VideoStream, RtspStream, GetSnapshot, WiFi, FwVer, HwVer, CameraName, FwUpdate, CameraReboot, McuTemp, VideoQuality, WebRtc, TurnVideoQualityChange, trigger_scheme`. Removed `IrMode`, `SpeakerVolume`, `FanControl`, `MicroSd` (no such hardware on the Pi — Connect was showing the IR sun/moon/auto control that could never work). `configuration.light_control` still returns a truthful unavailable result if it ever arrives.
 - **Firmware behavior:** advertises features it implements: `SocketCom`, `UploadInterval`,
   `TimelapseEn`, `TimelapseInterval`, `TimelapseVideoMake`, `TimelapseFileList`, `VideoStream`,
   `RtspStream`, `GetSnapshot`, `IrMode`, `SpeakerVolume`, `WiFi`, `FwVer`, `HwVer`, `CameraName`,
