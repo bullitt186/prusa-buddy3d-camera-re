@@ -26,6 +26,7 @@ from proto import (
     WEBRTC_OFFER,
     WEBRTC_REQUEST,
     decode_camera_webrtc_message,
+    decode_ice_servers,
     encode_camera_webrtc_message,
     encode_message,
 )
