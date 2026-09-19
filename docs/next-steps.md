@@ -47,7 +47,10 @@ Already done for timelapse:
   trigger tags 5/14/15 dispatched. The `0x3f701c` file-list envelope is annotated
   (event `file_list`; field 1 `"<page>;<total>\n<chunk>"`, field 2 token, field 3
   optional request_id, field 4 unset; empty list sends nothing) and implemented
-  locally; live verification of make-video/file-list is pending.
+  locally. Live 2026-09-19: frames record as `timelapse_<HH-MM-SS-mmm>.jpg` and
+  `build_avi` on real frames yields a `file(1)`-confirmed MJPEG AVI; this app
+  version has no make-video button or file-list view, so the `file_list` sender
+  is not app-exercisable.
 
 Also open (smaller):
 - Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.

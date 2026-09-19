@@ -29,9 +29,9 @@ SSH=(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "$PI")
 
 log() { printf '\n\033[1m» %s\033[0m\n' "$*"; }
 
-wait_for_ssh() {  # block until the Pi answers again after a reboot (~90s budget)
+wait_for_ssh() {  # block until the Pi answers again after a reboot (~10 min budget)
   log "waiting for $PI to come back…"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 120); do
     "${SSH[@]}" true 2>/dev/null && { echo "  up."; return 0; }
     sleep 5
   done
