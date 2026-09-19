@@ -86,6 +86,17 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
   "${SSH[@]}" 'command -v gst-inspect-1.0 >/dev/null && gst-inspect-1.0 nice >/dev/null 2>&1 \
     || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gstreamer1.0-nice >/dev/null 2>&1 || true'
 
+  # Emulated SD card: /mnt/sdcard backs the timelapse feature and is shared over
+  # SMB so the recorded clips can be retrieved from a PC.
+  log "provision emulated SD (/mnt/sdcard) + SMB share"
+  "${SSH[@]}" "sudo install -d -o $PI_USER -g $PI_USER /mnt/sdcard/timelapse && \
+    printf '[sdcard]\n   path = /mnt/sdcard\n   browseable = yes\n   read only = no\n   guest ok = yes\n   force user = $PI_USER\n   create mask = 0644\n   directory mask = 0755\n' \
+      | sudo tee /etc/samba/smb-sdcard.conf >/dev/null && \
+    { grep -q 'include = /etc/samba/smb-sdcard.conf' /etc/samba/smb.conf 2>/dev/null || \
+      printf '\ninclude = /etc/samba/smb-sdcard.conf\n' | sudo tee -a /etc/samba/smb.conf >/dev/null; } && \
+    { command -v smbd >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba >/dev/null 2>&1; } && \
+    sudo systemctl enable --now smbd >/dev/null 2>&1 || true"
+
   log "install rpicam-source.service if changed (template User=pi → $PI_USER)"
   sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/rpicam-source.service" \
     | "${SSH[@]}" "sudo tee /etc/systemd/system/rpicam-source.service >/dev/null && sudo systemctl daemon-reload"

@@ -10,7 +10,7 @@ Stdlib-only and side-effect free on import so the logic is host-testable.
 import os
 import time
 
-TIMELAPSE_DIR = '/var/lib/prusa-cam/timelapse'
+TIMELAPSE_DIR = '/mnt/sdcard/timelapse'   # emulated SD (see the SMB share)
 DEFAULT_INTERVAL = 10   # seconds between frames
 DEFAULT_FPS = 10        # playback rate of the assembled MJPEG
 INTERVAL_MIN, INTERVAL_MAX = 1, 3600

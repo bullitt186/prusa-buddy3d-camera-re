@@ -26,6 +26,7 @@ log "apt: gstreamer + libcamera/rpicam + python-gi + venv tooling"
   python3-gi python3-gst-1.0 gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-rtsp rpicam-apps \
   gir1.2-gst-rtsp-server-1.0 gir1.2-gst-plugins-bad-1.0 \
+  samba \
   python3-venv python3-pip rsync'
 
 log "python venv (--system-site-packages so gi/Gst are visible) + pip deps"
