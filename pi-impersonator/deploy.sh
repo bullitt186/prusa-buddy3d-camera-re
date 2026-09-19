@@ -94,7 +94,7 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
       | sudo tee /etc/samba/smb-sdcard.conf >/dev/null && \
     { grep -q 'include = /etc/samba/smb-sdcard.conf' /etc/samba/smb.conf 2>/dev/null || \
       printf '\ninclude = /etc/samba/smb-sdcard.conf\n' | sudo tee -a /etc/samba/smb.conf >/dev/null; } && \
-    { command -v smbd >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba >/dev/null 2>&1; } && \
+    { [ -x /usr/sbin/smbd ] || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends samba >/dev/null 2>&1; } && \
     sudo systemctl enable --now smbd >/dev/null 2>&1 || true"
 
   log "install rpicam-source.service if changed (template User=pi → $PI_USER)"
