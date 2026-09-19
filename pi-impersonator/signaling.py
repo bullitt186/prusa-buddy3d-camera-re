@@ -182,7 +182,7 @@ class PrusaSignaling:
 
     def _log_inbound_event(self, event, data, prefix='Inbound event'):
         if isinstance(data, bytes):
-            preview = binascii.hexlify(data[:256]).decode('ascii')
+            preview = binascii.hexlify(data[:2000]).decode('ascii')
             summary = self.pb_summary(data)
             log.info(f'{prefix}: {event} bytes len={len(data)} summary={summary} hex256={preview}')
         else:

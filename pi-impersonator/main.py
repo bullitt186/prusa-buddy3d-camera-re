@@ -27,6 +27,7 @@ from proto import (
     WEBRTC_REQUEST,
     decode_camera_webrtc_message,
     decode_ice_config,
+    decode_message,
     encode_camera_webrtc_message,
     encode_message,
 )
@@ -304,6 +305,35 @@ async def ota_loop(token, fingerprint, session):
 def decline_firmware_update(source):
     """GAP-OTA-01: explicit unsupported result for a remote update request."""
     log.warning(f'OTA: {source} requested — declined ({ota.decline_reason()})')
+
+
+def _find_candidate(msg):
+    """Return the ICE candidate text from a decoded WebRTC message, or ''.
+
+    The viewer trickles candidates as tag4.1 = candidate (tag2 = mid).
+    """
+    def scan(value):
+        if isinstance(value, bytes):
+            if value.startswith(b'candidate:'):
+                return value.decode('utf-8', 'replace')
+            try:
+                inner = decode_message(value)
+            except Exception:
+                return ''
+            if isinstance(inner, dict):
+                for v in inner.values():
+                    found = scan(v)
+                    if found:
+                        return found
+        elif isinstance(value, str) and value.startswith('candidate:'):
+            return value
+        return ''
+
+    for value in msg.get('raw', {}).values():
+        found = scan(value)
+        if found:
+            return found
+    return ''
 
 
 async def timelapse_loop():
@@ -611,11 +641,21 @@ async def main():
                     msg['client_id'] or msg['session_id'] or msg['request_id'],
                     servers, loop, turn_user, turn_cred,
                 )
+            elif msg['field5'] == WEBRTC_CANDIDATE:
+                # Viewer trickle-ICE candidate (tag5=4, tag4.1=candidate,
+                # tag2=mid). These were previously ignored, so the connection
+                # never completed.
+                candidate = _find_candidate(msg)
+                if candidate:
+                    webrtc.add_ice_candidate(candidate)
+                    log.info(f'WebRTC inbound candidate added (mid={msg["client_id"]})')
+                else:
+                    log.warning('WebRTC candidate message carried no candidate')
             elif _find_sdp(msg):
                 # The viewer's answer to our offer.
                 webrtc.handle_answer(msg['request_id'], _find_sdp(msg))
             else:
-                log.info('WebRTC message carried no SDP (ICE/session config only)')
+                log.info('WebRTC message carried no SDP or candidate (ignored)')
         elif event == 'trigger' and isinstance(data, bytes):
             decoded = trigger.decode_trigger(data)
             request_id = decoded.request_id or None

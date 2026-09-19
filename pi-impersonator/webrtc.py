@@ -41,6 +41,11 @@ def _munge_offer(sdp_text):
     has_c = any(l.startswith('c=') for l in media)
     out, inserted = [], False
     for line in media:
+        if line.startswith('a=fmtp:96 '):
+            # Match libdatachannel's H264 fmtp exactly (the Connect answerer, a
+            # libdatachannel endpoint, rejected our sprop-parameter-sets form).
+            line = ('a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;'
+                    'level-asymmetry-allowed=1')
         out.append(line)
         if mid and not inserted:
             if line.startswith('c=') or (not has_c and line.startswith('m=')):
