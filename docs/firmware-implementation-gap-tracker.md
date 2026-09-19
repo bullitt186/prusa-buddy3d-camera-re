@@ -597,7 +597,7 @@ closing the gap.
 
 ### GAP-WEBRTC-03 — Implement session lifecycle and teardown
 
-- [~] **P0 · Stream works end-to-end, but teardown is missing (lifecycle open)**
+- [x] **P0 · Stream + teardown live-verified (app and browser) 2026-09-19**
 - **Live reproduction 2026-09-19 (browser page-open):** a Connect-web cameras page triggered one
   offer (`Sent WebRTC offer … 755 chars`), the viewer answered (`Remote answer set`), and 21
   candidates arrived — **7 added, 14 dropped** as `WebRTC candidate message carried no candidate`.
@@ -605,15 +605,17 @@ closing the gap.
   apart were byte-identical and 40 s of `journalctl -f -u prusa-cam` had zero `Snapshot:` lines —
   **periodic snapshots were permanently paused**, exactly as the "Current behavior" note predicts.
 - **Live fix (2026-09-19, `8bd7a45`):** `webrtcbin` has **no** `on-ice-connection-state-change` signal (gst-inspect confirms only `on-ice-candidate`/`on-negotiation-needed`); the first attempt raised in `create_offer` and left snapshots paused again. Fixed by connecting **`notify::ice-connection-state`** (a readable GObject property), arming the connect watchdog *before* signal wiring, wrapping each connect, and resuming snapshots if `create_offer` raises. **Verified live:** a browser "Play live stream" now creates and sends the offer (`m=video 9`, media accepted, 754 chars) with local candidates; when ICE never connected, the 30 s watchdog fired (`WebRTC stream ended (no-ice-connection)`) and snapshots resumed (`Resuming snapshots after WebRTC stream ended`; cadence gap 22:33:19→22:34:00 then every 10 s). Candidate extraction (`proto.find_webrtc_candidate`) also fixed (unit-tested).
-- **Still open (browser WebRTC):** in the live run the **viewer never sent an answer** (no inbound `webrtc` f5=2/4 after the offer), so ICE never connected. The page also intermittently showed "Camera is offline" with `ERR_CONNECTION_REFUSED` and the server logged `CameraIsNotSessionMemberError`. Whether the missing answer is the server session membership issue or an offer-SDP rejection is unresolved — this is the next investigation.
+- **Browser WebRTC now works (live-verified 2026-09-19):** after the candidate-extraction fix the viewer's trickle candidates are all applied, and the browser stream establishes — Pi log `Remote answer set` → `WebRTC inbound candidate added` → `ICE connection state: 1/2/3`; the page's `<video>` was **1920×1080, readyState 4, playing** (`currentTime` advancing). The candidate fix was the enabler: the earlier run dropped 14/21 candidates and ICE never completed. Teardown also verified: ending the viewer gave `ICE connection state: 4` → `WebRTC stream ended (ice-failed)` → `Resuming snapshots` and snapshots resumed within seconds.
+- **Remaining (pre-existing, separate):** the Connect server intermittently logs `CameraIsNotSessionMemberError` and drops/reconnects the camera's Socket.IO session; during that window the viewer's answer is not relayed to the camera and the stream cannot establish. That is a signaling-session issue, not a WebRTC/media bug.
 - **Recovered 2026-09-19 (live):** the full camera-side flow is implemented — ICE config → camera **offer** (type 3) → viewer **answer** (type 2) → **trickle candidates** (type 4). The viewer's candidates arrive as `a=candidate:...` with `tag2 = mid` and are applied via `add-ice-candidate`.
 - **Final fix (live-verified):** the Connect answerer (a libdatachannel endpoint) **validates the H.264 SPS** and rejects our v4l2 SPS (`428029`, baseline level 4.1) with `m=video 0`; it wants the firmware's `42e01f` class (constrained baseline level 3.1). Transcoding was too heavy (`openh264enc` wedged the Pi; `v4l2h264enc` is owned by the camera source), so `stream_mux` now serves the same H264 on **port 8889** with each SPS NAL's profile/constraint/level patched to `42 e0 1f` (matched by NAL type — rpicam-vid emits header `0x27`), and the WebRTC branch reads 8889 (8888/RTSP/snapshots untouched). After the patch the answer is `m=video 9 …` (media **accepted**) and the stream plays. Requires `gstreamer1.0-nice`.
 - **Firmware behavior:** tracks clients and connection state, enforces lifetime/scope, tears down
   disconnected/expired peers, and restores scoped video settings. **[confirmed]**
-- **Current behavior:** the global `streaming` flag becomes true on the first offer and is never
-  cleared. No ICE/peer failure, close, timeout, or TTL callback returns the service to idle.
-- **Connect impact:** snapshots remain permanently paused after the first offer, and stale peer
-  resources remain allocated.
+- **Current behavior (historical, fixed 2026-09-19):** the global `streaming` flag used to become true
+  on the first offer and was never cleared. ICE/peer failure, close, disconnect and a watchdog now
+  clear it and resume snapshots.
+- **Connect impact (historical):** snapshots remained permanently paused after the first offer; now
+  they resume on any stream end, and stale peer resources are torn down.
 - **Implementation:** represent each session explicitly; handle ICE/DTLS/peer state transitions;
   enforce TTL; tear down on failure/disconnect/expiry; clear streaming state when the last client
   ends.
@@ -621,8 +623,9 @@ closing the gap.
   pipeline and resume snapshots.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L216-L231),
   [`webrtc.py`](../pi-impersonator/webrtc.py#L32-L51)
-- **Implementation (staged, commit pending):** `webrtc.py` now connects
-  `on-ice-connection-state-change` and maps states through the stdlib-only
+- **Implementation (done, `1e1e2f2` + `8bd7a45`):** `webrtc.py` connects
+  **`notify::ice-connection-state`** (webrtcbin has no `on-ice-connection-state-change` signal) and
+  maps states through the stdlib-only
   [`webrtc_lifecycle.py`](../pi-impersonator/webrtc_lifecycle.py): FAILED/CLOSED notify
   immediately, DISCONNECTED is re-checked after a 15 s grace period, and a 30 s connect watchdog
   fires when ICE never connects. `main.py`'s `on_stream_ended` clears `state.streaming` and

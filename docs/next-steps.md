@@ -63,14 +63,13 @@ Also open (smaller):
   2026-09-19; `/tmp` cleared, no shutdown record) and `vcgencmd get_throttled` reports
   `0x20000` (a past Arm-frequency-cap event). Root cause (PSU / thermal / watchdog) is
   unknown; investigate if it recurs.
-- **Browser WebRTC** (Connect web, not the app) under `GAP-WEBRTC-03/04`: the snapshot stall is
-  **fixed and live-verified** (ICE-failure/close/disconnect + a 30 s watchdog now clear
-  `state.streaming`, and snapshots resumed after a failed browser stream), and inbound viewer
-  candidate extraction is fixed. **Still open:** the viewer never sent an answer in the live run
-  (no inbound `webrtc` f5=2/4), so ICE never connected; the page also intermittently showed
-  "Camera is offline" with `ERR_CONNECTION_REFUSED` and the server logged
-  `CameraIsNotSessionMemberError`. Whether the missing answer is that session-membership issue or
-  an offer-SDP rejection is the next investigation.
+- **Browser WebRTC works (live-verified 2026-09-19).** The candidate-extraction fix was the enabler:
+  the viewer's trickle candidates are now all applied and ICE completes (`ICE connection state: 1/2/3`)
+  with the page's `<video>` playing 1920×1080. The snapshot stall is fixed too (ICE failure/close/
+  disconnect + a 30 s watchdog resume snapshots; verified). **Remaining, separate:** the Connect server
+  intermittently logs `CameraIsNotSessionMemberError` and drops/reconnects the camera's Socket.IO
+  session; during that window the viewer's answer is not relayed and the stream cannot establish —
+  a signaling-session issue, not a WebRTC/media bug.
 
 Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
 maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
