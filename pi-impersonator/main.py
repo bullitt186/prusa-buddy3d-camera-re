@@ -468,16 +468,20 @@ async def main():
     sig = PrusaSignaling(fingerprint, token, state, mac=mac, ip=ip, ssid=ssid)
     loop = asyncio.get_event_loop()
 
-    async def on_webrtc_answer(request_id, sdp_text):
-        msg = encode_camera_webrtc_message(request_id, WEBRTC_ANSWER, sdp_text)
+    async def on_webrtc_offer(request_id, sdp_text):
+        msg = encode_camera_webrtc_message(
+            token, request_id, fingerprint, WEBRTC_OFFER, sdp=sdp_text
+        )
         await sig.sio_emit('webrtc', msg)
-        log.info(f'Sent WebRTC answer for {request_id[:16]}...')
+        log.info(f'Sent WebRTC offer for {request_id[:16]}... ({len(sdp_text)} chars)')
 
     async def on_ice_candidate(request_id, candidate, mline_index):
-        msg = encode_camera_webrtc_message(request_id, WEBRTC_CANDIDATE, candidate)
+        msg = encode_camera_webrtc_message(
+            token, request_id, fingerprint, WEBRTC_CANDIDATE, candidate=candidate
+        )
         await sig.sio_emit('webrtc', msg)
 
-    webrtc = PrusaWebRTC(on_answer=on_webrtc_answer, on_ice_candidate=on_ice_candidate)
+    webrtc = PrusaWebRTC(on_offer=on_webrtc_offer, on_ice_candidate=on_ice_candidate)
     webrtc.start()
 
     def start_webrtc_service():
@@ -578,25 +582,28 @@ async def main():
                 f'keys={sorted(msg["raw"].keys())}'
             )
             if msg['ice_config']:
-                # GAP-WEBRTC-01: consume the Connect-provided ICE server config
-                # (tag8 = repeated {id, host, port, type}).
+                # GAP-WEBRTC-01: Connect sends the ICE server config first
+                # (tag8 = repeated {id, host, port, type}). The camera is the
+                # WebRTC OFFERER (firmware FUN_000b996c): create the peer
+                # connection with these servers and send an offer.
                 servers = decode_ice_servers(msg['ice_config'])
                 log.info(f'WebRTC ICE servers: {servers}')
-            sdp = _find_sdp(msg)
-            if sdp:
                 if not webrtc_control.offer_allowed(state):
                     log.warning(
-                        'WebRTC offer rejected: service disabled '
+                        'WebRTC start rejected: service disabled '
                         f'(mode={state.webrtc_mode}, status={state.webrtc_status})'
                     )
                     return
                 if not msg['request_id']:
-                    log.error('Ignoring malformed WebRTC offer without request ID')
+                    log.error('Ignoring WebRTC start without request ID')
                     return
                 state.streaming = True
                 log.info('Pausing snapshots for WebRTC stream')
                 await asyncio.sleep(1)
-                webrtc.handle_offer(msg['request_id'], sdp, loop)
+                webrtc.create_offer(msg['request_id'], servers, loop)
+            elif _find_sdp(msg):
+                # The viewer's answer to our offer.
+                webrtc.handle_answer(msg['request_id'], _find_sdp(msg))
             else:
                 log.info('WebRTC message carried no SDP (ICE/session config only)')
         elif event == 'trigger' and isinstance(data, bytes):

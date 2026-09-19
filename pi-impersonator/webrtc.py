@@ -13,8 +13,8 @@ Gst.init(None)
 log = logging.getLogger('prusa-cam.webrtc')
 
 class PrusaWebRTC:
-    def __init__(self, on_answer, on_ice_candidate):
-        self._on_answer = on_answer
+    def __init__(self, on_offer, on_ice_candidate):
+        self._on_offer = on_offer
         self._on_ice = on_ice_candidate
         self._pipe = None
         self._webrtc = None
@@ -51,15 +51,20 @@ class PrusaWebRTC:
             self._proc.terminate()
             self._proc = None
 
-    def handle_offer(self, request_id, sdp_text, loop):
+    def create_offer(self, request_id, ice_servers, loop):
+        """Camera-side offer (firmware is the offerer; FUN_000b996c).
+
+        Connect first sends the ICE server configuration; the camera then builds
+        the peer connection with those servers and emits an offer. The viewer
+        returns an answer (``handle_answer``) and ICE is trickled.
+        """
         self._request_id = request_id
         self._loop = loop
 
         self._teardown()
 
-        # Start rpicam-vid subprocess at the current quality tier (parity with the RTSP
-        # source). --rotation 180 matches the physical (inverted) camera mount; --intra 30
-        # and --flush cut join/steady-state latency.
+        # Start rpicam-vid subprocess at the current quality tier (parity with the
+        # RTSP source). --rotation 180 matches the physical (inverted) camera mount.
         _, w, h = quality.read_current()
         self._proc = subprocess.Popen(
             ['rpicam-vid', '--codec', 'h264', '-t', '0',
@@ -71,38 +76,45 @@ class PrusaWebRTC:
         )
 
         fd = self._proc.stdout.fileno()
+        stun = ''
+        for server in ice_servers or []:
+            if server.get('host') and server.get('type') in (1, 3):
+                stun = f" stun-server=stun://{server['host']}:{server['port']}"
+                break
         pipeline_str = (
             f'fdsrc fd={fd} ! h264parse config-interval=-1 '
             '! rtph264pay config-interval=1 pt=96 '
             '! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 '
-            '! webrtcbin name=webrtc bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302'
+            f'! webrtcbin name=webrtc bundle-policy=max-bundle{stun}'
         )
 
         self._pipe = Gst.parse_launch(pipeline_str)
         self._webrtc = self._pipe.get_by_name('webrtc')
 
-        self._webrtc.connect('on-negotiation-needed', self._on_negotiation_needed)
         self._webrtc.connect('on-ice-candidate', self._on_ice_candidate_cb)
-
         self._pipe.set_state(Gst.State.PLAYING)
-        log.info('Pipeline set to PLAYING')
+        log.info(f'Pipeline set to PLAYING (stun={stun.strip() or "none"})')
 
-        # Set remote offer
+        promise = Gst.Promise.new_with_change_func(self._on_offer_created)
+        self._webrtc.emit('create-offer', None, promise)
+
+    def handle_answer(self, request_id, sdp_text):
+        """Apply the viewer's answer to the existing peer connection."""
+        self._request_id = request_id
+        if self._webrtc is None:
+            log.warning('WebRTC answer received with no peer connection')
+            return
         res, sdp_msg = GstSdp.SDPMessage.new_from_text(sdp_text)
         if res != GstSdp.SDPResult.OK:
-            log.error(f'Failed to parse SDP offer: {res}')
+            log.error(f'Failed to parse SDP answer: {res}')
             return
-        offer = GstWebRTC.WebRTCSessionDescription.new(
-            GstWebRTC.WebRTCSDPType.OFFER, sdp_msg
+        answer = GstWebRTC.WebRTCSessionDescription.new(
+            GstWebRTC.WebRTCSDPType.ANSWER, sdp_msg
         )
         promise = Gst.Promise.new()
-        self._webrtc.emit('set-remote-description', offer, promise)
+        self._webrtc.emit('set-remote-description', answer, promise)
         promise.wait()
-        log.info('Remote description set')
-
-        # Create answer
-        promise = Gst.Promise.new_with_change_func(self._on_answer_created)
-        self._webrtc.emit('create-answer', None, promise)
+        log.info('Remote answer set')
 
     def _on_negotiation_needed(self, element):
         pass
@@ -114,28 +126,25 @@ class PrusaWebRTC:
                 self._on_ice(self._request_id, candidate, mline_index)
             )
 
-    def _on_answer_created(self, promise):
+    def _on_offer_created(self, promise):
         promise.wait()
         reply = promise.get_reply()
-        if reply is None:
-            log.error('Answer creation returned no reply')
-            return
-        answer = reply.get_value('answer')
-        if answer is None:
-            log.error('Failed to create answer')
+        offer = reply.get_value('offer') if reply is not None else None
+        if offer is None:
+            log.error('Offer creation returned no reply')
             return
 
         promise2 = Gst.Promise.new()
-        self._webrtc.emit('set-local-description', answer, promise2)
+        self._webrtc.emit('set-local-description', offer, promise2)
         promise2.wait()
 
-        sdp_text = answer.sdp.as_text()
-        log.info(f'Answer SDP created ({len(sdp_text)} chars)')
+        sdp_text = offer.sdp.as_text()
+        log.info(f'Offer SDP created ({len(sdp_text)} chars)')
 
-        if self._loop and self._on_answer:
+        if self._loop and self._on_offer:
             self._loop.call_soon_threadsafe(
                 asyncio.ensure_future,
-                self._on_answer(self._request_id, sdp_text)
+                self._on_offer(self._request_id, sdp_text)
             )
 
     def add_ice_candidate(self, candidate, sdp_mline_index=0):

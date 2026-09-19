@@ -153,12 +153,21 @@ def decode_ice_servers(data):
     return servers
 
 
-def encode_camera_webrtc_message(request_id, msg_type, payload):
-    """Encode an answer/candidate using the firmware's outbound field layout."""
-    if msg_type not in (WEBRTC_ANSWER, WEBRTC_CANDIDATE):
+def encode_camera_webrtc_message(token, request_id, fingerprint, msg_type,
+                                 sdp='', candidate=''):
+    """Encode a camera-side WebRTC message (recovered 9-field schema 0x3f7680).
+
+    Recovered from ``FUN_000a3e90``: tag1 = token, tag2 = request_id,
+    tag3 = fingerprint, tag4.1 = SDP / tag4.2 = candidate, tag5 = type
+    (1 request / 2 answer / 3 offer / 4 candidate), tag7 = 1.
+    """
+    if msg_type not in (WEBRTC_REQUEST, WEBRTC_ANSWER, WEBRTC_OFFER, WEBRTC_CANDIDATE):
         raise ValueError(f'unsupported outbound WebRTC message type: {msg_type}')
     if not isinstance(request_id, str) or not request_id:
         raise ValueError('request_id must be a non-empty string')
-    if not isinstance(payload, str) or not payload:
-        raise ValueError('payload must be a non-empty string')
-    return encode_message({1: request_id, 2: msg_type, 3: payload})
+    fields = {1: token, 2: request_id, 3: fingerprint, 5: msg_type, 7: 1}
+    if sdp:
+        fields[4] = encode_message({1: sdp, 2: ''})
+    elif candidate:
+        fields[4] = encode_message({1: '', 2: candidate})
+    return encode_message(fields)

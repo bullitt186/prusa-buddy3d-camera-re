@@ -48,25 +48,34 @@ class CameraWebRtcProtocolTests(unittest.TestCase):
             [{'id': 1, 'host': 'stun.l.google.com', 'port': 19302, 'type': 1}],
         )
 
-    def test_encodes_firmware_answer_as_numeric_type_and_field_three_payload(self):
+    def test_encodes_offer_with_recovered_9_field_layout(self):
+        # Recovered outbound layout (FUN_000a3e90): tag1 token, tag2 request_id,
+        # tag3 fingerprint, tag4.1 SDP, tag5 type (3=offer), tag7=1.
         wire = encode_camera_webrtc_message(
-            'request-12345678', WEBRTC_ANSWER, 'v=0\r\na=recvonly\r\n'
+            'tok', 'request-12345678', 'fp', WEBRTC_OFFER, sdp='v=0\r\n'
         )
+        fields = decode_message(wire)
+        self.assertEqual(fields[1], 'tok')
+        self.assertEqual(fields[2], 'request-12345678')
+        self.assertEqual(fields[3], 'fp')
+        self.assertEqual(fields[5], WEBRTC_OFFER)
+        self.assertEqual(fields[7], 1)
+        nested = fields[4].encode('utf-8') if isinstance(fields[4], str) else fields[4]
+        self.assertEqual(decode_message(nested)[1], 'v=0\r\n')
 
-        self.assertEqual(
-            decode_message(wire),
-            {1: 'request-12345678', 2: WEBRTC_ANSWER, 3: 'v=0\r\na=recvonly\r\n'},
-        )
-
-    def test_encodes_candidate_with_numeric_type(self):
+    def test_encodes_candidate_in_tag4(self):
         wire = encode_camera_webrtc_message(
-            'request-12345678', WEBRTC_CANDIDATE, 'candidate:1 1 UDP 1 10.0.0.1 9 typ host'
+            'tok', 'request-12345678', 'fp', WEBRTC_CANDIDATE,
+            candidate='candidate:1 1 UDP 1 10.0.0.1 9 typ host',
         )
-        self.assertEqual(decode_message(wire)[2], WEBRTC_CANDIDATE)
+        fields = decode_message(wire)
+        self.assertEqual(fields[5], WEBRTC_CANDIDATE)
+        nested = fields[4].encode('utf-8') if isinstance(fields[4], str) else fields[4]
+        self.assertIn('candidate:1', decode_message(nested)[2])
 
     def test_rejects_non_firmware_outbound_type(self):
         with self.assertRaises(ValueError):
-            encode_camera_webrtc_message('request-12345678', WEBRTC_OFFER, 'v=0')
+            encode_camera_webrtc_message('tok', 'request-12345678', 'fp', 99, sdp='v=0')
 
 
 if __name__ == '__main__':
