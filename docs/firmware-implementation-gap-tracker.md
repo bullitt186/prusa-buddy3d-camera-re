@@ -1110,6 +1110,31 @@ closing the gap.
   GAP-CAP-01 is likewise not done, so Connect can still display these controls even though they now
   never report success.
 
+### GAP-DEVICE-03 — Host stability: unexpected reboot + thermal throttling
+
+- [~] **P2 · Investigated 2026-09-19; forensics + journal-flood mitigations deployed, hardware action open**
+- **Reboot (~21:07 2026-09-19):** cause **undeterminable** — the reboot happened with the read-only
+  overlay active, so journald (volatile), `/tmp`, wtmp and cloud-init all wrote to the RAM upper
+  layer and were discarded; there is no RTC (boot clocks jumped +51/+88 min on NTP sync), and no
+  `pstore`/ramoops. Current-boot `dmesg` shows no panic/oops, no under-voltage, no OOM, no mmc/ext4
+  errors. Most likely an **external power cut** (the Pi is printer-powered by design per
+  `CLAUDE.md`) or a **1-minute hardware-watchdog reset** (`RuntimeWatchdogUSec=1min`, `get_rsts=20`,
+  non-default but not authoritatively decodable).
+- **Throttling (high confidence, thermal):** `get_throttled` = `0x60002` → bit1 ARM frequency capped
+  **now**, bit17 freq-cap latched, bit18 hard-throttle latched; **bits 0/16 (under-voltage) clear**.
+  Temperature 81–84 °C continuously with **no cooling device**, vs a 85 °C `temp_limit`; real ARM
+  clock 672–941 MHz against a 1 GHz request. Cause: 1080p30 H.264 (`rpicam-source`) + `main.py` +
+  `stream_mux` on a passively cooled Pi Zero 2 W. Not destructive, but degrades streaming jitter.
+- **Aggravators:** `systemd-remount-fs.service` fails in a loop (`overlay: No changes allowed in
+  reconfigure`), which also fails the zram/swapfile units → **zero swap** on a 415 MB device.
+- **Mitigations deployed (`bootlog.sh` + `systemd/bootlog.service`, `rpicam-source.service`):**
+  a oneshot writes `date`/uptime/`get_rsts`/`get_throttled`/temp/dmesg to the real vfat
+  `/boot/firmware/bootlog.txt` each boot (survives reboots); `rpicam-vid -v 0` stops the ~30 lines/s
+  frame stats that evicted `prusa-cam` logs from the volatile journal within minutes.
+- **Open (hardware/ops):** fit a heatsink/fan or reduce the stream (720p/15 fps); repair the failing
+  swap/remount-fs units; keep an off-box logger (netconsole/serial) if a reboot must be captured
+  precisely. Confirm the next reboot from `/boot/firmware/bootlog.txt`.
+
 ### GAP-WEBRTC-07 — Decide audio-track compatibility
 
 - [ ] **P2 · Open; optional-path verification required**

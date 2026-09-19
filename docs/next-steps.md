@@ -59,10 +59,16 @@ Also open (smaller):
   is verified directly on the Pi, but this Connect version has no make-video button or
   file-list view, so the sender cannot be exercised through the app (only a raw Socket.IO
   replay would). See `GAP-TIMELAPSE-01`.
-- **Reboot & throttling investigation pending:** the Pi rebooted unexpectedly (~21:07 on
-  2026-09-19; `/tmp` cleared, no shutdown record) and `vcgencmd get_throttled` reports
-  `0x20000` (a past Arm-frequency-cap event). Root cause (PSU / thermal / watchdog) is
-  unknown; investigate if it recurs.
+- **Reboot & throttling — investigated 2026-09-19, mitigations deployed.** Throttling is **thermal**
+  (81–84 °C continuously, no heatsink/fan; `get_throttled` = `0x60002` → ARM frequency capped **now**
+  and hard-throttle latched; **no under-voltage ever**) from the 1080p30 H.264 pipeline on a
+  passively cooled Pi Zero 2 W. The ~21:07 reboot cause is **undeterminable** (volatile journal, no
+  RTC, RAM overlay upper layer): most likely an external power cut or a 1-minute hardware-watchdog
+  reset. Mitigations: `bootlog.service` persists boot reason + `get_rsts`/`get_throttled`/temp/dmesg
+  to `/boot/firmware/bootlog.txt` each boot; `rpicam-source` now runs `rpicam-vid -v 0` so its
+  ~30 lines/s frame stats stop flooding the volatile journal. **Hardware action needed:** heatsink/fan
+  or a lighter stream (720p/15 fps). Also: `systemd-remount-fs` and the swap units fail, leaving
+  **zero swap** on a 415 MB device — a plausible watchdog trigger to clean up.
 - **Browser WebRTC works (live-verified 2026-09-19).** The candidate-extraction fix was the enabler:
   the viewer's trickle candidates are now all applied and ICE completes (`ICE connection state: 1/2/3`)
   with the page's `<video>` playing 1920×1080. The snapshot stall is fixed too (ICE failure/close/

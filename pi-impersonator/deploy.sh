@@ -105,6 +105,16 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
   sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/rpicam-source.service" \
     | "${SSH[@]}" "sudo tee /etc/systemd/system/rpicam-source.service >/dev/null && sudo systemctl daemon-reload"
 
+  # Persist a boot-reason/throttle snapshot to the real vfat boot partition: the
+  # root overlay + volatile journal otherwise erase all evidence of an unexpected
+  # reboot (see the reboot/throttling investigation in the gap tracker).
+  log "install bootlog.service (persist boot reason to /boot/firmware)"
+  sed -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/bootlog.service" \
+    | "${SSH[@]}" "sudo tee /etc/systemd/system/bootlog.service >/dev/null && sudo systemctl daemon-reload"
+  "${SSH[@]}" "chmod +x /home/$PI_USER/prusa-cam/bootlog.sh && \
+    sudo systemctl enable bootlog.service >/dev/null 2>&1 && \
+    sudo systemctl start bootlog.service >/dev/null 2>&1 || true"
+
   log "restart services"
   "${SSH[@]}" 'sudo systemctl restart rpicam-source.service prusa-rtsp.service prusa-cam.service'
   sleep 5

@@ -1,0 +1,16 @@
+# Persist a boot-reason + throttle/thermal snapshot to the real vfat boot
+# partition (survives reboots). The root is a read-only overlay with a RAM upper
+# layer and the journal is volatile, so an unexpected reboot otherwise leaves no
+# trace. See bootlog.sh and docs/firmware-implementation-gap-tracker.md
+# (reboot/throttling investigation).
+[Unit]
+Description=Log boot reason + throttle/thermal state to /boot/firmware/bootlog.txt
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/prusa-cam/bootlog.sh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

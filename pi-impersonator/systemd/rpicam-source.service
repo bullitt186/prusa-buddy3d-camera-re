@@ -5,6 +5,9 @@
 # quality.live.env is an ephemeral live override (GAP-QUALITY-02); it is read last so a
 # live change moves the encoder without touching the persisted tier.
 # --rotation 180: camera module is mounted inverted. --intra 30 --flush: lower latency.
+# -v 0: rpicam-vid's default level-1 frame stats (#N fps exp ag dg) emit ~30 lines/s,
+# which floods the volatile journal and evicts prusa-cam logs within minutes. Level 0
+# silences them; a pipeline failure still surfaces as this unit restarting.
 [Unit]
 Description=Persistent H264 camera source (TCP)
 After=network.target
@@ -15,7 +18,7 @@ User=pi
 Environment=CAM_WIDTH=1920 CAM_HEIGHT=1080
 EnvironmentFile=-/etc/prusa-cam/quality.env
 EnvironmentFile=-/etc/prusa-cam/quality.live.env
-ExecStart=/bin/bash -c '/usr/bin/rpicam-vid --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --profile baseline --intra 30 --flush --inline -o - | /home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/stream_mux.py'
+ExecStart=/bin/bash -c '/usr/bin/rpicam-vid -v 0 --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --profile baseline --intra 30 --flush --inline -o - | /home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/stream_mux.py'
 Restart=always
 RestartSec=2
 
