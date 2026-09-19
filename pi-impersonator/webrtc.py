@@ -50,19 +50,19 @@ def _munge_offer(sdp_text):
 
 
 def _strip_sprop(sdp_text):
-    """Normalize the H264 fmtp to the firmware's libdatachannel form.
+    """Drop ``sprop-parameter-sets`` from the H264 fmtp.
 
-    libdatachannel (firmware + the Connect answerer) uses
-    ``a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1``
-    — constrained baseline, no ``sprop-parameter-sets`` (the stream carries
-    SPS/PPS inline). The answerer rejects our m-line (``m=video 0``) with the
-    GStreamer form, which uses ``profile-level-id=428029`` + sprop.
+    The firmware's libdatachannel offer omits it (the stream carries SPS/PPS
+    inline via rpicam-vid ``--inline``). Do NOT rewrite ``profile-level-id``: the
+    answerer validates the actual SPS, so overriding the fmtp to ``42e01f`` while
+    the stream SPS is ``428029`` makes it stop answering entirely.
     """
     out = []
     for line in sdp_text.replace('\r\n', '\n').split('\n'):
-        if line.startswith('a=fmtp:96 '):
-            line = ('a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;'
-                    'level-asymmetry-allowed=1')
+        if line.startswith('a=fmtp:96 ') and 'sprop-parameter-sets' in line:
+            params = [p for p in line[len('a=fmtp:96 '):].split(';')
+                      if not p.startswith('sprop-parameter-sets=')]
+            line = 'a=fmtp:96 ' + ';'.join(params)
         out.append(line)
     return '\r\n'.join(out)
 
