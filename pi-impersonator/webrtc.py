@@ -12,6 +12,43 @@ import threading
 Gst.init(None)
 log = logging.getLogger('prusa-cam.webrtc')
 
+def _munge_offer(sdp_text):
+    """Restructure the GStreamer offer to match the firmware's libdatachannel one.
+
+    Diffing a reference libdatachannel offer (same library the firmware uses)
+    against webrtcbin's showed: libdatachannel puts ``a=mid`` first in the
+    m-section and includes the session-level ``a=msid-semantic:WMS *`` and
+    ``a=group:LS``, while webrtcbin emits ``a=mid`` after the ``a=ssrc`` lines
+    and omits those. A strict JSEP answerer rejects that (the Connect viewer
+    answered ``m=video 0``).
+    """
+    lines = [l for l in sdp_text.replace('\r\n', '\n').split('\n') if l]
+    try:
+        first_media = next(i for i, l in enumerate(lines) if l.startswith('m='))
+    except StopIteration:
+        return sdp_text
+    session, media = lines[:first_media], lines[first_media:]
+    mid = next((l for l in media if l.startswith('a=mid:')), '')
+    media = [l for l in media if not l.startswith('a=mid:')]
+
+    if mid:
+        mid_value = mid.split(':', 1)[1]
+        if not any(l.startswith('a=group:LS') for l in session):
+            session.append(f'a=group:LS {mid_value}')
+        if not any(l.startswith('a=msid-semantic') for l in session):
+            session.append('a=msid-semantic:WMS *')
+
+    has_c = any(l.startswith('c=') for l in media)
+    out, inserted = [], False
+    for line in media:
+        out.append(line)
+        if mid and not inserted:
+            if line.startswith('c=') or (not has_c and line.startswith('m=')):
+                out.append(mid)
+                inserted = True
+    return '\r\n'.join(session + out) + '\r\n'
+
+
 class PrusaWebRTC:
     def __init__(self, on_offer, on_ice_candidate):
         self._on_offer = on_offer
@@ -177,12 +214,14 @@ class PrusaWebRTC:
             return
         sdp_text = offer.sdp.as_text()
         mlines = [line for line in sdp_text.splitlines() if line.startswith('m=')]
-        alines = [line for line in sdp_text.splitlines()
-                  if line.startswith(('a=rtpmap', 'a=fmtp', 'a=send', 'a=recv', 'a=mid'))]
         log.info(f'Offer SDP text ready ({len(sdp_text)} chars, m-lines={mlines})')
-        log.info(f"Offer SDP:\n{sdp_text}")
         self._webrtc.emit('set-local-description', offer, None)
         log.info('Local description set')
+
+        # Restructure to match the firmware's libdatachannel offer (a=mid first,
+        # a=msid-semantic/a=group:LS present) before sending.
+        sdp_text = _munge_offer(sdp_text)
+        log.info(f'Munged offer SDP ({len(sdp_text)} chars)')
 
         if self._loop and self._on_offer:
             self._loop.call_soon_threadsafe(
