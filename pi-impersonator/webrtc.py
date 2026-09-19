@@ -41,11 +41,6 @@ def _munge_offer(sdp_text):
     has_c = any(l.startswith('c=') for l in media)
     out, inserted = [], False
     for line in media:
-        if line.startswith('a=fmtp:96 '):
-            # Match libdatachannel's H264 fmtp exactly (the Connect answerer, a
-            # libdatachannel endpoint, rejected our sprop-parameter-sets form).
-            line = ('a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;'
-                    'level-asymmetry-allowed=1')
         out.append(line)
         if mid and not inserted:
             if line.startswith('c=') or (not has_c and line.startswith('m=')):
@@ -222,11 +217,6 @@ class PrusaWebRTC:
         log.info(f'Offer SDP text ready ({len(sdp_text)} chars, m-lines={mlines})')
         self._webrtc.emit('set-local-description', offer, None)
         log.info('Local description set')
-
-        # Restructure to match the firmware's libdatachannel offer (a=mid first,
-        # a=msid-semantic/a=group:LS present) before sending.
-        sdp_text = _munge_offer(sdp_text)
-        log.info(f'Munged offer SDP ({len(sdp_text)} chars)')
 
         if self._loop and self._on_offer:
             self._loop.call_soon_threadsafe(
