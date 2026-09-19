@@ -596,7 +596,13 @@ closing the gap.
 
 ### GAP-WEBRTC-03 — Implement session lifecycle and teardown
 
-- [x] **P0 · Working end-to-end (live-verified 2026-09-19)**
+- [~] **P0 · Stream works end-to-end, but teardown is missing (lifecycle open)**
+- **Live reproduction 2026-09-19 (browser page-open):** a Connect-web cameras page triggered one
+  offer (`Sent WebRTC offer … 755 chars`), the viewer answered (`Remote answer set`), and 21
+  candidates arrived — **7 added, 14 dropped** as `WebRTC candidate message carried no candidate`.
+  The stream never completed and `state.streaming` stayed `True`; two `GET /snapshot.jpg` 13 s
+  apart were byte-identical and 40 s of `journalctl -f -u prusa-cam` had zero `Snapshot:` lines —
+  **periodic snapshots were permanently paused**, exactly as the "Current behavior" note predicts.
 - **Recovered 2026-09-19 (live):** the full camera-side flow is implemented — ICE config → camera **offer** (type 3) → viewer **answer** (type 2) → **trickle candidates** (type 4). The viewer's candidates arrive as `a=candidate:...` with `tag2 = mid` and are applied via `add-ice-candidate`.
 - **Final fix (live-verified):** the Connect answerer (a libdatachannel endpoint) **validates the H.264 SPS** and rejects our v4l2 SPS (`428029`, baseline level 4.1) with `m=video 0`; it wants the firmware's `42e01f` class (constrained baseline level 3.1). Transcoding was too heavy (`openh264enc` wedged the Pi; `v4l2h264enc` is owned by the camera source), so `stream_mux` now serves the same H264 on **port 8889** with each SPS NAL's profile/constraint/level patched to `42 e0 1f` (matched by NAL type — rpicam-vid emits header `0x27`), and the WebRTC branch reads 8889 (8888/RTSP/snapshots untouched). After the patch the answer is `m=video 9 …` (media **accepted**) and the stream plays. Requires `gstreamer1.0-nice`.
 - **Firmware behavior:** tracks clients and connection state, enforces lifetime/scope, tears down

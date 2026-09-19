@@ -55,6 +55,17 @@ Already done for timelapse:
 Also open (smaller):
 - Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.
 - Finish mapping the remaining `configuration` protobuf `tag3` subfields.
+- **`file_list` envelope verification pending:** implemented + unit-tested and the make path
+  is verified directly on the Pi, but this Connect version has no make-video button or
+  file-list view, so the sender cannot be exercised through the app (only a raw Socket.IO
+  replay would). See `GAP-TIMELAPSE-01`.
+- **Reboot & throttling investigation pending:** the Pi rebooted unexpectedly (~21:07 on
+  2026-09-19; `/tmp` cleared, no shutdown record) and `vcgencmd get_throttled` reports
+  `0x20000` (a past Arm-frequency-cap event). Root cause (PSU / thermal / watchdog) is
+  unknown; investigate if it recurs.
+- **Browser WebRTC** (Connect web, not the app) is being fixed under `GAP-WEBRTC-03/04`:
+  snapshots stall forever after a failed stream, and inbound viewer ICE candidates are
+  dropped. See `GAP-WEBRTC-03`/`GAP-WEBRTC-04`.
 
 Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
 maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
