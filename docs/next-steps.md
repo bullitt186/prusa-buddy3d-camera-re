@@ -14,7 +14,43 @@ rollout/enrollment, real Buddy3D hardware for comparison, or SSL-unpinning on a 
 
 ---
 
-## Priority — Hardware-identity hypothesis (does the camera's own data gate WebRTC?)
+## CURRENT (2026-09-19) — live WebRTC works; finish SD/timelapse
+
+The sections below are historical. **Superseded:** WebRTC live view now works
+(verified live). The old "backend gate / no offer" framing is wrong; it was four
+firmware-parity bugs (auth field order + ACK `0`, TURN credentials, offerer
+direction + candidate handling, and the H.264 SPS profile). See `status.md`'s
+2026-09-19 section.
+
+**Next session task — make Connect timelapse work.** The app says *"Time lapse not
+available, camera storage not detected, insert SD card"*. It reads storage from the
+`status` message, block `extended_status.4` (descriptor `0x3f72b0`).
+
+- Ours: `{1:2, 2:0, 3:0, 4:0, 5:MODEL}`.
+- Firmware: `{1:1, 2:FUN_000abcb0(), 3:FUN_000abaf4(), 4:<uvarint>, 5:<string>}`
+  — the two getters read a shared singleton (`+0x4`, `+0x50`) populated from
+  `/sys/class/block/mmcblk{0,1}` (`lp_app.strings:1684-1685`; `getSdCardSpace`
+  at `:11874`; `FUN_00071180` reads the block devices).
+- **Do not guess the numeric "present"/space value.** Either trace the singleton
+  (`FUN_000abcb0`/`FUN_000abaf4` callers and the populate site) or set the block to
+  the firmware's shape and observe whether the app reports the SD.
+
+Already done for timelapse:
+- Emulated SD at `/mnt/sdcard/timelapse` (the firmware path), shared over SMB
+  (`\\<pi>\sdcard`, verified); `deploy.sh`/`bootstrap.sh` provision it.
+- `MicroSd` re-advertised; `timelapse.py` storage + MJPEG + `timelapse_loop`;
+  trigger tags 5/14/15 dispatched. File-list envelope (`0x3f701c`, four strings)
+  annotation still unresolved.
+
+Also open (smaller):
+- Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.
+- Finish mapping the remaining `configuration` protobuf `tag3` subfields.
+
+Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
+maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
+
+---
+
 
 **Verdict (2026-07-09): closed — no unique identifier found on the `CameraInfoMessage` wire.**
 P.1 traced the remaining extended-status sub-block; the answer is "a hardware-derived value is

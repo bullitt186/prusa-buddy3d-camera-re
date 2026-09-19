@@ -180,7 +180,24 @@ wiring from the event names. See `GAP-QUALITY-02` in the implementation gap trac
 
 ### `configuration`
 
-Protobuf binary payload with string-named fields (looked up by field name string, not by numeric wire tag — confirmed from `FUN_0006bd7c` VMA `0x6BD7C`). Contains a subset of:
+**Correction 2026-09-19 (live-verified):** the Socket.IO `configuration` event is a
+**nested protobuf**, descriptor `0x3f73a4` (9 fields), decoded by `FUN_000a89e0` and
+dispatched by *name* after decoding (`'video_quality'`, `'light_control'`,
+`'motor_controll'`, `'set_snapshot_upload_interval'`). The name-keyed table below is the
+**QR / manual-config** path (JSON via nlohmann, `FUN_0006fb94`), not the Socket.IO
+message. The JSON handler rejected every live setting change as "not valid JSON".
+
+Live-mapped SIO fields:
+
+| Tag | Meaning | Values |
+|---|---|---|
+| `8.1` | video quality | `1`=SD, `2`=HD, `3`=FHD |
+| `3.4` | `light_control` (IR) | `1`=auto, `2`=day, `3`=night |
+| `3.11` / `3.12` | RTSP candidate | mapping pending (`{11:2,12:2}` = on observed) |
+| `4` | two strings (`0x3f7418`) | empty in observed messages |
+| `6` | token | echoed |
+
+QR/manual-config (JSON) field table:
 
 | Field name | Type | Values |
 |---|---|---|

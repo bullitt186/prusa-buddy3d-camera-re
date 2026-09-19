@@ -12,17 +12,59 @@ Evidence markers: **[confirmed]** = verified live against the real backend or fi
 
 ## Bottom line
 
-A Raspberry Pi can impersonate the camera for **snapshots and metadata**, authenticate its
-camera session, and serve a **local RTSP** live view. It **cannot currently** deliver the app's
-live WebRTC stream.
+A Raspberry Pi impersonates the camera end to end: **snapshots, `/c/info`, Socket.IO
+auth, settings, RTSP, and — as of 2026-09-19 — the app's live WebRTC video stream
+works** (verified live). The earlier "backend gate / no offer relayed" story is
+superseded; see the 2026-09-19 section below.
 
-The immediate failure is a backend gate rather than the media codec: **[confirmed]** our tokens
-(`origin: OTHER` and `origin: WEB`) are absent from
-`camera-service-api.prusa3d.com` (direct lookup → 404), and the signaling server rejects every
-viewer for them (`client_authentication` → ACK `5`), so no WebRTC offer is ever relayed. The
-remaining question is why the token never enters that registry. A 2026-09-18 firmware trace
-reopened one exact software-side identity test: the reported MAC must match the fingerprint
-preimage formatted precisely as the OEM firmware does.
+Current open item: **timelapse storage**. The app says *"Time lapse not available,
+camera storage not detected, insert SD card"* because our `status` does not report the
+SD/storage state. A Pi-backed emulated SD exists (`/mnt/sdcard`, shared over SMB) but
+the status field that reports it is still to be wired. Details and exact leads in the
+2026-09-19 section and `firmware-implementation-gap-tracker.md` (`GAP-TIMELAPSE-01`).
+
+### 2026-09-19 — live WebRTC works; config is protobuf; emulated SD added
+
+The WebRTC blocker was **not** a backend gate. Four firmware-parity bugs were fixed,
+each verified live:
+
+1. **Auth field order + ACK value.** `camera_authentication` must be
+   `field1 = token, field2 = fingerprint` and the success ACK is **`0`**
+   (`FUN_000a3058` / `FUN_000a05e4` / `FUN_0009e53c`). We had them swapped and
+   required `1`, so the server ACKed `1` (an error) and closed the session.
+2. **ICE config + TURN.** The inbound `webrtc` ICE config (descriptor `0x3f7680`,
+   tag8) carries STUN **and TURN** servers with a time-limited username/base64
+   credential; `webrtcbin` needs `stun-server` **and** `turn-server`.
+3. **The camera is the offerer.** Flow: ICE config → camera **offer** (type 3) →
+   viewer **answer** (type 2) → **trickle candidates** (type 4). Viewer candidates
+   arrive as `a=candidate:…` with `tag2 = mid` and must be applied
+   (`add-ice-candidate`); they were previously dropped.
+4. **H.264 SPS profile.** The Connect answerer (a libdatachannel endpoint)
+   validates the stream SPS and rejects the v4l2 SPS (`428029`, level 4.1) with
+   `m=video 0`. Transcoding overloads the Pi, so `stream_mux` serves an
+   **SPS-patched copy on port 8889** (profile/constraint/level → `42 e0 1f`,
+   constrained baseline level 3.1, matched by NAL type); the WebRTC branch reads
+   8889. After the patch the answer is `m=video 9 …` and the stream plays.
+   Requires `gstreamer1.0-nice` (installed by `deploy.sh`/`bootstrap.sh`).
+
+**`configuration` is a nested protobuf, not JSON** (descriptor `0x3f73a4`,
+handler `FUN_000a89e0`). Live-mapped: `tag8.1` = video quality (1=SD/2=HD/3=FHD),
+`tag3.4` = `light_control` (IR sun/moon/auto), `tag3.11`/`tag3.12` = RTSP candidate.
+The JSON parser is only the QR/manual-config path.
+
+**Capabilities pruned:** `IrMode`, `SpeakerVolume`, `FanControl` removed from the
+`/c/info` features (no hardware); `MicroSd` kept and backed by an emulated SD at
+`/mnt/sdcard` (SMB share `sdcard`, verified accessible).
+
+**Timelapse open:** the app reads storage from the `status` message
+(`extended_status.4` storage block, descriptor `0x3f72b0`). We emit
+`{1:2,2:0,3:0,4:0,5:MODEL}`; the firmware emits `{1:1, 2:FUN_000abcb0(),
+3:FUN_000abaf4(), 4:…, 5:string}` where the getters read a singleton (`+0x4`,
+`+0x50`) populated from `/sys/class/block/mmcblk{0,1}`. Wiring the SD-present /
+free-space value is the next step — see `next-steps.md`.
+
+---
+
 
 **[confirmed 2026-07-09, revised]** The `origin: LINK` hypothesis (below) is **dropped as the
 leading lead** — it was chasing the wrong origin. Two official Prusa documents settle this:
