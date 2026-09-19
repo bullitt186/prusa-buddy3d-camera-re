@@ -692,8 +692,21 @@ async def main():
                 f'Configuration (protobuf): '
                 f'{redact_secrets(msg, token, fingerprint)!r}'
             )
-            # Dispatch is by numeric field; the field->setting mapping is being
-            # captured from live Connect changes (see docs/protocol.md).
+            # tag8.1 = video quality enum (1=SD, 2=HD, 3=FHD) — confirmed from
+            # live Connect resolution changes.
+            vq = msg.get(8)
+            if isinstance(vq, dict) and vq.get(1) in (1, 2, 3):
+                raw = ENUM_TO_RAW.get(vq[1])
+                if raw is not None and handle_quality(raw, persist=True):
+                    state.mark_info_dirty()
+                    log.info(
+                        f'Config: video_quality → enum {vq[1]} '
+                        f'({state.resolution()})'
+                    )
+            # tag3 carries the remaining settings (subfields 4/11/12 observed);
+            # the field→setting mapping is still being recovered from the
+            # firmware handler FUN_000a89e0 (it calls the timelapse handler
+            # FUN_000a7170). Logged above until mapped.
             # FW-CONFIG:49-74,286-300: the leading `code` rejects "42"/"66".
             code = msg.get('code')
             if code is not None and str(code) in ('42', '66'):
