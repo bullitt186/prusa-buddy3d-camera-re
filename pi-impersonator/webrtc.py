@@ -63,26 +63,17 @@ class PrusaWebRTC:
 
         self._teardown()
 
-        # Start rpicam-vid subprocess at the current quality tier (parity with the
-        # RTSP source). --rotation 180 matches the physical (inverted) camera mount.
-        _, w, h = quality.read_current()
-        self._proc = subprocess.Popen(
-            ['rpicam-vid', '--codec', 'h264', '-t', '0',
-             '--width', str(w), '--height', str(h), '--framerate', '30',
-             '--rotation', '180', '--intra', '30', '--flush',
-             '--inline', '--profile', 'baseline', '--level', '3.1',
-             '-o', '-'],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-
-        fd = self._proc.stdout.fileno()
+        # GAP-WEBRTC-02: reuse the always-running mux stream (port 8888) instead
+        # of opening libcamera a second time — rpicam-source owns the sensor, so a
+        # second rpicam-vid cannot capture and webrtcbin would have no media.
         stun = ''
         for server in ice_servers or []:
             if server.get('host') and server.get('type') in (1, 3):
                 stun = f" stun-server=stun://{server['host']}:{server['port']}"
                 break
         pipeline_str = (
-            f'fdsrc fd={fd} ! h264parse config-interval=-1 '
+            'tcpclientsrc host=127.0.0.1 port=8888 do-timestamp=true '
+            '! h264parse config-interval=-1 '
             '! rtph264pay config-interval=1 pt=96 '
             '! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 '
             f'! webrtcbin name=webrtc bundle-policy=max-bundle{stun}'
@@ -92,11 +83,13 @@ class PrusaWebRTC:
         self._webrtc = self._pipe.get_by_name('webrtc')
 
         self._webrtc.connect('on-ice-candidate', self._on_ice_candidate_cb)
+        self._webrtc.connect('on-negotiation-needed', self._on_negotiation_needed)
+        self._offer_started = False
         self._pipe.set_state(Gst.State.PLAYING)
         log.info(f'Pipeline set to PLAYING (stun={stun.strip() or "none"})')
-
-        promise = Gst.Promise.new_with_change_func(self._on_offer_created)
-        self._webrtc.emit('create-offer', None, promise)
+        # Standard webrtcbin flow: the offer is created from the
+        # on-negotiation-needed signal. Keep a fallback in case it does not fire.
+        GLib.timeout_add(3000, self._create_offer_timeout)
 
     def handle_answer(self, request_id, sdp_text):
         """Apply the viewer's answer to the existing peer connection."""
@@ -117,7 +110,21 @@ class PrusaWebRTC:
         log.info('Remote answer set')
 
     def _on_negotiation_needed(self, element):
-        pass
+        log.info('WebRTC negotiation needed; creating offer')
+        self._create_offer()
+
+    def _create_offer_timeout(self):
+        if not getattr(self, '_offer_started', False):
+            log.info('WebRTC offer fallback timeout; creating offer')
+            self._create_offer()
+        return False
+
+    def _create_offer(self):
+        if self._webrtc is None or getattr(self, '_offer_started', False):
+            return
+        self._offer_started = True
+        promise = Gst.Promise.new_with_change_func(self._on_offer_created)
+        self._webrtc.emit('create-offer', None, promise)
 
     def _on_ice_candidate_cb(self, element, mline_index, candidate):
         if self._loop and self._on_ice:
@@ -127,19 +134,17 @@ class PrusaWebRTC:
             )
 
     def _on_offer_created(self, promise):
-        promise.wait()
+        # Runs on the GLib main-loop thread; never block here with wait().
         reply = promise.get_reply()
         offer = reply.get_value('offer') if reply is not None else None
+        log.info(f'Offer promise completed (reply={reply is not None}, offer={offer is not None})')
         if offer is None:
             log.error('Offer creation returned no reply')
             return
-
-        promise2 = Gst.Promise.new()
-        self._webrtc.emit('set-local-description', offer, promise2)
-        promise2.wait()
-
         sdp_text = offer.sdp.as_text()
-        log.info(f'Offer SDP created ({len(sdp_text)} chars)')
+        log.info(f'Offer SDP text ready ({len(sdp_text)} chars)')
+        self._webrtc.emit('set-local-description', offer, None)
+        log.info('Local description set')
 
         if self._loop and self._on_offer:
             self._loop.call_soon_threadsafe(
