@@ -66,10 +66,10 @@ Also open (smaller):
 - **Browser WebRTC works (live-verified 2026-09-19).** The candidate-extraction fix was the enabler:
   the viewer's trickle candidates are now all applied and ICE completes (`ICE connection state: 1/2/3`)
   with the page's `<video>` playing 1920×1080. The snapshot stall is fixed too (ICE failure/close/
-  disconnect + a 30 s watchdog resume snapshots; verified). **Remaining, separate:** the Connect server
-  intermittently logs `CameraIsNotSessionMemberError` and drops/reconnects the camera's Socket.IO
-  session; during that window the viewer's answer is not relayed and the stream cannot establish —
-  a signaling-session issue, not a WebRTC/media bug.
+  disconnect + a 30 s watchdog resume snapshots; verified). The intermittent
+  `CameraIsNotSessionMemberError` is **fixed** (`ba48dc8`): it was the unsolicited post-auth burst
+  (`send_sio_info` + `status` + `protobuf_version` + `features`); post-auth now sends nothing
+  (firmware parity) and the session is stable with the answer relayed immediately.
 
 Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
 maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
