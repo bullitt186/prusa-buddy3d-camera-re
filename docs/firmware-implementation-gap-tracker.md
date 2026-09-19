@@ -753,8 +753,13 @@ closing the gap.
 
 ### GAP-CAP-01 — Stop overpromising unsupported features, or implement their wire behavior
 
-- [ ] **P1 · Open — owner decision required**
-- **WP-8 note:** auditing the advertised feature list against implemented behavior shows the gaps are TimelapseEn/Interval/VideoMake/FileList, FwUpdate and the absent-hardware controls (IrMode/SpeakerVolume/FanControl/MicroSD). Pruning or keeping them is a product decision recorded in `.opencode/plans/fix-firmware-gaps.md`; the code does not overclaim success for the absent-hardware controls (GAP-DEVICE-02).
+- [~] **P1 · Decided (owner default: keep advertising); audit complete**
+- **Decision 2026-09-19:** keep the advertised feature set (no pruning). The audit result: every advertised feature now has either working behavior or an explicit truthful response —
+  - working: SocketCom, UploadInterval, GetSnapshot, RtspStream, CameraName, VideoQuality, VideoStream/WebRtc (mode control), CameraReboot (rate-limited), McuTemp, WiFi, FwVer/HwVer, trigger_scheme;
+  - Pi storage-backed: TimelapseEn/Interval/VideoMake (file list returns an explicit unsupported result, envelope annotation unresolved);
+  - truthful decline: FwUpdate;
+  - truthful unavailable (no hardware): IrMode, SpeakerVolume, FanControl, MicroSD.
+- **Still open:** live verification that Connect accepts the truthful unsupported/unavailable responses (needs the signaling link).
 - **Firmware behavior:** advertises features it implements: `SocketCom`, `UploadInterval`,
   `TimelapseEn`, `TimelapseInterval`, `TimelapseVideoMake`, `TimelapseFileList`, `VideoStream`,
   `RtspStream`, `GetSnapshot`, `IrMode`, `SpeakerVolume`, `WiFi`, `FwVer`, `HwVer`, `CameraName`,
