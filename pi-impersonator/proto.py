@@ -91,27 +91,66 @@ def decode_message(data):
 
 
 def decode_camera_webrtc_message(data):
-    """Decode the flat WebRTC envelope used between Connect and the camera.
+    """Decode the recovered 9-field camera-side WebRTC message.
 
-    This is deliberately different from the nested viewer-side WebRtcSignal
-    protobuf used by the web client. The signaling service translates between
-    the two schemas before delivering an event to the camera.
+    Descriptor 0x3f7680 (handler FUN_000a4a78), confirmed against a live Connect
+    message:
+        tag1 string  request_id / token
+        tag2 string  client_id
+        tag3 string  session_id
+        tag4 submsg  (2 strings)
+        tag5 uvarint
+        tag6 uvarint
+        tag7 uvarint
+        tag8 submsg  ICE server configuration (repeated {id, host, port, type})
+        tag9 submsg  (5 uvarints)
     """
     fields = decode_message(data)
     return {
         'request_id': fields.get(1, ''),
-        'msg_type': fields.get(2, 0),
-        'client_id': fields.get(3, ''),
-        'payload': fields.get(4, ''),
-        'transport_policy': fields.get(5, 0),
-        'ttl': fields.get(6, 0),
-        'video_cfg': fields.get(7, 0),
-        'plan': fields.get(8, 0),
-        'quality': fields.get(9, ''),
-        'fps': fields.get(10, 0),
-        'scope': fields.get(12, 0),
+        'client_id': fields.get(2, ''),
+        'session_id': fields.get(3, ''),
+        'field4': fields.get(4, ''),
+        'field5': fields.get(5, 0),
+        'field6': fields.get(6, 0),
+        'field7': fields.get(7, 0),
+        'ice_config': fields.get(8, b''),
+        'field9': fields.get(9, b''),
         'raw': fields,
     }
+
+
+def decode_ice_servers(data):
+    """Decode the tag8 ICE-config submessage into a list of server dicts.
+
+    Layout (from the live message): tag8.field1 is a repeated submessage
+    ``{1: id, 2: host, 3: port, 4: type}``.
+    """
+    if not data:
+        return []
+    outer = decode_message(data)
+    blob = outer.get(1)
+    if blob is None:
+        return []
+    if isinstance(blob, str):
+        blob = blob.encode('utf-8')
+    servers = []
+    offset = 0
+    while offset < len(blob):
+        tag, offset = decode_varint(blob, offset)
+        if (tag & 0x07) != 2:
+            break
+        length, offset = decode_varint(blob, offset)
+        entry = blob[offset:offset + length]
+        offset += length
+        e = decode_message(entry)
+        servers.append({
+            'id': e.get(1, 0),
+            'host': e.get(2, ''),
+            'port': e.get(3, 0),
+            'type': e.get(4, 0),
+        })
+    return servers
 
 
 def encode_camera_webrtc_message(request_id, msg_type, payload):

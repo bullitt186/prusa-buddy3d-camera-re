@@ -321,6 +321,20 @@ async def timelapse_loop():
         await asyncio.sleep(state.timelapse_interval)
 
 
+def _find_sdp(msg):
+    """Return the SDP text from a decoded camera-side WebRTC message, or ''.
+
+    The offer's SDP is a length-delimited field; locate it by its ``v=0`` header
+    rather than guessing a tag while the field mapping is still being recovered.
+    """
+    for value in msg.get('raw', {}).values():
+        if isinstance(value, bytes) and b'v=0' in value:
+            return value.decode('utf-8', 'replace')
+        if isinstance(value, str) and 'v=0' in value:
+            return value
+    return ''
+
+
 async def detect_timezone(session):
     """GAP-STATUS-04: detect the timezone from the web API and persist ``/etc/TZ``.
 
@@ -552,38 +566,38 @@ async def main():
 
     async def handle_event(event, data):
         if event == 'webrtc' and isinstance(data, bytes):
+            # Recovered 9-field camera-side schema (descriptor 0x3f7680). The
+            # previous flat 12-field decoder mis-read this and ignored the offer.
             msg = decode_camera_webrtc_message(data)
-            request_id = msg['request_id']
-            msg_type = msg['msg_type']
-            payload = msg['payload']
             log.info(
-                f'WebRTC event: type={msg_type} id={request_id[:16]}... '
-                f'client={msg["client_id"][:16]}... payload_len={len(payload)}'
+                f'WebRTC event: request_id={msg["request_id"][:16]!r} '
+                f'client={msg["client_id"][:16]!r} session={msg["session_id"][:16]!r} '
+                f'f5={msg["field5"]} f6={msg["field6"]} f7={msg["field7"]} '
+                f'ice_len={len(msg["ice_config"])} f9_len={len(msg["field9"])} '
+                f'keys={sorted(msg["raw"].keys())}'
             )
-            if msg_type == WEBRTC_OFFER:
+            if msg['ice_config']:
+                # GAP-WEBRTC-01: consume the Connect-provided ICE server config
+                # (tag8 = repeated {id, host, port, type}).
+                servers = decode_ice_servers(msg['ice_config'])
+                log.info(f'WebRTC ICE servers: {servers}')
+            sdp = _find_sdp(msg)
+            if sdp:
                 if not webrtc_control.offer_allowed(state):
                     log.warning(
                         'WebRTC offer rejected: service disabled '
                         f'(mode={state.webrtc_mode}, status={state.webrtc_status})'
                     )
                     return
-                if not request_id or not payload:
-                    log.error('Ignoring malformed WebRTC offer without request ID or SDP')
+                if not msg['request_id']:
+                    log.error('Ignoring malformed WebRTC offer without request ID')
                     return
                 state.streaming = True
                 log.info('Pausing snapshots for WebRTC stream')
                 await asyncio.sleep(1)
-                webrtc.handle_offer(request_id, payload, loop)
-            elif msg_type == WEBRTC_CANDIDATE:
-                # GStreamer's add-ice-candidate expects the attribute value,
-                # while some server messages include the SDP "a=" prefix.
-                candidate = payload[2:] if payload.startswith('a=') else payload
-                webrtc.add_ice_candidate(candidate)
-            elif msg_type == WEBRTC_REQUEST:
-                # lp_app 3.1.6 logs this as unsupported; it is not a teardown.
-                log.warning('Ignoring unsupported WebRTC request/start message')
+                webrtc.handle_offer(msg['request_id'], sdp, loop)
             else:
-                log.warning(f'Ignoring unknown camera-side WebRTC message type {msg_type}')
+                log.info('WebRTC message carried no SDP (ICE/session config only)')
         elif event == 'trigger' and isinstance(data, bytes):
             decoded = trigger.decode_trigger(data)
             request_id = decoded.request_id or None

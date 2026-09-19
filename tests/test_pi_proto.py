@@ -11,6 +11,7 @@ from proto import (  # noqa: E402
     WEBRTC_CANDIDATE,
     WEBRTC_OFFER,
     decode_camera_webrtc_message,
+    decode_ice_servers,
     decode_message,
     encode_camera_webrtc_message,
     encode_message,
@@ -18,30 +19,34 @@ from proto import (  # noqa: E402
 
 
 class CameraWebRtcProtocolTests(unittest.TestCase):
-    def test_decodes_firmware_316_inbound_offer_layout(self):
+    def test_decodes_recovered_9_field_inbound_layout(self):
+        # Recovered 9-field schema (descriptor 0x3f7680), matched to a live
+        # Connect message: {1: token, 2: client_id, 3: session_id, 5: 1, 7: 2,
+        # 8: <ICE servers>, 9: <uvarints>}.
+        entry = encode_message({1: 1, 2: 'stun.l.google.com', 3: 19302, 4: 1})
+        blob = encode_message({1: entry})        # tag8.field1 repeated entry
+        ice_config = encode_message({1: blob})   # tag8 submessage
         wire = encode_message({
             1: 'request-12345678',
-            2: WEBRTC_OFFER,
-            3: 'viewer-client-id',
-            4: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n',
+            2: 'viewer-client-id',
+            3: 'session-id',
             5: 1,
-            6: 300,
-            7: 3,
-            8: 1,
-            9: 'fhd',
-            10: 30,
-            12: 2,
+            7: 2,
+            8: ice_config,
+            9: encode_message({1: 1}),
         })
 
         decoded = decode_camera_webrtc_message(wire)
 
         self.assertEqual(decoded['request_id'], 'request-12345678')
-        self.assertEqual(decoded['msg_type'], WEBRTC_OFFER)
         self.assertEqual(decoded['client_id'], 'viewer-client-id')
-        self.assertTrue(decoded['payload'].startswith('v=0'))
-        self.assertEqual(decoded['ttl'], 300)
-        self.assertEqual(decoded['quality'], 'fhd')
-        self.assertEqual(decoded['fps'], 30)
+        self.assertEqual(decoded['session_id'], 'session-id')
+        self.assertEqual(decoded['field5'], 1)
+        self.assertEqual(decoded['field7'], 2)
+        self.assertEqual(
+            decode_ice_servers(decoded['ice_config']),
+            [{'id': 1, 'host': 'stun.l.google.com', 'port': 19302, 'type': 1}],
+        )
 
     def test_encodes_firmware_answer_as_numeric_type_and_field_three_payload(self):
         wire = encode_camera_webrtc_message(
