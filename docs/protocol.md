@@ -826,6 +826,16 @@ Codec is H264 (`H264CameraSource`). A reference offer generated with
 level-asymmetry-allowed=1`, `a=mid` first in the m-section, plus
 `a=msid-semantic:WMS *` and `a=group:LS`.
 
+**The Connect answerer validates the stream's SPS** (live-verified 2026-09-19):
+it rejects the camera's v4l2 SPS (`428029`, baseline level 4.1) with
+`m=video 0`, and accepts only the firmware's `42e01f` class (constrained
+baseline level 3.1). Transcoding is too heavy for the Pi, so `stream_mux`
+serves an SPS-patched copy on **port 8889** (patch `profile_idc`/
+`constraint_flags`/`level_idc` to `42 e0 1f`, matched by NAL type — rpicam-vid
+emits the SPS header as `0x27`); the WebRTC branch reads 8889 while 8888
+(RTSP/snapshots) is unchanged. After the patch the answer is `m=video 9 …` and
+the stream plays.
+
 ### Live verification findings
 - The signaling server ACKs `camera_authentication` then closes unless the auth
   is sent as `field1 = token, field2 = fingerprint` and the ACK is `0`
