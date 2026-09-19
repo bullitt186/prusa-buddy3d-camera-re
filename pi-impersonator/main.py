@@ -310,12 +310,19 @@ def decline_firmware_update(source):
 def _find_candidate(msg):
     """Return the ICE candidate text from a decoded WebRTC message, or ''.
 
-    The viewer trickles candidates as tag4.1 = candidate (tag2 = mid).
+    The viewer trickles candidates as ``a=candidate:...`` (SDP attribute form);
+    GStreamer's add-ice-candidate wants the value without the ``a=`` prefix.
     """
+    def normalize(text):
+        if text.startswith('a='):
+            text = text[2:]
+        return text if text.startswith('candidate:') else ''
+
     def scan(value):
         if isinstance(value, bytes):
-            if value.startswith(b'candidate:'):
-                return value.decode('utf-8', 'replace')
+            found = normalize(value.decode('utf-8', 'replace'))
+            if found:
+                return found
             try:
                 inner = decode_message(value)
             except Exception:
@@ -325,8 +332,8 @@ def _find_candidate(msg):
                     found = scan(v)
                     if found:
                         return found
-        elif isinstance(value, str) and value.startswith('candidate:'):
-            return value
+        elif isinstance(value, str):
+            return normalize(value)
         return ''
 
     for value in msg.get('raw', {}).values():
