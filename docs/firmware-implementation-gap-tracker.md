@@ -442,7 +442,7 @@ These are explicit recovery prerequisites, not permission to guess:
 | Area | Known exactly | Still required before implementation |
 |---|---|---|
 | Trigger dispatcher | **Recovered 2026-09-18:** descriptor `0x3f6f14` (13 fields, tags 1–5/8–15) and the `FUN_000a963c` per-field `== 1`/`== 2` dispatch; `trigger.py` implements it | Tag 13 string semantics; multi-field processing order (firmware checks each field independently) |
-| Configuration | Complete field/value/action table above, and the dispatch table is keyed by **field name string** | The wire container is unresolved: the SIO `configuration` handler (lambda `0xa89e0`) `pb_decode`s a 9-field nested descriptor `0x3f73a4`, while the QR/config dispatcher `FUN_0006cf34` is reached only via `FUN_0006fb94`, whose parser `FUN_0006f9dc` looks JSON-like (`localeconv`). Neither path has been tied to the named `rtsp`/`webrtc`/`video_quality` dispatch with a captured payload |
+| Configuration | **Resolved 2026-09-19: JSON** (nlohmann::json in the binary). SIO `configuration` handler `FUN_000c4718` → `FUN_0006fb94` → `FUN_0006f9dc` → `FUN_0006cf34`, plus the complete field/value/action table | Only a redacted golden JSON capture to pin value casing; the earlier "SIO handler `0xa89e0` pb_decode 9-field descriptor" lead was a different handler |
 | Status | Top-level fields, struct size, many getters/translations, request correlation, and now the nested descriptor tables (dumpable) | Semantic tag-to-field annotation for every claimed nested value |
 | ICE config | The inbound `webrtc` message is 9 fields with nested submessages (`0x3f7680`), **not** the flat 12-field log string | Nested protobuf subfield tags/cardinality for the ICE submessages |
 | Timelapse list | Dedicated 4-string descriptor `0x3f701c`; full sender `FUN_000a1fa8` | Per-field annotation and canonical zero-entry bytes |
@@ -535,7 +535,10 @@ closing the gap.
 
 ### GAP-CONFIG-01 — Replace guessed configuration decoding with the recovered schema
 
-- [ ] **P0 · Open**
+- [~] **P0 · Format resolved and implemented (JSON); golden capture pending**
+- **Format (resolved 2026-09-19):** the configuration payload is **JSON**, not protobuf. The binary links `nlohmann::json` (`./xhr_tools/nlohmann/json.hpp`, `json_abi_v3_11_3`) and the SIO `configuration` handler `FUN_000c4718` → `FUN_0006fb94` → parser `FUN_0006f9dc` (nlohmann number parsing via `localeconv`) → dispatcher `FUN_0006cf34`. The tracker's earlier "dump the nanopb descriptor" instruction was based on a mistaken protobuf assumption.
+- **Implementation:** `main.py`'s `configuration` handler now parses JSON only (the generic protobuf fallback and all numeric-tag lookups are removed) and dispatches the recovered table exactly: `rtsp` on/off, `webrtc` on/off (with the paired `webrtc on → RTSP disabled` rule), `video_quality` sd/hd/fhd, `light_control` auto/night/day, `camera_name`, `snapshot_interval` 10..600, `start_fw_update` start, and the leading `code` rejecting `"42"`/`"66"`.
+- **Still open:** a redacted golden JSON capture from a genuine 3.1.6 device to pin exact value casing; `start_fw_update` remains a truthful no-op (owner decision).
 - **Firmware behavior:** decodes a protobuf configuration message and dispatches named settings
   including `rtsp`, `webrtc`, `video_quality`, `start_fw_update`, `light_control`, `camera_name`,
   and `snapshot_interval`. **[confirmed]**

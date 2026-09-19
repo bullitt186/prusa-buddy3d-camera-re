@@ -26,7 +26,6 @@ from proto import (
     WEBRTC_OFFER,
     WEBRTC_REQUEST,
     decode_camera_webrtc_message,
-    decode_message,
     encode_camera_webrtc_message,
     encode_message,
 )
@@ -539,13 +538,27 @@ async def main():
             for action in actions:
                 await dispatch_trigger_action(action, request_id)
         elif event == 'configuration' and isinstance(data, bytes):
+            # GAP-CONFIG-01: the configuration wire format is JSON, confirmed
+            # from the binary (nlohmann::json: ./xhr_tools/nlohmann/json.hpp and
+            # the parser FUN_0006f9dc reached via the SIO handler FUN_000c4718 ->
+            # FUN_0006fb94 -> FUN_0006cf34). The previous generic protobuf
+            # fallback and numeric-tag lookups were guesses; both are removed.
             try:
                 msg = json.loads(data)
-            except Exception:
-                msg = decode_message(data)
+            except Exception as e:
+                log.warning(f'Configuration: not valid JSON ({e}); ignoring')
+                return
+            if not isinstance(msg, dict):
+                log.warning(f'Configuration: expected a JSON object, got {type(msg).__name__}')
+                return
             log.info(f'Configuration: {redact_secrets(msg, token, fingerprint)!r}')
-            name = msg.get('camera_name') or msg.get(7)
-            if name:
+            # FW-CONFIG:49-74,286-300: the leading `code` rejects "42"/"66".
+            code = msg.get('code')
+            if code is not None and str(code) in ('42', '66'):
+                log.warning(f'Config: code {code!r} rejected')
+                return
+            name = msg.get('camera_name')
+            if name is not None:
                 if state.set_camera_name(name):
                     # GAP-CONTROL-01/GAP-INFO-01: the service loop republishes
                     # /c/info with the new name.
@@ -553,32 +566,33 @@ async def main():
                     log.info(f'Config: camera_name → {state.camera_name!r}')
                 else:
                     log.warning(f'Config: camera_name {name!r} rejected (empty)')
-            interval_val = msg.get('snapshot_interval') or msg.get(8)
+            interval_val = msg.get('snapshot_interval')
             if interval_val is not None:
                 if state.set_snapshot_interval(interval_val):
                     log.info(f'Config: snapshot_interval → {interval_val}s (live)')
                 else:
                     log.warning(f'Config: snapshot_interval {interval_val!r} rejected (10..600)')
-            vq = msg.get('video_quality') or msg.get(4)
-            if vq and str(vq).lower() in ('sd', 'hd', 'fhd'):
-                qenum = {'sd': 1, 'hd': 2, 'fhd': 3}[str(vq).lower()]
-                raw = ENUM_TO_RAW.get(qenum)
-                # ASSUMPTION (GAP-CONFIG-01/GAP-QUALITY-02): the dispatch table
-                # confirms sd/hd/fhd -> raw 5/6/7, but it does NOT confirm that the
-                # configuration-form video_quality path persists. persist=True here
-                # is an inference, not recovered evidence.
-                if raw is not None and handle_quality(raw, persist=True):
-                    # GAP-INFO-01/02: republish the quality-derived resolution.
-                    state.mark_info_dirty()
-                    log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
-            lc = msg.get('light_control') or msg.get(6)
-            if lc:
+            vq = msg.get('video_quality')
+            if vq is not None:
+                qenum = {'sd': 1, 'hd': 2, 'fhd': 3}.get(str(vq).lower())
+                if qenum is None:
+                    log.warning(f'Config: video_quality {vq!r} not recognized (sd/hd/fhd)')
+                else:
+                    raw = ENUM_TO_RAW.get(qenum)
+                    # ASSUMPTION (GAP-CONFIG-01/GAP-QUALITY-02): the dispatch table
+                    # confirms sd/hd/fhd -> raw 5/6/7 but not that this path
+                    # persists; persist=True here is an inference, not evidence.
+                    if raw is not None and handle_quality(raw, persist=True):
+                        state.mark_info_dirty()
+                        log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
+            lc = msg.get('light_control')
+            if lc is not None:
                 # GAP-DEVICE-02: no IR illuminator on the Pi; the policy logs the
                 # request and rejects it, leaving state.ir_mode unavailable. Never
                 # report a mode that was not applied.
                 applied = device_control.apply_light_control(lc, state)
                 log.info(f'Config: light_control {lc!r} applied={applied}')
-            rtsp = msg.get('rtsp') or msg.get(2)
+            rtsp = msg.get('rtsp')
             if rtsp is not None:
                 # GAP-RTSP-02: configuration form and direct event share one path.
                 rtsp_mode = rtsp_control.mode_from_config(rtsp)
@@ -596,11 +610,8 @@ async def main():
                         f'Config: rtsp → mode={state.rtsp_mode} '
                         f'running={state.rtsp_running}'
                     )
-            wrtc = msg.get('webrtc') or msg.get(3)
+            wrtc = msg.get('webrtc')
             if wrtc is not None:
-                # GAP-WEBRTC-04: the recovered dispatch table maps webrtc on/off
-                # to set_webrtc_mode(1/0). The paired rule that `on` also forces
-                # RTSP disabled is not implemented here.
                 requested = None
                 if isinstance(wrtc, str):
                     requested = {'on': 1, 'off': 0}.get(wrtc.strip().lower())
@@ -615,8 +626,19 @@ async def main():
                         f'Config: webrtc → mode={state.webrtc_mode} '
                         f'status={state.webrtc_status}'
                     )
-            fw = msg.get('start_fw_update') or msg.get(5)
-            if fw:
+                    # FW-CONFIG:108-140: the paired rule — `webrtc on` also
+                    # forces RTSP disabled.
+                    if requested == 1 and state.rtsp_mode != 1:
+                        rtsp_control.apply_mode(
+                            1, state,
+                            start_service=rtsp_service_start,
+                            stop_service=rtsp_service_stop,
+                            query_service=rtsp_service_active,
+                            persist=rtsp_control.write_mode,
+                        )
+                        log.info('Config: webrtc on → RTSP forced disabled (paired rule)')
+            fw = msg.get('start_fw_update')
+            if fw is not None and str(fw).lower() == 'start':
                 log.warning('Config: start_fw_update requested — not supported on Pi impersonator')
         elif event == 'set_rtsp_server_mode':
             rtsp_mode = rtsp_control.decode_mode(data)
