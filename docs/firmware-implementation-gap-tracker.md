@@ -64,7 +64,7 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Fingerprint derivation | Working; live-verified | Precedence: an explicit `config.ini` `[identity] fingerprint` (the token-bound value) wins, else firmware-style MAC derivation, else a persisted fallback seed. Live-verified 2026-09-18: `/c/info` 200 (`origin='OTHER', registered=True`), snapshots 200. Migrating to the MAC-derived value still requires a fresh token. |
 | `/c/info` | Core schema matched | Initial upload succeeds, but refresh/retry behavior and dynamic values are incomplete. |
 | Snapshot upload | Working | Endpoint and identity headers match; capture quality, scheduling, and control behavior differ. |
-| Socket.IO authentication | Working | Wire message authenticates, but ACK validation is too permissive. |
+| Socket.IO authentication | Working, but signaling link unstable (live) | Auth ACK is `1` and the gate is now strict, but the server closes the WebSocket in the same tick as the auth ACK (`Server sent close packet data 0`) for the running service. Isolated clients with the identical auth sometimes stay, so this is intermittent and likely server-side session policy; the client now owns reconnection with a fresh client per attempt (`signaling.supervise`, commit `02918b8`). |
 | Initial metadata messages | Mostly matched | Core envelopes work; dynamic status and request correlation are incomplete. |
 | Trigger handling | Partial | Recovered descriptor `0x3f6f14` now decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); policy actions (OTA/timelapse) and `client_trigger` result codes remain unimplemented. |
 | Configuration handling | Partial | Quality partly works; most settings are logged or ignored. |
@@ -449,6 +449,7 @@ These are explicit recovery prerequisites, not permission to guess:
 | `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` with known types | Semantic names/result/progress enums and exact payload fixtures |
 | RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
 | WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
+| Signaling session lifecycle (live blocker) | The server ACKs `camera_authentication` then closes the WebSocket in the same tick for the running service (`Server sent close packet data 0`); the client now supervises reconnection with a fresh client per attempt (`signaling.supervise`) | Why the full service is closed while isolated clients with identical auth sometimes stay. Candidate leads: the firmware's extra URL query (`FUN_0038fb30` appends `&t=<time>` plus a `param_3` string after `EIO=4&transport=websocket`), and the server's single-session-per-token policy. Not to be guessed — needs a captured firmware handshake or a server-side explanation. |
 
 ### Gap-to-firmware cross-reference
 
