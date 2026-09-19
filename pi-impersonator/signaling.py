@@ -118,7 +118,10 @@ class PrusaSignaling:
             self._log_inbound_event(event, data, prefix='Unknown event')
 
     async def _authenticate(self):
-        auth_msg = encode_message({1: self.fingerprint, 2: self.token})
+        # Firmware field order (FUN_000a3058): field1 = token, field2 = fingerprint.
+        # Sending fingerprint first makes the server answer ACK 1 (an error) and
+        # close the session immediately.
+        auth_msg = encode_message({1: self.token, 2: self.fingerprint})
         try:
             ack = await self.sio.call('camera_authentication', auth_msg, timeout=10)
         except Exception as e:
@@ -256,7 +259,7 @@ class PrusaSignaling:
             sid=self.sio.get_sid() or self.sio.sid or '',
             # GAP-STATUS-04: report the detected /etc/TZ content (firmware reads
             # it back); fall back to the process abbreviation only if undetected.
-            tz_name=state.tz_name or (time.tzname[0] if time.tzname else ''),
+            tz_name=self.state.tz_name or (time.tzname[0] if time.tzname else ''),
         )
 
     async def send_status(self, request_id=None):
@@ -293,29 +296,20 @@ class PrusaSignaling:
         log.info(f'Sent features ({len(features_msg)} bytes{suffix})')
 
     async def _send_post_auth(self):
-        # Firmware parity: emit the post-auth sequence immediately after the
-        # auth ACK. The server closes a session that stays silent after
-        # camera_authentication, so the old 0.3s/0.2s pacing lost the session
-        # before send_sio_info went out.
-        if not self.sio.connected:
-            log.warning('post-auth aborted: session closed before send_sio_info')
-            return
-        info_msg = encode_message({1: self.fingerprint, 2: self.token})
-        await self.sio_emit('send_sio_info', info_msg)
-        log.info(f'Sent send_sio_info ({len(info_msg)} bytes)')
-
-        if not self.sio.connected:
-            log.warning('post-auth aborted: session closed before status')
-            return
-        await self.send_status()
-
-        if not self.sio.connected:
-            return
-        await self.send_protobuf_version()
-
-        if not self.sio.connected:
-            return
-        await self.send_features()
+        # Firmware parity: emit the post-auth sequence immediately after the auth
+        # ACK. The server closes a session that stays silent after
+        # camera_authentication, so do NOT gate on ``sio.connected`` here — that
+        # flag briefly races the namespace state right after the ACK and would
+        # skip ``send_sio_info`` entirely (which itself makes the server close).
+        try:
+            info_msg = encode_message({1: self.token, 2: self.fingerprint})
+            await self.sio_emit('send_sio_info', info_msg)
+            log.info(f'Sent send_sio_info ({len(info_msg)} bytes)')
+            await self.send_status()
+            await self.send_protobuf_version()
+            await self.send_features()
+        except Exception as e:
+            log.warning(f'post-auth send failed: {e}')
 
     async def connect(self):
         try:

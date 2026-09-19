@@ -20,13 +20,13 @@ import signaling  # noqa: E402
 
 
 class AuthAckPredicateTests(unittest.TestCase):
-    def test_exact_integer_one_succeeds(self):
-        self.assertTrue(auth_ack_is_success(1))
+    def test_exact_integer_zero_succeeds(self):
+        self.assertTrue(auth_ack_is_success(0))
 
     def test_all_other_values_fail(self):
-        # 0/5: other ints; True: bool must not pass; '1': string; None; malformed
-        # payloads (bytes/list/dict) and non-int numerics.
-        for ack in (0, 5, -1, True, False, '1', 'true', None, 1.0, b'\x01', [], {}):
+        # 1/5: other ints; False (== 0) must not pass via bool; '0': string;
+        # None; malformed payloads (bytes/list/dict) and non-int numerics.
+        for ack in (1, 5, -1, True, False, '0', 'false', None, 0.0, b'\x00', [], {}):
             with self.subTest(ack=ack):
                 self.assertFalse(auth_ack_is_success(ack))
 
@@ -70,14 +70,14 @@ class AuthenticateFlowTests(unittest.TestCase):
         asyncio.run(signaling.PrusaSignaling._authenticate(sig))
         return sig
 
-    def test_ack_one_proceeds_to_post_auth(self):
-        sig = self._authenticate(_FakeSio(ack=1))
+    def test_ack_zero_proceeds_to_post_auth(self):
+        sig = self._authenticate(_FakeSio(ack=0))
         self.assertEqual(sig.post_auth_count, 1)
         self.assertEqual(sig.sio.calls[0][0], 'camera_authentication')
         self.assertEqual(sig.sio.disconnects, 0)
 
     def test_rejected_acks_emit_no_post_auth(self):
-        for ack in (0, 5, True, '1', None, b'', [], {}):
+        for ack in (1, 5, True, False, '0', None, b'', [], {}):
             with self.subTest(ack=ack):
                 sig = self._authenticate(_FakeSio(ack=ack))
                 self.assertEqual(sig.post_auth_count, 0)
