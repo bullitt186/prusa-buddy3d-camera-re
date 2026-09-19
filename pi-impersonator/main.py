@@ -37,6 +37,8 @@ import trigger
 import webrtc_control
 import local_http
 import timezone
+import ota
+import timelapse
 
 logging.basicConfig(
     # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
@@ -260,6 +262,10 @@ async def snapshot_loop(token, fingerprint, server, session):
             log.debug('snapshot loop paused (streaming active)')
 
 async def ota_checkin(token, fingerprint, session):
+    """Query the OTA endpoint and classify the release (GAP-OTA-01).
+
+    Policy (owner decision): truthful decline — classify and log, never flash.
+    """
     from features import FIRMWARE_VERSION
     headers = {
         'User-Agent': 'Buddy3D Camera',
@@ -268,14 +274,51 @@ async def ota_checkin(token, fingerprint, session):
         'X-Camera-FW-Version': FIRMWARE_VERSION,
     }
     try:
-        async with session.get(
-            'https://connect-ota.prusa3d.com/api/niceboy/v1/camera',
-            headers=headers
-        ) as resp:
+        async with session.get(ota.OTA_ENDPOINT, headers=headers) as resp:
+            if resp.status != 200:
+                log.warning(f'OTA check-in: HTTP {resp.status}')
+                return
             body = await resp.text()
-            log.info(f'OTA check-in: {resp.status} {redact_secrets(body[:200], token, fingerprint)}')
     except Exception as e:
         log.warning(f'OTA check-in failed: {e}')
+        return
+    decision = ota.classify(FIRMWARE_VERSION, body)
+    if decision == ota.UP_TO_DATE:
+        log.info(f'OTA: up to date ({FIRMWARE_VERSION})')
+    elif decision == ota.UPDATE_AVAILABLE:
+        log.info('OTA: update available — declining (no firmware flashing on the Pi)')
+    elif decision == ota.FORCED_UPDATE:
+        log.warning('OTA: forced update advertised — declining (no firmware flashing on the Pi)')
+    else:
+        log.warning(f'OTA: unusable response: {redact_secrets(body[:200], token, fingerprint)}')
+
+
+async def ota_loop(token, fingerprint, session):
+    """Periodic OTA check-in (firmware polls the endpoint on an interval)."""
+    while True:
+        await asyncio.sleep(ota.OTA_CHECK_INTERVAL)
+        await ota_checkin(token, fingerprint, session)
+
+
+def decline_firmware_update(source):
+    """GAP-OTA-01: explicit unsupported result for a remote update request."""
+    log.warning(f'OTA: {source} requested — declined ({ota.decline_reason()})')
+
+
+async def timelapse_loop():
+    """Capture and store timelapse frames while enabled (GAP-TIMELAPSE-01)."""
+    while True:
+        if not state.timelapse_enabled:
+            await asyncio.sleep(1)
+            continue
+        try:
+            jpeg = capture_jpeg(*state.resolution())
+            index = timelapse.next_index(timelapse.TIMELAPSE_DIR)
+            path = timelapse.save_frame(jpeg, timelapse.TIMELAPSE_DIR, index)
+            log.info(f'Timelapse: stored {os.path.basename(path)}')
+        except Exception as e:
+            log.warning(f'Timelapse capture failed: {e}')
+        await asyncio.sleep(state.timelapse_interval)
 
 
 async def detect_timezone(session):
@@ -439,8 +482,9 @@ async def main():
         Actions are selected by ``trigger.trigger_actions`` from the recovered
         descriptor; this function only executes them. ``reboot`` is a
         rate-limited, narrowly scoped systemd reboot (GAP-DEVICE-01).
-        ``fw_update``/``timelapse_*`` are recognized but intentionally
-        unimplemented and must not perform an unrelated action or fake success.
+        ``fw_update`` returns an explicit unsupported result (GAP-OTA-01);
+        ``timelapse_*`` are recognized but intentionally unimplemented and must
+        not perform an unrelated action or fake success.
         """
         if action == trigger.STATUS:
             await sig.send_status(request_id=request_id)
@@ -482,6 +526,24 @@ async def main():
             # success when the systemd command fails.
             accepted = device_control.request_reboot(state, reboot_device)
             log.info(f'Trigger reboot: accepted={accepted}')
+        elif action == trigger.FW_UPDATE:
+            # GAP-OTA-01: truthful decline; no firmware is flashed on the Pi.
+            decline_firmware_update('trigger fw_update')
+        elif action in (trigger.TIMELAPSE_ENABLE, trigger.TIMELAPSE_DISABLE):
+            if timelapse.apply_enable(action, state):
+                log.info(f'Trigger {action}: timelapse_enabled={state.timelapse_enabled}')
+        elif action == trigger.TIMELAPSE_MAKE:
+            path = timelapse.build_mjpeg(timelapse.TIMELAPSE_DIR)
+            if path:
+                log.info(f'Trigger timelapse_make: wrote {path}')
+            else:
+                log.warning('Trigger timelapse_make: no frames stored')
+        elif action == trigger.TIMELAPSE_FILE_LIST:
+            frames = timelapse.list_frames(timelapse.TIMELAPSE_DIR)
+            log.warning(
+                f'Trigger timelapse_file_list: {len(frames)} stored frame(s); the '
+                'file-list envelope annotations are unresolved, no list sent (GAP-TIMELAPSE-01)'
+            )
         else:
             log.warning(
                 f'Trigger action {action!r} recognized but not implemented on the '
@@ -639,7 +701,7 @@ async def main():
                         log.info('Config: webrtc on → RTSP forced disabled (paired rule)')
             fw = msg.get('start_fw_update')
             if fw is not None and str(fw).lower() == 'start':
-                log.warning('Config: start_fw_update requested — not supported on Pi impersonator')
+                decline_firmware_update('start_fw_update')
         elif event == 'set_rtsp_server_mode':
             rtsp_mode = rtsp_control.decode_mode(data)
             if rtsp_mode is None:
@@ -681,13 +743,21 @@ async def main():
             else:
                 log.warning(f'{event}: quality byte {val!r} not fully applied (live or persist failed)')
         elif event == 'timelapse_get_file_list':
-            log.info('timelapse_get_file_list: no SD card on Pi, responding with empty list')
-            empty = encode_message({})
-            await sig.sio_emit('timelapse_get_file_list', empty)
+            # GAP-TIMELAPSE-01: the firmware file-list envelope (4 string fields,
+            # descriptor 0x3f701c) has no recovered per-field annotation, so an
+            # untyped empty message is NOT sent. Report the explicit unsupported
+            # result instead of a malformed list.
+            frames = timelapse.list_frames(timelapse.TIMELAPSE_DIR)
+            log.warning(
+                f'timelapse_get_file_list: {len(frames)} stored frame(s); the file-list '
+                'envelope annotations are unresolved, no list emitted (GAP-TIMELAPSE-01)'
+            )
 
     sig.on_trigger(handle_event)
     asyncio.create_task(snapshot_loop(token, fingerprint, server, session))
     asyncio.create_task(info_service_loop(token, fingerprint, server, session, mac, ip, ssid))
+    asyncio.create_task(ota_loop(token, fingerprint, session))
+    asyncio.create_task(timelapse_loop())
     asyncio.create_task(start_local_http())
     try:
         await sig.connect()

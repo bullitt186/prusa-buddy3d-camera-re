@@ -979,7 +979,10 @@ closing the gap.
 
 ### GAP-OTA-01 — Implement truthful OTA behavior
 
-- [ ] **P2 · Open; implementation policy required**
+- [~] **P2 · Implemented (truthful decline per owner decision)**
+- **Implementation:** `ota.py` (stdlib-only) parses the check-in (`file`/`last_version`/`sha1sum`/`force_upgrade`), compares dotted versions and classifies `up_to_date`/`update_available`/`forced_update`/`invalid`, and verifies integrity by SHA-1. `main.py` runs a periodic `ota_loop` (6 h), classifies and logs, and both `start_fw_update` (configuration) and the `fw_update` trigger return an explicit unsupported result (`decline_firmware_update`, reason `pi_impersonator_does_not_flash_firmware`) — never a silent no-op and never a destructive flash. Tests: `tests/test_pi_ota.py` (no update, available, forced, older, malformed, integrity match/mismatch, policy).
+- **Acceptance:** staged fixtures cover no update / available / integrity failure / remote-start decline; no unsafe installation path exists.
+- **Still open:** a genuine release download+verify+install is intentionally not implemented (owner default); progress `client_trigger` messages remain under `GAP-SIO-01`.
 - **Firmware behavior:** periodically queries the OTA endpoint, compares release/version metadata,
   downloads and verifies an update, observes update policy/time windows, installs/reboots, and
   reports progress through `client_trigger`. **[confirmed]**
@@ -995,7 +998,10 @@ closing the gap.
 
 ### GAP-TIMELAPSE-01 — Implement or stop advertising timelapse
 
-- [ ] **P2 · Open; implementation policy required**
+- [~] **P2 · Implemented (Pi storage-backed, owner default path)**
+- **Implementation:** `timelapse.py` (stdlib-only) provides interval/FPS validation, frame naming/storage, ordered listing, and MJPEG assembly (concatenated JPEGs) under `/var/lib/prusa-cam/timelapse`. `CameraState` carries `timelapse_enabled/interval/fps`; `main.timelapse_loop` captures a frame on the interval while enabled; trigger tags 5 (enable/disable), 14 (make video) and 15 (file list) are wired. The file-list envelope (`0x3f701c`, four strings) has no recovered per-field annotation, so the handler reports the explicit unsupported result instead of sending the previous **untyped empty message**. Tests: `tests/test_pi_timelapse.py`.
+- **Acceptance:** every advertised timelapse action has a schema fixture and either a working result (enable/disable, make) or an explicit unsupported response (file list).
+- **Still open:** exact file-list envelope annotation and progress `client_trigger` (under `GAP-SIO-01`).
 - **Firmware behavior:** controls enable/interval/FPS, stores frames, creates MJPEG output, indexes
   files, returns file list/status, and emits progress/error `client_trigger` messages. **[confirmed]**
 - **Current behavior:** advertises all four timelapse features and responds to file-list requests with

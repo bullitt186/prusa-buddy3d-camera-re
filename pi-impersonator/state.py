@@ -61,6 +61,10 @@ class CameraState:
         # GAP-STATUS-04: detected timezone (the /etc/TZ content) reported in
         # status; empty until the web API detection runs at startup.
         self.tz_name = ''
+        # GAP-TIMELAPSE-01: Pi storage-backed timelapse state.
+        self.timelapse_enabled = False
+        self.timelapse_interval = 10
+        self.timelapse_fps = 10
         # GAP-DEVICE-02: explicit hardware availability. The Pi has no IR
         # illuminator, speaker, fan, or MicroSD slot, so no control path may
         # imply otherwise or report a fake applied mode. ``ir_mode`` stays None
