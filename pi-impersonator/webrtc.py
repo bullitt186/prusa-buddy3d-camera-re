@@ -113,7 +113,7 @@ class PrusaWebRTC:
         # genuine end notification (GAP-WEBRTC-03 review note).
         if self._webrtc is not None:
             try:
-                self._webrtc.disconnect_by_func(self._on_ice_state_change)
+                self._webrtc.disconnect_by_func(self._on_notify_ice_state)
             except Exception:
                 pass
         if self._pipe:
@@ -182,27 +182,35 @@ class PrusaWebRTC:
             f'user={"set" if username else "none"} cred={"set" if credential else "none"}'
         )
 
-        self._webrtc.connect('on-ice-candidate', self._on_ice_candidate_cb)
-        self._webrtc.connect(
-            'on-ice-connection-state-change', self._on_ice_state_change
-        )
-        self._webrtc.connect('on-negotiation-needed', self._on_negotiation_needed)
+        # Arm the lifecycle watchdog before any signal wiring: if a signal name
+        # is wrong the offer flow must still fail safe instead of leaving
+        # snapshots paused with no recovery path (GAP-WEBRTC-03).
         self._offer_started = False
         self._ice_connected = False
         self._ended_notified = False
         self._disconnect_timeout_id = None
-        self._connect_watchdog_id = None
+        self._connect_watchdog_id = GLib.timeout_add_seconds(
+            30, self._connect_watchdog
+        )
+
+        def connect(signal, handler):
+            try:
+                self._webrtc.connect(signal, handler)
+            except Exception as e:
+                log.warning(f'could not connect {signal}: {e}')
+
+        connect('on-ice-candidate', self._on_ice_candidate_cb)
+        # webrtcbin exposes ice-connection-state as a readable property and has
+        # no on-ice-connection-state-change signal (confirmed via gst-inspect),
+        # so use the GObject property notify.
+        connect('notify::ice-connection-state', self._on_notify_ice_state)
+        connect('on-negotiation-needed', self._on_negotiation_needed)
+
         self._pipe.set_state(Gst.State.PLAYING)
         log.info('Pipeline set to PLAYING')
         # Standard webrtcbin flow: the offer is created from the
         # on-negotiation-needed signal. Keep a fallback in case it does not fire.
         GLib.timeout_add(3000, self._create_offer_timeout)
-        # GAP-WEBRTC-03: bound the time to the first successful ICE connection.
-        # Pi-side policy — GStreamer has no peer TTL and the firmware's exact TTL
-        # worker is untraced, so this only prevents a permanently paused service.
-        self._connect_watchdog_id = GLib.timeout_add_seconds(
-            30, self._connect_watchdog
-        )
 
     def handle_answer(self, request_id, sdp_text):
         """Apply the viewer's answer to the existing peer connection."""
@@ -265,8 +273,17 @@ class PrusaWebRTC:
                 log.warning(f'could not remove timeout {attr}={timeout_id}: {e}')
             setattr(self, attr, None)
 
+    def _on_notify_ice_state(self, element, pspec):
+        """GObject notify::ice-connection-state handler (GLib thread)."""
+        try:
+            state = int(element.get_property('ice-connection-state'))
+        except Exception as e:
+            log.warning(f'could not read ice-connection-state: {e}')
+            return
+        self._on_ice_state_change(element, state)
+
     def _on_ice_state_change(self, element, state):
-        """Handle GstWebRTC's on-ice-connection-state-change (GLib thread).
+        """Handle an ICE connection-state change (GLib thread).
 
         CONNECTED/COMPLETED means media can flow; DISCONNECTED gets a grace
         period because ICE may recover, while FAILED/CLOSED are terminal.

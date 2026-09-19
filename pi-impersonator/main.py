@@ -682,10 +682,18 @@ async def main():
                 await asyncio.sleep(1)
                 # The server routes the offer to the viewer using the inbound
                 # client/session id (tag2/tag3), not the camera token.
-                webrtc.create_offer(
-                    msg['client_id'] or msg['session_id'] or msg['request_id'],
-                    servers, loop, turn_user, turn_cred,
-                )
+                try:
+                    webrtc.create_offer(
+                        msg['client_id'] or msg['session_id'] or msg['request_id'],
+                        servers, loop, turn_user, turn_cred,
+                    )
+                except Exception as e:
+                    # GAP-WEBRTC-03: a failed start must not leave snapshots
+                    # paused with no recovery path.
+                    log.error(f'WebRTC create_offer failed: {e}')
+                    if state.streaming:
+                        state.streaming = False
+                        log.info('Resuming snapshots after WebRTC start failure')
             elif msg['field5'] == WEBRTC_CANDIDATE:
                 # Viewer trickle-ICE candidate (tag5=4, tag4.1=candidate,
                 # tag2=mid). These were previously ignored, so the connection

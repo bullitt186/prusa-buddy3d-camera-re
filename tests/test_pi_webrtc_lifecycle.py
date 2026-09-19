@@ -117,14 +117,28 @@ class WebRtcModuleWiringTests(unittest.TestCase, _AstHelpers):
     def setUpClass(cls):
         cls.tree = ast.parse(WEBRTC_PY.read_text())
 
-    def test_connects_ice_connection_state_change(self):
-        connects = [
-            n for n in self._calls(self.tree)
-            if isinstance(n.func, ast.Attribute) and n.func.attr == 'connect'
-            and n.args and isinstance(n.args[0], ast.Constant)
-            and n.args[0].value == 'on-ice-connection-state-change'
+    def test_wires_ice_connection_state_notify(self):
+        # webrtcbin has no on-ice-connection-state-change signal (confirmed via
+        # gst-inspect); ice-connection-state is a readable GObject property, so
+        # the module must use the property notify.
+        consts = [
+            n for n in ast.walk(self.tree)
+            if isinstance(n, ast.Constant)
+            and n.value == 'notify::ice-connection-state'
         ]
-        self.assertEqual(len(connects), 1)
+        self.assertEqual(len(consts), 1)
+        fn = self._function(self.tree, '_on_notify_ice_state')
+        self.assertIsNotNone(fn)
+        self.assertIsNotNone(self._call_named(fn, '_on_ice_state_change'))
+        self.assertTrue(any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'get_property'
+            and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value == 'ice-connection-state'
+            for n in ast.walk(fn)
+        ))
 
     def test_ice_state_handler_uses_lifecycle_policy(self):
         fn = self._function(self.tree, '_on_ice_state_change')
