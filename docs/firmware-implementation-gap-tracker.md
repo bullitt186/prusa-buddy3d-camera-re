@@ -1206,7 +1206,8 @@ closing the gap.
 
 ### GAP-SIO-01 — Firmware-style error and progress messages
 
-- [ ] **P3 · Open**
+- [~] **P3 · Sender and descriptor identified; field semantics still need a trace**
+- **WP-6 partial (offline):** the generic sender is `FUN_000a2754`, confirmed by the emitted event name `client_trigger` and the 6-field descriptor `0x3f6f58`. It populates only a subset of the message: a constant (`DAT_000a2ab4`), the result of `FUN_0008286c` (token-shaped), and the result of `FUN_0009f69c(param_1)` (request-id-shaped); the ack callback is `DAT_000a2ae0/ae4`. Which tag carries the result/error/progress code is not yet mapped — do not guess.
 - **Firmware behavior:** uses `client_trigger` variants for generic result/error codes, OTA progress,
   and timelapse-video progress. **[confirmed]**
 - **Current behavior:** never emits `client_trigger`.
