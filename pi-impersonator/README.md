@@ -217,3 +217,12 @@ If the Pi won't boot after a power cut (rare before overlay is enabled; impossib
 2. Run `PI=pi@<PI_IP> pi-impersonator/bootstrap.sh` to rebuild everything.
 3. Restore `config.ini` (token) and restart `prusa-cam`.
 4. Re-lock: `PI=pi@<PI_IP> pi-impersonator/deploy.sh --enable-overlay`.
+
+## WebRTC prerequisites
+
+Live view uses GStreamer `webrtcbin`, which needs the ICE plugin
+`gstreamer1.0-nice` (`libgstnice.so`). Without it, `webrtcbin` fails to link the
+H264 RTP stream ("Your GStreamer installation is missing a plug-in").
+`bootstrap.sh` installs it; on an already-provisioned Pi where it is missing,
+install it (and persist it to the read-only lower root via `overlayroot-chroot`
+if you need it to survive a reboot).
