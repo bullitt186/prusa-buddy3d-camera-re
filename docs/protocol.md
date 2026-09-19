@@ -468,7 +468,8 @@ firmware 3.1.6 [confirmed]:**
 tag 5 is the mount-mode string. The Pi impersonator maps this block to
 `timelapse.storage_status` over the emulated SD at `/mnt/sdcard`
 **[assumption]** — a Pi policy, not firmware: mounted `1` when the directory is
-readable+writable, else absent `2` with zero space and `"UNKNOWN"`.
+readable (`access(R_OK)`, matching `FUN_00071bc0`), else absent `2` with zero
+space and `"UNKNOWN"`; the `"RW"`/`"RO"` mode is the separate write check.
 
 ### WebRTCMessage — inbound offer field list
 

@@ -19,15 +19,16 @@ FPS_MIN, FPS_MAX = 1, 30
 
 
 def sd_present(path=SD_MOUNT):
-    """True when the emulated SD is usable.
+    """True when the emulated SD is mounted and accessible.
 
     Pi policy for the firmware's ``isDevicePresent && canAccessMountPoint &&
     /proc/mounts`` check: the Pi has no block device, so ``/mnt/sdcard`` is a
-    real directory provisioned by ``deploy.sh`` and usability is a read+write
-    check. Returns False on ``OSError``.
+    real directory provisioned by ``deploy.sh``. Presence matches the firmware's
+    ``access(path, R_OK)`` (``FUN_00071bc0``); write access is reported
+    separately by :func:`sd_mode`. Returns False on ``OSError``.
     """
     try:
-        return os.path.isdir(path) and os.access(path, os.R_OK | os.W_OK)
+        return os.path.isdir(path) and os.access(path, os.R_OK)
     except OSError:
         return False
 

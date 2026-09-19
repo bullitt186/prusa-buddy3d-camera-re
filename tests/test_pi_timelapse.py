@@ -91,6 +91,13 @@ class StorageStatusTests(unittest.TestCase):
     def test_sd_present_false_for_missing_path(self):
         self.assertFalse(timelapse.sd_present(os.path.join(self.dir, 'nope')))
 
+    def test_sd_present_true_for_read_only_dir(self):
+        # FUN_00071bc0 uses access(path, R_OK); write access is the separate mode
+        # string, so a readable-but-not-writable mountpoint is still "present".
+        with patch('timelapse.os.access', side_effect=lambda path, mode: mode == os.R_OK):
+            self.assertTrue(timelapse.sd_present(self.dir))
+            self.assertEqual(timelapse.sd_mode(self.dir), 'RO')
+
     def test_sd_space_returns_consistent_megabytes(self):
         total, free, used = timelapse.sd_space(self.dir)
         for value in (total, free, used):

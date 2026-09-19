@@ -57,15 +57,18 @@ The JSON parser is only the QR/manual-config path.
 `/c/info` features (no hardware); `MicroSd` kept and backed by an emulated SD at
 `/mnt/sdcard` (SMB share `sdcard`, verified accessible).
 
-**Timelapse storage (implemented locally; live verification pending):** the app reads
-storage from the `status` message (`extended_status.4` storage block, descriptor
+**Timelapse storage (deployed; Pi-side live-verified, app-side confirmation pending):** the
+app reads storage from the `status` message (`extended_status.4` storage block, descriptor
 `0x3f72b0`). The descriptor is **tags 1-4 uvarint + tag 5 string**: tag1 = mounted
 state (1=mounted, 2=absent; `FUN_000744ac`), tags 2/3/4 = total/free/used MB
 (`FUN_000745e0`, `statvfs` MB), tag5 = mount mode (`"RW"`/`"RO"`/`"UNKNOWN"`;
 `FUN_00073914`). The earlier getter mapping (`FUN_000abcb0`/`FUN_000abaf4`) was wrong:
 those are `timelapse_status` field-2 getters, not this block, and `MODEL` never belonged
-on tag 5. `timelapse.storage_status` now reports the emulated SD at `/mnt/sdcard` and
-`signaling` supplies it. Live Connect confirmation is pending — see `next-steps.md`.
+on tag 5. `timelapse.storage_status` reports the emulated SD at `/mnt/sdcard` and
+`signaling` supplies it. **Deployed 2026-09-19:** `/mnt/sdcard` is owned by the service
+user and writable, `storage_status()` returns `(1, …, 'RW')`, `smbd` is active, and
+`status` is sent with the block; the app-side "storage not detected" confirmation is
+still pending — see `next-steps.md`.
 
 ---
 
