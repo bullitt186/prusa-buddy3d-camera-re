@@ -322,20 +322,22 @@ class PrusaSignaling:
         log.info(f'Sent file_list ({len(file_list_msg)} bytes, {len(fragment)}-char fragment{suffix})')
 
     async def _send_post_auth(self):
-        # Firmware parity: emit the post-auth sequence immediately after the auth
-        # ACK. The server closes a session that stays silent after
-        # camera_authentication, so do NOT gate on ``sio.connected`` here — that
-        # flag briefly races the namespace state right after the ACK and would
-        # skip ``send_sio_info`` entirely (which itself makes the server close).
-        try:
-            info_msg = encode_message({1: self.token, 2: self.fingerprint})
-            await self.sio_emit('send_sio_info', info_msg)
-            log.info(f'Sent send_sio_info ({len(info_msg)} bytes)')
-            await self.send_status()
-            await self.send_protobuf_version()
-            await self.send_features()
-        except Exception as e:
-            log.warning(f'post-auth send failed: {e}')
+        # Firmware parity (FUN_000a05e4): the auth-success callback only logs
+        # "Authentication successful" and resets the connection counters — it
+        # sends NOTHING. The status / protobuf_version / features senders are
+        # invoked only from the trigger dispatcher (FUN_000a9638, 0xaa134) for
+        # tags 1/2/12, which ``main.py`` already wires. ``send_sio_info`` was a
+        # bogus Socket.IO event (an internal function name; the real event is
+        # ``status``).
+        #
+        # The previous unsolicited post-auth burst (send_sio_info + status +
+        # protobuf_version + features) made the server answer ``protobuf_version``
+        # with ACK 1 and the ``error`` event
+        # "protobuf_version - CameraIsNotSessionMemberError: Camera is not a
+        # session member", which cycled the camera's session and dropped the
+        # viewer's WebRTC answer. The server drives the camera with ``trigger``
+        # polls, so no post-auth send is needed.
+        log.debug('post-auth: no unsolicited sends (server triggers drive responses)')
 
     async def connect(self):
         try:

@@ -128,8 +128,11 @@ All payloads are raw protobuf binary, sent via `socket.emit(event_name, binary_b
 
 ### ACK Responses (from server)
 
-- `1` (bare integer) — auth success (`camera_authentication` only)
-- No ACK is sent for `status`, `protobuf_version`, or `features` events.
+- `0` (bare integer) — auth success (`camera_authentication` only). `1` = not authorized,
+  `2` = error joining session, `3` = missing token, `4` = error decoding (`FUN_0009e53c`).
+- Trigger-driven `status`/`protobuf_version`/`features` emits carry an ack callback; live the
+  server returns `1001` for `status`/`features`, while an **unsolicited** `protobuf_version`
+  returns ACK `1` plus the `error` event `CameraIsNotSessionMemberError`.
 
 ---
 
@@ -277,14 +280,16 @@ Incoming SDP offers/ICE candidates from server. See Section 10 for full field ta
 1. Connect WebSocket to wss://camera-signaling.prusa3d.com
    - Socket.IO CONNECT with auth={"token": camera_token}
    - Headers: Origin: https://connect.prusa3d.com
-2. emit("camera_authentication", CameraAuthentication{fingerprint, token})
-3. Wait for auth ACK `1`
-4. emit("send_sio_info", {fingerprint, token})  — triggers status re-send internally
-5. emit("status", CameraInfoMessage{...})  — field 10 = sio.get_sid() (session id)
-6. emit("protobuf_version", ProtobufSchemaVersion{token, "4.4"})
-7. emit("features", CameraSupportedFeatures{...})  — field 7 = MD5(features_json)
-8. Start periodic snapshot upload (PUT /c/snapshot every 10s)
-9. Listen for incoming trigger/config/webrtc events
+2. emit("camera_authentication", CameraAuthentication{token, fingerprint})
+3. Wait for auth ACK `0` (`0` = success; `1` = not authorized, `2` = error joining session)
+4. Send **nothing** post-auth: firmware `FUN_000a05e4` only logs "Authentication successful"
+   and resets the connection counters. The server drives the camera with `trigger` polls —
+   tag 1 → `status`, tag 2 → `features`, tag 12 → `protobuf_version`. Do **not** emit
+   `send_sio_info` (an internal firmware function name, not a Socket.IO event) and do not
+   send `protobuf_version` unsolicited — the server answers that with
+   `CameraIsNotSessionMemberError` and cycles the session.
+5. Start periodic snapshot upload (PUT /c/snapshot every 10s)
+6. Listen for incoming trigger/config/webrtc events
 10. On "webrtc" offer: emit("webrtc", WebRTCMessage{request_id, "answer", sdp, ...})
 ```
 

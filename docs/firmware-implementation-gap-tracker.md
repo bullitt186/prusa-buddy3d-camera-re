@@ -987,12 +987,15 @@ closing the gap.
 - [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware behavior:** continues its post-authentication flow only on the successful ACK path.
   **[confirmed]**
-- **Current behavior:** any ACK value returned without exception causes `send_sio_info`, `status`,
-  `protobuf_version`, and `features` to be emitted.
-- **Connect impact:** invalid/rejected sessions transmit misleading post-auth messages and obscure
-  diagnostics.
-- **Implementation:** require the exact success value `1`; log and disconnect/back off otherwise.
-- **Acceptance:** ACK `1` proceeds; ACK `0`, `5`, malformed values, and timeout do not send any
+- **Current behavior:** only the exact success ACK `0` proceeds; no post-auth events are sent
+  (the server's `trigger` polls drive `status`/`features`/`protobuf_version`).
+- **Connect impact:** invalid/rejected sessions transmit nothing and back off; the bogus
+  `send_sio_info` event and the unsolicited `protobuf_version` (which the server answered with
+  `CameraIsNotSessionMemberError`) are gone.
+- **Implementation:** require the exact success value `0` (`FUN_0009e53c`: `0`=OK, `1`=not
+  authorized, `2`=error joining session); log and disconnect/back off otherwise. Post-auth sends
+  removed (firmware `FUN_000a05e4` only logs/resets counters).
+- **Acceptance:** ACK `0` proceeds; ACK `1`, `2`, `5`, malformed values, and timeout do not send any
   post-auth event.
 - **Code:** [`signaling.py`](../pi-impersonator/signaling.py#L96-L105)
 
