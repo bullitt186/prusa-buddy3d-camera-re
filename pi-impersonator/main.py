@@ -642,7 +642,10 @@ async def main():
     asyncio.create_task(start_local_http())
     try:
         await sig.connect()
-        await sig.wait()
+        # WP-1: own the reconnect loop so a server-closed session is replaced
+        # with a fresh client (firmware CheckSocketServerConnection parity).
+        asyncio.create_task(sig.supervise())
+        await asyncio.Event().wait()
     finally:
         # GAP-HTTP-03: release the single long-lived session on shutdown.
         await session.close()

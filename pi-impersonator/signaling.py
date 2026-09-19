@@ -20,16 +20,27 @@ class PrusaSignaling:
         self.mac = mac
         self.ip = ip
         self.ssid = ssid
-        self.sio = socketio.AsyncClient(
-            reconnection=True,
-            reconnection_attempts=0,
-            reconnection_delay=5,
+        self._event_handler = None
+        self.sio = self._new_client()
+        self._setup_handlers()
+
+    def _new_client(self):
+        """A fresh Socket.IO client (no stale engineio session state).
+
+        Firmware parity: `CheckSocketServerConnection` owns reconnection and the
+        camera clears its stored session id before reconnecting (`FUN_0038a420`:
+        `*(param_1+0xb74)=0; **(param_1+0xb70)=0`). python-engineio instead keeps
+        the previous sid and reuses it on reconnect, so every library-managed
+        retry resumes a dead session and the server answers "Server sent close
+        packet data 0". We therefore disable library reconnection and create a new
+        client per attempt from the supervisor below.
+        """
+        return socketio.AsyncClient(
+            reconnection=False,
             # Diagnostic only: PRUSA_SIO_DEBUG=1 surfaces engineio close reasons.
             logger=os.environ.get('PRUSA_SIO_DEBUG') == '1',
             engineio_logger=os.environ.get('PRUSA_SIO_DEBUG') == '1',
         )
-        self._event_handler = None
-        self._setup_handlers()
 
     def _setup_handlers(self):
         @self.sio.event
@@ -276,11 +287,10 @@ class PrusaSignaling:
         log.info(f'Sent features ({len(features_msg)} bytes{suffix})')
 
     async def _send_post_auth(self):
-        # Firmware parity: only emit while the session is actually alive. If the
-        # server closed the session mid-handshake, emitting the rest would queue
-        # messages that are then delivered on the *next* connection, which the
-        # server treats as a protocol violation and closes again.
-        await asyncio.sleep(0.3)
+        # Firmware parity: emit the post-auth sequence immediately after the
+        # auth ACK. The server closes a session that stays silent after
+        # camera_authentication, so the old 0.3s/0.2s pacing lost the session
+        # before send_sio_info went out.
         if not self.sio.connected:
             log.warning('post-auth aborted: session closed before send_sio_info')
             return
@@ -288,23 +298,28 @@ class PrusaSignaling:
         await self.sio_emit('send_sio_info', info_msg)
         log.info(f'Sent send_sio_info ({len(info_msg)} bytes)')
 
-        await asyncio.sleep(0.2)
         if not self.sio.connected:
             log.warning('post-auth aborted: session closed before status')
             return
         await self.send_status()
 
-        await asyncio.sleep(0.2)
         if not self.sio.connected:
             return
         await self.send_protobuf_version()
 
-        await asyncio.sleep(0.2)
         if not self.sio.connected:
             return
         await self.send_features()
 
     async def connect(self):
+        try:
+            await self._connect_once()
+        except Exception as e:
+            # Let the supervisor retry with a fresh client rather than aborting
+            # startup (firmware CheckSocketServerConnection behaviour).
+            log.warning(f'initial signaling connect failed: {e}; supervisor will retry')
+
+    async def _connect_once(self):
         await self.sio.connect(
             'https://camera-signaling.prusa3d.com',
             auth={'token': self.token},
@@ -315,6 +330,35 @@ class PrusaSignaling:
             transports=['websocket'],
             wait_timeout=10,
         )
+
+    async def supervise(self):
+        """Own the reconnect loop (firmware ``CheckSocketServerConnection``).
+
+        The server can close the signaling WebSocket right after
+        ``camera_authentication``. When that happens, drop the whole client and
+        open a new one so the next attempt cannot resume the dead session.
+        """
+        while True:
+            await asyncio.sleep(15)
+            eio_state = getattr(self.sio.eio, 'state', '?')
+            alive = bool(self.sio.connected) and eio_state == 'connected'
+            if alive:
+                log.debug(f'signaling supervisor: connected (eio={eio_state})')
+                continue
+            log.warning(
+                f'signaling link down (sio.connected={self.sio.connected}, eio={eio_state}); '
+                'reconnecting with a fresh session'
+            )
+            try:
+                await self.sio.disconnect()
+            except Exception:
+                pass
+            self.sio = self._new_client()
+            self._setup_handlers()
+            try:
+                await self._connect_once()
+            except Exception as e:
+                log.warning(f'signaling reconnect failed: {e}')
 
     async def wait(self):
         await self.sio.wait()
