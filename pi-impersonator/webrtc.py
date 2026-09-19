@@ -135,6 +135,17 @@ class PrusaWebRTC:
                 turn_host = f'{host}:{port}'
         pipeline_str = (
             'tcpclientsrc host=127.0.0.1 port=8888 do-timestamp=true '
+            '! h264parse '
+            # The Connect answerer (libdatachannel) rejects our v4l2 H264 SPS
+            # (428029, level 4.1). Re-encode to constrained baseline level 3.1
+            # (openh264enc -> video/x-h264,profile=constrained-baseline gives
+            # 42c01f), which the firmware's 42e01f is a variant of.
+            '! openh264dec '
+            '! videoscale '
+            '! video/x-raw,width=1280,height=720 '
+            '! videoconvert '
+            '! openh264enc '
+            '! video/x-h264,profile=constrained-baseline '
             '! h264parse config-interval=-1 '
             '! rtph264pay config-interval=1 pt=96 '
             '! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 '
