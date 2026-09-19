@@ -352,12 +352,57 @@ async def timelapse_loop():
             continue
         try:
             jpeg = capture_jpeg(*state.resolution())
-            index = timelapse.next_index(timelapse.TIMELAPSE_DIR)
-            path = timelapse.save_frame(jpeg, timelapse.TIMELAPSE_DIR, index)
+            path = timelapse.save_frame(jpeg)
             log.info(f'Timelapse: stored {os.path.basename(path)}')
         except Exception as e:
             log.warning(f'Timelapse capture failed: {e}')
         await asyncio.sleep(state.timelapse_interval)
+
+
+def _request_id_from_event(data):
+    """Best-effort request id from a direct ``timelapse_get_file_list`` payload.
+
+    The inbound payload is an undocumented protobuf; the trigger envelope's tag
+    11 is the recovered request-id field, so prefer it and otherwise fall back to
+    the first non-empty string field. Returns ``None`` when there is none.
+    """
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return None
+    try:
+        fields = decode_message(bytes(data))
+    except Exception:
+        return None
+    value = fields.get(11)
+    if isinstance(value, str) and value:
+        return value
+    for field_value in fields.values():
+        if isinstance(field_value, str) and field_value:
+            return field_value
+    return None
+
+
+async def _send_timelapse_file_list(sig, request_id=None):
+    """Send the assembled ``.avi`` list as firmware-shaped ``file_list`` fragments.
+
+    ``FUN_000ac934`` enumerates regular ``*.avi`` files under the timelapse
+    directory joined by ``;``; an empty list sends nothing. ``FUN_000a1fa8``
+    fragments the listing (see ``timelapse.file_list_fragments``) and pauses
+    50 ms between fragments (``FUN_00065d80``).
+    """
+    listing = timelapse.file_list_entries(timelapse.TIMELAPSE_DIR)
+    if not listing:
+        log.warning('Timelapse file list: no .avi videos stored; nothing sent')
+        return
+    fragments = timelapse.file_list_fragments(listing)
+    for index, (page, total, chunk) in enumerate(fragments):
+        fragment = timelapse.format_file_list_fragment(page, total, chunk)
+        await sig.send_file_list(fragment, request_id)
+        log.info(
+            f'Timelapse file list fragment {page}/{total}: '
+            f'{len(chunk.encode("utf-8"))} bytes'
+        )
+        if index + 1 < len(fragments):
+            await asyncio.sleep(0.05)
 
 
 def _find_sdp(msg):
@@ -541,8 +586,8 @@ async def main():
         descriptor; this function only executes them. ``reboot`` is a
         rate-limited, narrowly scoped systemd reboot (GAP-DEVICE-01).
         ``fw_update`` returns an explicit unsupported result (GAP-OTA-01);
-        ``timelapse_*`` are recognized but intentionally unimplemented and must
-        not perform an unrelated action or fake success.
+        ``timelapse_*`` are now wired to the Pi storage helpers
+        (GAP-TIMELAPSE-01) and must not perform an unrelated action.
         """
         if action == trigger.STATUS:
             await sig.send_status(request_id=request_id)
@@ -591,17 +636,17 @@ async def main():
             if timelapse.apply_enable(action, state):
                 log.info(f'Trigger {action}: timelapse_enabled={state.timelapse_enabled}')
         elif action == trigger.TIMELAPSE_MAKE:
-            path = timelapse.build_mjpeg(timelapse.TIMELAPSE_DIR)
+            width, height = state.resolution()
+            path = timelapse.build_avi(
+                timelapse.TIMELAPSE_DIR, fps=state.timelapse_fps,
+                width=width, height=height,
+            )
             if path:
                 log.info(f'Trigger timelapse_make: wrote {path}')
             else:
                 log.warning('Trigger timelapse_make: no frames stored')
         elif action == trigger.TIMELAPSE_FILE_LIST:
-            frames = timelapse.list_frames(timelapse.TIMELAPSE_DIR)
-            log.warning(
-                f'Trigger timelapse_file_list: {len(frames)} stored frame(s); the '
-                'file-list envelope annotations are unresolved, no list sent (GAP-TIMELAPSE-01)'
-            )
+            await _send_timelapse_file_list(sig, request_id)
         else:
             log.warning(
                 f'Trigger action {action!r} recognized but not implemented on the '
@@ -861,15 +906,10 @@ async def main():
             else:
                 log.warning(f'{event}: quality byte {val!r} not fully applied (live or persist failed)')
         elif event == 'timelapse_get_file_list':
-            # GAP-TIMELAPSE-01: the firmware file-list envelope (4 string fields,
-            # descriptor 0x3f701c) has no recovered per-field annotation, so an
-            # untyped empty message is NOT sent. Report the explicit unsupported
-            # result instead of a malformed list.
-            frames = timelapse.list_frames(timelapse.TIMELAPSE_DIR)
-            log.warning(
-                f'timelapse_get_file_list: {len(frames)} stored frame(s); the file-list '
-                'envelope annotations are unresolved, no list emitted (GAP-TIMELAPSE-01)'
-            )
+            # GAP-TIMELAPSE-01: direct file-list request. The response goes out
+            # on the `file_list` event with the recovered 0x3f701c envelope;
+            # request_id is best-effort from the undocumented inbound protobuf.
+            await _send_timelapse_file_list(sig, _request_id_from_event(data))
 
     sig.on_trigger(handle_event)
     asyncio.create_task(snapshot_loop(token, fingerprint, server, session))

@@ -41,9 +41,13 @@ SD card"* and reads storage from the `status` message, block `extended_status.4`
 Already done for timelapse:
 - Emulated SD at `/mnt/sdcard/timelapse` (the firmware path), shared over SMB
   (`\\<pi>\sdcard`, verified); `deploy.sh`/`bootstrap.sh` provision it.
-- `MicroSd` re-advertised; `timelapse.py` storage + MJPEG + `timelapse_loop`;
-  trigger tags 5/14/15 dispatched. File-list envelope (`0x3f701c`, four strings)
-  annotation still unresolved.
+- `MicroSd` re-advertised; `timelapse.py` storage + firmware-named frames
+  (`timelapse_<HH-MM-SS-mmm>.jpg`), stdlib MJPEG-in-AVI `build_avi`
+  (`timelapse_<HH-MM-SS-mmm>.avi` + `.timelapse_videos.csv`) and `timelapse_loop`;
+  trigger tags 5/14/15 dispatched. The `0x3f701c` file-list envelope is annotated
+  (event `file_list`; field 1 `"<page>;<total>\n<chunk>"`, field 2 token, field 3
+  optional request_id, field 4 unset; empty list sends nothing) and implemented
+  locally; live verification of make-video/file-list is pending.
 
 Also open (smaller):
 - Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.

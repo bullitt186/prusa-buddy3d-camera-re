@@ -252,7 +252,16 @@ A request field is acted on only for its documented value; other values are igno
 
 ### `timelapse_get_file_list`
 
-Bidirectional. Server sends to request the list; camera responds with the same event name containing the list payload. Entries come from `/mnt/sdcard/timelapse/timelapse_videos.csv`, each with a path and status char (`D`=done, `E`=error, `P`=pending). Registered in `FUN_000A4050` (VMA `0xA4050`).
+Bidirectional. The server sends this event to request the list; the camera responds on the
+**`file_list`** event (not the same name). The response body is composed by `FUN_000ad7ec`: it
+enumerates the regular files in `/mnt/sdcard/timelapse/` whose name ends in **`.avi`**
+(`FUN_000ac934`, log `"Timelapse files list: %s"`), looks each up in the hidden
+**`.timelapse_videos.csv`** index, and appends one **`<name>;<status>`** line (terminated by
+`\n`) per video. The index rows are `<name>:<status>` written by `FUN_000ac134`; the status is
+`D`=done / `E`=error / `P`=pending (`FUN_000aee3c`), and a name absent from the index defaults
+to `'U'` (0x55). With no `.avi` files the sender emits nothing
+(`"No video files found on SD card"`). See the `TimelapseFileList` field table in Section 6.
+**[confirmed]**
 
 ### `webrtc`
 
@@ -569,17 +578,27 @@ message ClientTrigger {
 
 ### TimelapseFileList (4 fields)
 
-Recovered 3.1.6 descriptor `0x3f701c` (sender `FUN_000a1fa8`): four string fields.
-The sender assigns only a fragment string (one-based `i/n` prefix plus a substring) and a
-constant; the per-field annotations and the canonical zero-entry encoding remain
-unresolved, so `GAP-TIMELAPSE-01` must not encode an untyped empty message.
+Event **`file_list`**. Recovered 3.1.6 descriptor `0x3f701c` (sender `FUN_000a1fa8`). The camera
+responds only when at least one assembled `.avi` exists in `/mnt/sdcard/timelapse/`; an empty list
+sends **no** message. **[confirmed]**
+
+| Field | Type | Meaning |
+|---|---|---|
+| 1 | string | One fragment, exactly `"<page>;<total>\n<chunk>"` (page is 1-based, `total` = fragment count). `<chunk>` is one or more `<name>;<status>\n` entries: the `.avi` basenames (`FUN_000ac934`) each paired with its `.timelapse_videos.csv` status (`D`/`E`/`P`, default `U`) by `FUN_000ad7ec`. **[confirmed]** |
+| 2 | string | HTTP token (`FUN_00082dd0` reads `/data/xhr_config.ini` key `http.token`). **[confirmed]** |
+| 3 | string | Request correlation id; set only when present. **[confirmed]** |
+| 4 | string | Never populated by this sender (its callback funcs slot stays NULL). Do not send. **[confirmed]** |
+
+Fragmentation (`FUN_000a1fa8`, confirmed): if the whole response is **< 0x401 bytes** it is one
+fragment; otherwise `total = (size >> 10) + 1`, the chunk size is **1024 bytes**, and there is a
+**50 ms** pause between fragments (`FUN_00065d80`).
 
 ```protobuf
 message TimelapseFileList {
-    string field1 = 1;
-    string field2 = 2;
-    string field3 = 3;
-    string field4 = 4;
+    string field1 = 1;   // "<page>;<total>\n<chunk>"
+    string field2 = 2;   // HTTP token
+    string field3 = 3;   // request_id (optional)
+    // field 4: never set by FUN_000a1fa8
 }
 ```
 

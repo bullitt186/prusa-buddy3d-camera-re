@@ -72,8 +72,10 @@ storage page shows size/used/free, and the interval is configurable. **Live end-
 (=`set_timelaps_interval`, dispatcher `FUN_000a7940`), and after wiring it the log shows
 `Config: timelapse_interval → 30s` with frames exactly 35 s apart. **Limitation:**
 `/mnt/sdcard` is on the read-only overlay root, so recordings are lost on reboot (retrievable
-over SMB until then). Make-video and file-list were not exercised; the file-list response
-envelope (`0x3f701c`) is still unannotated.
+over SMB until then). Make-video and file-list were not exercised by the app; both are now
+implemented locally (2026-09-19) with the firmware artifact naming
+(`timelapse_<HH-MM-SS-mmm>.jpg`, MJPEG `.avi`, `.timelapse_videos.csv`) and the annotated
+`0x3f701c` `file_list` envelope, pending live verification.
 
 ---
 

@@ -431,9 +431,10 @@ The sender:
 5. Encodes each response into a `0x400`-byte nanopb buffer (`120-142`), emits it (`145-179`), then
    waits 50 ms before the next fragment (`184-186`).
 
-The exact four-field descriptor annotations and canonical zero-entry response remain unresolved.
-An empty `encode_message({})` is therefore not justified by the firmware and must not be treated as
-the final implementation.
+The exact four-field descriptor annotations are now recovered: field 1 = the
+`"<page>;<total>\n<chunk>"` fragment, field 2 = the HTTP token, field 3 = request_id (set only when
+present), field 4 = never populated by this sender. An empty list emits no message at all (there is
+no zero-entry encoding to send). **[confirmed]**
 
 ### Areas where decompilation still does not remove all ambiguity
 
@@ -442,10 +443,10 @@ These are explicit recovery prerequisites, not permission to guess:
 | Area | Known exactly | Still required before implementation |
 |---|---|---|
 | Trigger dispatcher | **Recovered 2026-09-18:** descriptor `0x3f6f14` (13 fields, tags 1–5/8–15) and the `FUN_000a963c` per-field `== 1`/`== 2` dispatch; `trigger.py` implements it | Tag 13 string semantics; multi-field processing order (firmware checks each field independently) |
-| Configuration | **Resolved 2026-09-19: JSON** (nlohmann::json in the binary). SIO `configuration` handler `FUN_000c4718` → `FUN_0006fb94` → `FUN_0006f9dc` → `FUN_0006cf34`, plus the complete field/value/action table | Only a redacted golden JSON capture to pin value casing; the earlier "SIO handler `0xa89e0` pb_decode 9-field descriptor" lead was a different handler |
+| Configuration | **Resolved 2026-09-19: nested protobuf** (descriptor `0x3f73a4`, dispatcher `FUN_000a7940`); live-mapped `tag8.1` = video quality and top-level field 2 = `set_timelaps_interval` (`FUN_000a7940` logs `"Timelapse interval: %d seconds"`); the nlohmann JSON parser is only the QR/manual-config path | Remaining `tag3` subfields (11/12 RTSP candidate) and a redacted golden capture |
 | Status | Top-level fields, struct size, many getters/translations, request correlation, and now the nested descriptor tables (dumpable) | Semantic tag-to-field annotation for every claimed nested value |
 | ICE config | The inbound `webrtc` message is 9 fields with nested submessages (`0x3f7680`), **not** the flat 12-field log string | Nested protobuf subfield tags/cardinality for the ICE submessages |
-| Timelapse list | Dedicated 4-string descriptor `0x3f701c`; full sender `FUN_000a1fa8` | Per-field annotation and canonical zero-entry bytes |
+| Timelapse list | **Resolved 2026-09-19:** descriptor `0x3f701c` field 1 = `"<page>;<total>\n<chunk>"`, field 2 = HTTP token, field 3 = request_id (optional), field 4 never set; `FUN_000a1fa8` sender; `FUN_000ad7ec` composes `<name>;<status>\n` entries from the `*.avi` scan (`FUN_000ac934`) + `.timelapse_videos.csv` status (`FUN_000ac134`, default `U`) | None for the envelope; an empty list sends no message |
 | `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` with known types | Semantic names/result/progress enums and exact payload fixtures |
 | RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
 | WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
@@ -486,7 +487,7 @@ closing the gap.
 | `GAP-AUTH-01` | `FW-AUTH`; auth event string `lp_app.strings:10355` | ACK callback branch needs explicit decompile annotation |
 | `GAP-CONTROL-01` | `FW-CONFIG:237-259`; status name getter in `FW-STATUS:235-244` | Persistence backend is Pi-specific |
 | `GAP-OTA-01` | `FW-CONFIG:174-192`; `start_fw_update` at `lp_app.strings:15084`; OTA endpoint/response keys in `journal/findings.md:1173-1181` | Full OTA state machine still needs focused call-path annotation |
-| `GAP-TIMELAPSE-01` | `FW-TIMELAPSE-SEND`, `FW-TIMELAPSE-REGISTER`; action strings `lp_app.strings:15309-15310` | File-list descriptor fields need annotation |
+| `GAP-TIMELAPSE-01` | `FW-TIMELAPSE-SEND`, `FW-TIMELAPSE-REGISTER`; action strings `lp_app.strings:15309-15310` | None for the list envelope; make-video/list not yet exercised by the app |
 | `GAP-DEVICE-01` | `reboot_device` at `lp_app.strings:14127`; trigger dispatcher recovery item | Trigger enum/result response required |
 | `GAP-DEVICE-02` | `FW-CONFIG:193-228`; advertised list from `FW-FEATURES` | Hardware absence is intentional; response policy is a product decision |
 | `GAP-WEBRTC-07` | Codec/SDP strings summarized in `journal/findings.md:1040-1057` | Whether Connect requests audio needs a current offer |
@@ -1005,27 +1006,28 @@ closing the gap.
 
 ### GAP-TIMELAPSE-01 — Implement or stop advertising timelapse
 
-- [~] **P2 · Partial: SD + timelapse enable + interval + frame capture live-verified; make-video/file-list remain**
+- [~] **P2 · Implemented locally: firmware-named artifacts, make-video, file_list; not live-verified**
 - **2026-09-19 (live symptom + descriptor re-trace):** Connect shows *"Time lapse not available, camera storage not detected, insert SD card"*. The app reads storage from the **`status` message**, specifically the `extended_status.4` storage block (descriptor `0x3f72b0`; firmware labels it the "video/timelapse mode/storage block"). The descriptor was recovered exactly as **tags 1-4 uvarint + tag 5 callback string**: tag 1 = SD mounted state (`FUN_000744ac`, translated `0->2`, `1->1`, else `0`; i.e. **1 = mounted/present, 2 = not mounted**), tags 2/3/4 = total/free/used MB (`FUN_000745e0`, `(f_bsize * f_blocks) >> 20` etc. via `statvfs64("/mnt/sdcard")`), tag 5 = mount-mode string (`FUN_00073914` -> `"RW"`/`"RO"`/`"UNKNOWN"`). **Correction:** the earlier note mapping `FUN_000abcb0`/`FUN_000abaf4` into this block was wrong — those are TimelapseService singleton getters that belong to top-level `timelapse_status` (field 2), and the `MODEL` string previously emitted on tag 5 was a misread.
 - **Implementation (2026-09-19, local; not live-verified):** [`timelapse.py`](../pi-impersonator/timelapse.py) provides the Pi storage policy — `sd_present` (`os.path.isdir` + `os.access(R_OK)` over `/mnt/sdcard`, matching the firmware's `FUN_00071bc0` accessibility check; the Pi has no block device), `sd_space` (`statvfs` MB with the firmware shift), `sd_mode` (`RW`/`RO`/`UNKNOWN`), and `storage_status` (the 5-tuple). [`status.py`](../pi-impersonator/status.py) encodes it on `extended_status.4` and wires `timelapse_status` tags 1/2 to `state.timelapse_enabled`/`state.timelapse_interval` (`FUN_000abcdc`/`FUN_000abcb0`); [`signaling.py`](../pi-impersonator/signaling.py) supplies live telemetry. `deploy.sh` now chowns the `/mnt/sdcard` mountpoint itself to the service user (not just `/mnt/sdcard/timelapse`) so the mode reports `RW`, and installs samba before writing its config. Tests: `tests/test_pi_timelapse.py` (`StorageStatusTests`), `tests/test_pi_status_schema.py` (storage-block and timelapse enable/interval).
 - **Emulated SD (done, verified):** `/mnt/sdcard/timelapse` on the Pi (the exact firmware path), shared read/write over SMB as `\\<pi>\sdcard` (share `sdcard`; `smbd` on 139/445). `deploy.sh` provisions the dir + share + samba; `bootstrap.sh` installs samba. `MicroSd` is re-advertised.
-- **Implementation:** `timelapse.py` (stdlib-only) provides interval/FPS validation, frame naming/storage, ordered listing, and MJPEG assembly under `/mnt/sdcard/timelapse`. `CameraState` carries `timelapse_enabled/interval/fps`; `main.timelapse_loop` captures a frame on the interval while enabled; trigger tags 5 (enable/disable), 14 (make video) and 15 (file list) are wired. The file-list envelope (`0x3f701c`, four strings) has no recovered per-field annotation, so the handler reports an explicit unsupported result instead of the previous **untyped empty message**. Tests: `tests/test_pi_timelapse.py`.
+- **Implementation:** `timelapse.py` (stdlib-only) provides interval/FPS validation, timestamped frame naming/storage, ordered listing, a minimal stdlib MJPEG-in-AVI writer, the `<name>:<status>` `.timelapse_videos.csv` index, and the firmware-shaped `file_list` fragmenter under `/mnt/sdcard/timelapse`. `CameraState` carries `timelapse_enabled/interval/fps`; `main.timelapse_loop` captures a frame on the interval while enabled; trigger tags 5 (enable/disable), 14 (make video) and 15 (file list) are wired. `signaling.send_file_list` emits the recovered `0x3f701c` envelope on the `file_list` event (field 1 = `"<page>;<total>\n<chunk>"` where `<chunk>` is one `<name>;<status>\n` per `.avi`, field 2 = HTTP token, field 3 = request_id when present, field 4 omitted); an empty list sends nothing. Tests: `tests/test_pi_timelapse.py`, `tests/test_pi_file_list.py`.
 - **Live (Pi-side) 2026-09-19:** deployed via `deploy.sh` (overlay maintenance flow, services `active`); `/mnt/sdcard` is owned by the service user and writable; the deployed `timelapse.storage_status()` returns `(1, <total>, <free>, <used>, 'RW')` (present, RW); `smbd` active; `/c/info` 200 and `status` sent (387 bytes).
 - **Live (app-side) confirmed 2026-09-19:** after the deploy, Connect shows timelapse **available**; the storage page displays SD size/used/free and the interval is configurable.
-- **Live end-to-end test 2026-09-19:** enable/disable works via trigger tag 5 (`Trigger timelapse_enable`/`timelapse_disable`); frame capture works — 9 `frame_NNNNN.jpg` written to `/mnt/sdcard/timelapse` at the capture cadence. Changing the app's interval sent `configuration {2: 30}` (previously ignored); now wired to `state.timelapse_interval` via the recovered `set_timelaps_interval` mapping (GAP-CONFIG-01). **Redeployed and re-verified:** the log shows `Config: timelapse_interval → 30s` and 7 frames landed exactly **35 s apart** (30 s interval + ~5 s capture), proving the interval now takes effect live.
+- **Live end-to-end test 2026-09-19:** enable/disable works via trigger tag 5 (`Trigger timelapse_enable`/`timelapse_disable`); frame capture works — 9 `frame_NNNNN.jpg` written to `/mnt/sdcard/timelapse` at the capture cadence (that run used the old `frame_NNNNN.jpg` naming, since superseded by `timelapse_<HH-MM-SS-mmm>.jpg`). Changing the app's interval sent `configuration {2: 30}` (previously ignored); now wired to `state.timelapse_interval` via the recovered `set_timelaps_interval` mapping (GAP-CONFIG-01). **Redeployed and re-verified:** the log shows `Config: timelapse_interval → 30s` and 7 frames landed exactly **35 s apart** (30 s interval + ~5 s capture), proving the interval now takes effect live.
 - **Limitation (2026-09-19):** `/mnt/sdcard` is a plain directory on the read-only overlay root, so recordings live in the tmpfs upper layer and are **lost on reboot** (the maintenance reboot wiped the first test's 9 frames). Frames are retrievable over SMB until the next reboot. Persisting the emulated SD is a separate, not-yet-requested change.
-- **Firmware artifact naming (recovered 2026-09-19, decompile):** individual frames are JPEGs written by `FUN_000ac5d4` (`std::ofstream`, log `Saved jpeg frame to file: %s`) as **`timelapse_<HH-MM-SS-mmm>.jpg`** (time format `%02d-%02d-%02d-%03d` from `FUN_000ac2e8`), under `/mnt/sdcard/timelapse/`; the service path component at object `+0x10` (also reported as `timelapse_status` tag 4) is prepended when non-empty (`FUN_000ac4b4`). The assembled video is **`.avi`** with a hidden **`.timelapse_videos.csv`** index, and the file-list builder `FUN_000ac934` enumerates **`*.avi`** joined by `;` (log `Timelapse files list: %s`) — so the app's list is of assembled videos, not individual frames. Our current `frame_NNNNN.jpg` + `.mjpeg` convention differs; aligning it (`.avi` artifact + `.avi` enumeration) is a follow-up to do together with the `0x3f701c` list envelope.
-- **Still open:** make-video (`tag 14`) and file-list (`tag 15`) were not exercised by the app in this run; the file-list response envelope (`0x3f701c`) is still unannotated, so no list is emitted. Progress `client_trigger` remains under `GAP-SIO-01`.
-- **Acceptance:** every advertised timelapse action has a schema fixture and either a working result (enable/disable, make) or an explicit unsupported response (file list).
-- **Still open:** exact file-list envelope annotation and progress `client_trigger` (under `GAP-SIO-01`).
+- **Firmware artifact naming (recovered 2026-09-19, decompile):** individual frames are JPEGs written by `FUN_000ac5d4` (`std::ofstream`, log `Saved jpeg frame to file: %s`) as **`timelapse_<HH-MM-SS-mmm>.jpg`** (time format `%02d-%02d-%02d-%03d` from `FUN_000ac2e8`), under `/mnt/sdcard/timelapse/`; the service path component at object `+0x10` (also reported as `timelapse_status` tag 4) is prepended when non-empty (`FUN_000ac4b4`). The assembled video is **`.avi`** with a hidden **`.timelapse_videos.csv`** index (`FUN_000ac134` writes `<name>:<status>` rows — `D`/`E`/`P` from `FUN_000aee3c`); the file-list composer `FUN_000ad7ec` enumerates the **`*.avi`** files (`FUN_000ac934`) and emits one **`<name>;<status>\n`** entry each, defaulting a name absent from the index to `'U'` (0x55; log `Timelapse videos with status: %s`). **Matched locally 2026-09-19:** `timelapse.frame_name`/`save_frame` use the exact timestamped `.jpg` name (collisions bump the millisecond), `build_avi` writes an MJPEG-in-AVI `timelapse_<HH-MM-SS-mmm>.avi` and appends a `<name>:D` (or `:E` on failure) row, and `read_video_index`/`file_list_entries` compose the `<name>;<status>` listing; `FUN_000a1fa8`'s `0x3f701c` list envelope is annotated in `protocol.md` and sent by `signaling.send_file_list`.
+- **Live status:** make-video (`tag 14`) and file-list (`tag 15`) were not exercised by the app in this run; the new artifact naming and `file_list` envelope are implemented and tested locally but **not live-verified**. Progress `client_trigger` remains under `GAP-SIO-01`.
+- **Acceptance:** every advertised timelapse action has a schema fixture and either a working result (enable/disable, make, file list) or an explicit unsupported response.
+- **Remaining:** progress `client_trigger` (under `GAP-SIO-01`) and live verification of make-video/file-list.
 - **Firmware behavior:** controls enable/interval/FPS, stores frames, creates MJPEG output, indexes
   files, returns file list/status, and emits progress/error `client_trigger` messages. **[confirmed]**
-- **Current behavior:** advertises all four timelapse features and responds to file-list requests with
-  an empty protobuf message; other operations are absent.
-- **Connect impact:** exposed controls and list/progress flows do not work.
-- **Implementation choice:** implement a Pi storage-backed equivalent or remove the capability set;
-  if an empty list is valid, encode the exact firmware list envelope rather than an untyped empty
-  message.
+- **Current behavior (historical):** previously advertised all four timelapse features and answered
+  file-list requests with an untyped empty protobuf message; now implemented locally (see above).
+- **Connect impact (historical):** exposed list/progress flows did not work; the list flow is now
+  implemented locally and pending live verification, while progress `client_trigger` remains open.
+- **Implementation choice:** implement a Pi storage-backed equivalent (chosen); an empty list sends
+  no message, and the exact firmware `0x3f701c` list envelope is now encoded rather than an untyped
+  empty message.
 - **Acceptance:** every advertised timelapse action has a schema fixture and either a working result
   or an explicit firmware-shaped unsupported/error response.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L301-L304)
@@ -1265,7 +1267,7 @@ closing the gap.
 - [x] Raw quality command mapping: firmware uses `5=SD`, `6=HD`, `7=FHD`; implemented in `state.py`/`quality_control.py` (`d1ec311`).
 - [x] Trigger message descriptor `0x3f6f14` (13 fields) and the `FUN_000a963c` per-field dispatch, recovered 2026-09-18 and implemented in `trigger.py` (`9291968`).
 - [x] `ClientTrigger` descriptor `0x3f6f58` types (strings 1/2/4, uvarints 3/5/6); semantics still unresolved.
-- [x] Timelapse file-list descriptor `0x3f701c` is four string fields; per-field annotation unresolved.
+- [x] Timelapse file-list descriptor `0x3f701c`: event `file_list`, field 1 = `"<page>;<total>\n<chunk>"`, field 2 = HTTP token, field 3 = request_id (optional), field 4 never set; an empty list sends nothing.
 - [x] H.264 intent: constrained baseline, level 3.1, packetization mode 1.
 - [x] Default snapshot interval is 10 seconds.
 - [x] `set_rtsp_server_mode` direct values handled as `1=disabled`, `2=enabled`.

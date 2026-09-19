@@ -173,8 +173,14 @@ class PrusaSignaling:
             for k, v in decoded.items():
                 if isinstance(v, bytes):
                     parts.append(f'{k}=<bytes:{len(v)}>')
-                elif isinstance(v, str) and len(v) > 40:
-                    parts.append(f'{k}={v[:40]!r}...')
+                elif isinstance(v, str):
+                    # Redact token/fingerprint before truncating so a long
+                    # secret is never partially logged (GAP-TIMELAPSE-01).
+                    redacted = self._redact(v)
+                    if len(redacted) > 40:
+                        parts.append(f'{k}={redacted[:40]!r}...')
+                    else:
+                        parts.append(f'{k}={redacted!r}')
                 else:
                     parts.append(f'{k}={v!r}')
             return '{' + ', '.join(parts) + '}'
@@ -297,6 +303,23 @@ class PrusaSignaling:
         await self.sio_emit('features', features_msg, callback=self._log_ack('features'))
         suffix = f', request_id={request_id[:16]}...' if request_id else ''
         log.info(f'Sent features ({len(features_msg)} bytes{suffix})')
+
+    async def send_file_list(self, fragment, request_id=None):
+        """Emit one ``file_list`` fragment (GAP-TIMELAPSE-01).
+
+        Recovered 3.1.6 sender ``FUN_000a1fa8``: field 1 = the
+        ``"<page>;<total>\\n<chunk>"`` fragment, field 2 = the HTTP token, field 3
+        = request_id only when present. Field 4 is never populated by the
+        firmware sender and is therefore omitted. The summary logged by
+        ``sio_emit`` redacts the token (see ``pb_summary``).
+        """
+        fields = {1: fragment, 2: self.token}
+        if request_id:
+            fields[3] = request_id
+        file_list_msg = encode_message(fields)
+        await self.sio_emit('file_list', file_list_msg, callback=self._log_ack('file_list'))
+        suffix = f', request_id={request_id[:16]}...' if request_id else ''
+        log.info(f'Sent file_list ({len(file_list_msg)} bytes, {len(fragment)}-char fragment{suffix})')
 
     async def _send_post_auth(self):
         # Firmware parity: emit the post-auth sequence immediately after the auth
