@@ -134,7 +134,10 @@ class PrusaWebRTC:
             elif server.get('type') == 2 and not turn_host:
                 turn_host = f'{host}:{port}'
         pipeline_str = (
-            'tcpclientsrc host=127.0.0.1 port=8888 do-timestamp=true '
+            # 8889 = the SPS-patched mux stream (constrained baseline level 3.1),
+            # which the Connect answerer requires. 8888 (RTSP/snapshots) is
+            # untouched. See stream_mux.patch_sps.
+            'tcpclientsrc host=127.0.0.1 port=8889 do-timestamp=true '
             '! h264parse config-interval=-1 '
             '! rtph264pay config-interval=1 pt=96 '
             '! application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 '
