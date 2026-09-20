@@ -1,0 +1,10 @@
+# Readiness target for durable storage. Every camera/app unit Requires and is
+# ordered After this target, so they start only once prusa-data-ready.service has
+# proven /data is a real, labelled, writable PERSIST mount (AC-7).
+[Unit]
+Description=Durable /data is mounted, labelled, and writable
+Requires=prusa-data-ready.service
+After=prusa-data-ready.service
+
+[Install]
+WantedBy=multi-user.target

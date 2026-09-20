@@ -1,18 +1,19 @@
 # Always-on local RTSP endpoint for Home Assistant. Unlike prusa-rtsp.service,
 # this unit is never controlled by Prusa RTSP/WebRTC mode commands.
+# data-ready.target gates this unit on a real, writable PERSIST /data mount (AC-7).
 [Unit]
 Description=Home Assistant RTSP endpoint for Prusa camera impersonator
-After=network.target rpicam-source.service
-Requires=rpicam-source.service
+After=network.target data-ready.target rpicam-source.service
+Requires=rpicam-source.service data-ready.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/prusa-cam
+User=prusa-cam
+WorkingDirectory=/opt/prusa-cam
 Environment=RTSP_PORT=8555
 Environment=RTSP_PATH=/live
 Environment="RTSP_LABEL=Home Assistant"
-ExecStart=/home/pi/prusa-cam/venv/bin/python rtsp_server.py
+ExecStart=/opt/prusa-cam/venv/bin/python rtsp_server.py
 Restart=always
 RestartSec=2
 

@@ -9,7 +9,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/pi/prusa-cam/bootlog.sh
+ExecStart=/opt/prusa-cam/bootlog.sh
 Nice=10
 
 [Install]

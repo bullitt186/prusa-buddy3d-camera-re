@@ -30,13 +30,37 @@ log = logging.getLogger('prusa-cam.persist')
 DATA_MOUNT = '/data'
 DATA_SDCARD = '/data/sdcard'
 DATA_PRUSA_CAM = '/data/prusa-cam'
+DATA_CONFIG_DIR = DATA_PRUSA_CAM + '/config'
+DATA_RELEASES_DIR = DATA_PRUSA_CAM + '/releases'
+DATA_BACKUPS_DIR = DATA_PRUSA_CAM + '/backups'
+DATA_NETWORK_DIR = '/data/network'
+DATA_NETWORK_CONNECTIONS = DATA_NETWORK_DIR + '/system-connections'
 SD_MOUNT = '/mnt/sdcard'
 TIMELAPSE_DIR = DATA_SDCARD + '/timelapse'
 FRAME_SUFFIX = '.jpg'
 
 # Free-space floor below which stored frames are pruned (300 MB).
 PRUNE_FREE_THRESHOLD_BYTES = 300 * 1024 * 1024
-DEFAULT_SERVICE_USER = 'bullitt'
+
+# Dedicated non-login service account that owns every durable directory. The
+# account is created by deploy.sh/bootstrap.sh and is the single identity in the
+# systemd units; override only for a non-standard install via SERVICE_USER.
+DEFAULT_SERVICE_USER = 'prusa-cam'
+
+# Durable directory layout on the PERSIST partition, in creation order, with the
+# mode each directory must end up with. ``config``/``backups`` hold secrets and
+# migration backups, so they are group-accessible but not world-readable; the
+# media directories stay 0755 so the bind-mounted SMB share can traverse them.
+DATA_LAYOUT = (
+    (DATA_SDCARD, 0o755),
+    (TIMELAPSE_DIR, 0o755),
+    (DATA_PRUSA_CAM, 0o750),
+    (DATA_CONFIG_DIR, 0o750),
+    (DATA_RELEASES_DIR, 0o750),
+    (DATA_BACKUPS_DIR, 0o750),
+    (DATA_NETWORK_DIR, 0o750),
+    (DATA_NETWORK_CONNECTIONS, 0o750),
+)
 
 
 def quality_env_values(tier):
@@ -103,6 +127,28 @@ def _bind_mount(source, target):
         return False
     log.info(f'persist: bind-mounted {source} -> {target}')
     return True
+
+
+def ensure_durable_layout(service_user):
+    """Create, mode, and chown the durable ``/data`` layout.
+
+    Idempotent and best-effort: a directory that cannot be created is logged and
+    skipped so one bad path never blocks the settings restore. Returns the list
+    of directories that exist (and were chowned) afterwards. Callers must check
+    :func:`settings_store.available` first; this helper does not verify that
+    ``/data`` is a real mountpoint.
+    """
+    created = []
+    for directory, mode in DATA_LAYOUT:
+        try:
+            os.makedirs(directory, exist_ok=True)
+            os.chmod(directory, mode)
+        except OSError as e:
+            log.warning(f'persist: could not create {directory}: {e}')
+            continue
+        _chown(directory, service_user)
+        created.append(directory)
+    return created
 
 
 def _restore_settings():
@@ -187,15 +233,9 @@ def main():
         return 0
 
     service_user = os.environ.get('SERVICE_USER', DEFAULT_SERVICE_USER)
-    for directory in (DATA_SDCARD, DATA_PRUSA_CAM, TIMELAPSE_DIR):
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except OSError as e:
-            log.warning(f'persist: could not create {directory}: {e}')
-    # The service user (not root) must write frames into timelapse/ and
-    # state.json into prusa-cam/, so hand over every directory the app touches.
-    for directory in (DATA_SDCARD, DATA_PRUSA_CAM, TIMELAPSE_DIR):
-        _chown(directory, service_user)
+    # The service user (not root) must write state.json, configuration, releases,
+    # backups, and frames, so hand over every durable directory the app touches.
+    ensure_durable_layout(service_user)
 
     _bind_mount(DATA_SDCARD, SD_MOUNT)
     _restore_settings()

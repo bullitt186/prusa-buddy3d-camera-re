@@ -24,10 +24,21 @@ esac; done
 PI="${PI_ARG:-${PI:-}}"   # positional wins, else the PI env var
 [ -n "$PI" ] || { echo "usage: PI=user@host $0 [--enable-overlay|--disable-overlay]"; exit 2; }
 PI_USER="${PI%@*}"
+# Dedicated non-login service identity and application root (AC-1). The SSH
+# transport user above is only used for the maintenance connection; the deployed
+# code and units always run as $SERVICE_USER from $APP_ROOT.
+SERVICE_USER="${SERVICE_USER:-prusa-cam}"
+APP_ROOT="${APP_ROOT:-/opt/prusa-cam}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 SSH=(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "$PI")
 
 log() { printf '\n\033[1m» %s\033[0m\n' "$*"; }
+
+install_unit() {  # install a repo unit template verbatim (no user/path templating)
+  local name="$1"
+  "${SSH[@]}" "sudo install -m 0644 /dev/stdin /etc/systemd/system/$name" \
+    < "$SRC/systemd/$name"
+}
 
 wait_for_ssh() {  # block until the Pi answers again after a reboot (~10 min budget)
   log "waiting for $PI to come back…"
@@ -69,15 +80,27 @@ set_overlay() {  # $1 = enabled|disabled ; toggles via cmdline.txt on the FAT /b
 reboot_pi() { "${SSH[@]}" 'sudo systemctl reboot' 2>/dev/null || true; sleep 8; wait_for_ssh; }
 
 push_and_restart() {  # the actual deploy — assumes root is writable (dev mode or overlay disabled)
-  log "backup + rsync sources → $PI:~/prusa-cam/"
-  "${SSH[@]}" 'mkdir -p ~/prusa-cam/backups/$(date +%Y%m%d_%H%M%S) && cp ~/prusa-cam/*.py "$_" 2>/dev/null || true'
-  rsync -az --exclude 'config.ini' --exclude 'venv/' --exclude '__pycache__/' \
+  log "ensure $SERVICE_USER account (dedicated non-login service identity)"
+  "${SSH[@]}" "set -e
+    id -u $SERVICE_USER >/dev/null 2>&1 || \
+      sudo useradd --system --create-home --home-dir $APP_ROOT --shell /usr/sbin/nologin $SERVICE_USER
+    sudo usermod -aG video $SERVICE_USER"
+
+  log "backup + rsync sources → $PI:$APP_ROOT/"
+  "${SSH[@]}" "d=\$(date +%Y%m%d_%H%M%S); sudo mkdir -p $APP_ROOT/backups/\$d && \
+    sudo cp $APP_ROOT/*.py $APP_ROOT/backups/\$d/ 2>/dev/null || true"
+  # Run the remote rsync as root so it can write into $APP_ROOT even before the
+  # service account owns it; ownership is set explicitly below.
+  rsync -az --rsync-path="sudo rsync" --no-owner --no-group \
+        --exclude 'config.ini' --exclude 'venv/' --exclude '__pycache__/' \
         --exclude 'backups/' --exclude 'systemd/' --exclude '*.example' --exclude 'README.md' \
-        --exclude 'deploy.sh' "$SRC/" "$PI:~/prusa-cam/"
+        --exclude 'deploy.sh' "$SRC/" "$PI:$APP_ROOT/"
+  "${SSH[@]}" "sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_ROOT && \
+    sudo chmod +x $APP_ROOT/bootlog.sh"
 
   log "provision /etc/prusa-cam + quality.env (idempotent)"
-  "${SSH[@]}" "sudo install -d -o $PI_USER -g $PI_USER /etc/prusa-cam && \
-    [ -f /etc/prusa-cam/quality.env ] || printf 'CAM_WIDTH=1920\nCAM_HEIGHT=1080\n' > /etc/prusa-cam/quality.env"
+  "${SSH[@]}" "sudo install -d -o $SERVICE_USER -g $SERVICE_USER /etc/prusa-cam && \
+    { [ -f /etc/prusa-cam/quality.env ] || printf 'CAM_WIDTH=1920\nCAM_HEIGHT=1080\n' | sudo tee /etc/prusa-cam/quality.env >/dev/null; }"
 
   # WebRTC live view needs webrtcbin's ICE plugin (libgstnice.so). Install it here
   # so it lands on the real disk (this runs with the overlay disabled / in dev),
@@ -92,43 +115,31 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
   # RW probe and statvfs report it as writable.
   log "provision emulated SD (/mnt/sdcard) + SMB share"
   "${SSH[@]}" "sudo install -d /mnt/sdcard /mnt/sdcard/timelapse && \
-    sudo chown $PI_USER:$PI_USER /mnt/sdcard /mnt/sdcard/timelapse && \
+    sudo chown $SERVICE_USER:$SERVICE_USER /mnt/sdcard /mnt/sdcard/timelapse && \
     { [ -x /usr/sbin/smbd ] || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends samba >/dev/null 2>&1; } && \
     sudo install -d /etc/samba && \
-    printf '[sdcard]\n   path = /mnt/sdcard\n   browseable = yes\n   read only = no\n   guest ok = yes\n   force user = $PI_USER\n   create mask = 0644\n   directory mask = 0755\n' \
+    printf '[sdcard]\n   path = /mnt/sdcard\n   browseable = yes\n   read only = no\n   guest ok = yes\n   force user = $SERVICE_USER\n   create mask = 0644\n   directory mask = 0755\n' \
       | sudo tee /etc/samba/smb-sdcard.conf >/dev/null && \
     { grep -q 'include = /etc/samba/smb-sdcard.conf' /etc/samba/smb.conf 2>/dev/null || \
       printf '\ninclude = /etc/samba/smb-sdcard.conf\n' | sudo tee -a /etc/samba/smb.conf >/dev/null; } && \
     sudo systemctl enable --now smbd >/dev/null 2>&1 || true"
 
-  log "install rpicam-source.service if changed (template User=pi → $PI_USER)"
-  sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/rpicam-source.service" \
-    | "${SSH[@]}" "sudo tee /etc/systemd/system/rpicam-source.service >/dev/null && sudo systemctl daemon-reload"
-
-  log "install always-on Home Assistant RTSP service"
-  sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" \
-    "$SRC/systemd/prusa-ha-rtsp.service" \
-    | "${SSH[@]}" "sudo tee /etc/systemd/system/prusa-ha-rtsp.service >/dev/null && sudo systemctl daemon-reload"
-  "${SSH[@]}" 'sudo systemctl enable prusa-ha-rtsp.service >/dev/null 2>&1'
-
+  # Units are installed verbatim from the repo templates: they hard-code
+  # User=prusa-cam / /opt/prusa-cam, so no per-host sed templating remains.
+  log "install systemd units (verbatim) + data-ready gate"
+  for u in rpicam-source.service prusa-ha-rtsp.service prusa-rtsp.service \
+           prusa-cam.service bootlog.service pi-persist.service \
+           prusa-data-ready.service data-ready.target; do
+    install_unit "$u"
+  done
+  "${SSH[@]}" "sudo systemctl daemon-reload && \
+    sudo systemctl enable data-ready.target prusa-data-ready.service \
+      rpicam-source.service prusa-ha-rtsp.service prusa-rtsp.service \
+      prusa-cam.service pi-persist.service bootlog.service >/dev/null 2>&1 || true"
   # Persist a boot-reason/throttle snapshot to the real vfat boot partition: the
   # root overlay + volatile journal otherwise erase all evidence of an unexpected
   # reboot (see the reboot/throttling investigation in the gap tracker).
-  log "install bootlog.service (persist boot reason to /boot/firmware)"
-  sed -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/bootlog.service" \
-    | "${SSH[@]}" "sudo tee /etc/systemd/system/bootlog.service >/dev/null && sudo systemctl daemon-reload"
-  "${SSH[@]}" "chmod +x /home/$PI_USER/prusa-cam/bootlog.sh && \
-    sudo systemctl enable bootlog.service >/dev/null 2>&1 && \
-    sudo systemctl start bootlog.service >/dev/null 2>&1 || true"
-
-  # GAP-PERSIST-01: restore durable settings + bind-mount the timelapse store.
-  # Installed and enabled unconditionally but NOT started here: it is a no-op
-  # until the offline repartition creates /dev/mmcblk0p3 (RequiresMountsFor=/data).
-  log "install pi-persist.service (template SERVICE_USER → $PI_USER)"
-  sed -e "s|/home/pi/|/home/$PI_USER/|g" -e "s/SERVICE_USER=pi/SERVICE_USER=$PI_USER/" \
-    "$SRC/systemd/pi-persist.service" \
-    | "${SSH[@]}" "sudo tee /etc/systemd/system/pi-persist.service >/dev/null && sudo systemctl daemon-reload"
-  "${SSH[@]}" "sudo systemctl enable pi-persist.service >/dev/null 2>&1 || true"
+  "${SSH[@]}" 'sudo systemctl start bootlog.service >/dev/null 2>&1 || true'
 
   # Guarded activation: only when the /data partition already exists. The fstab
   # entry uses the partition's real PARTUUID and is skipped when already present,
@@ -140,18 +151,15 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
         printf 'PARTUUID=%s /data ext4 defaults,noatime 0 2\n' \"\$uuid\" | sudo tee -a /etc/fstab >/dev/null
         echo \"added /data fstab entry for \$uuid\"
       fi
-      sudo install -d /data/sdcard/timelapse /data/prusa-cam
-      sudo chown $PI_USER:$PI_USER /data/sdcard /data/sdcard/timelapse /data/prusa-cam
-      if findmnt -no TARGET /data >/dev/null 2>&1; then
-        sudo install -d /data/sdcard/timelapse /data/prusa-cam
-        sudo chown $PI_USER:$PI_USER /data/sdcard /data/sdcard/timelapse /data/prusa-cam
-      fi
+      sudo install -d -m 0755 /data/sdcard /data/sdcard/timelapse
+      sudo install -d -m 0750 /data/prusa-cam /data/prusa-cam/config /data/prusa-cam/releases /data/prusa-cam/backups /data/network/system-connections
+      sudo chown -R $SERVICE_USER:$SERVICE_USER /data/sdcard /data/prusa-cam /data/network
     else
       echo 'no /data partition yet; skipping persistence activation'
     fi"
 
   log "restart services"
-  "${SSH[@]}" 'sudo systemctl restart rpicam-source.service prusa-ha-rtsp.service && \
+  "${SSH[@]}" 'sudo systemctl restart data-ready.target rpicam-source.service prusa-ha-rtsp.service && \
     sudo systemctl try-restart prusa-rtsp.service && \
     sudo systemctl restart prusa-cam.service'
   sleep 5

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-command fresh-Pi provisioning for the impersonator — use after a reflash or SD recovery.
-# Installs apt deps, builds the venv, installs/enables the runtime units, and deploys the code.
+# Installs apt deps, creates the dedicated service account, builds the venv under $APP_ROOT,
+# installs/enables the runtime units verbatim, and deploys the code.
 # After it finishes: drop config.ini (the token) and the camera registers. Then optionally lock
 # the SD read-only with:  ./deploy.sh $PI --enable-overlay
 #
@@ -11,9 +12,17 @@ set -euo pipefail
 PI="${1:-${PI:-}}"
 [ -n "$PI" ] || { echo "usage: PI=user@host $0"; exit 2; }
 PI_USER="${PI%@*}"
+SERVICE_USER="${SERVICE_USER:-prusa-cam}"
+APP_ROOT="${APP_ROOT:-/opt/prusa-cam}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 SSH=(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "$PI")
 log() { printf '\n\033[1m» %s\033[0m\n' "$*"; }
+
+cat <<'EOF'
+NOTE: bootstrap.sh is a DEVELOPER / migration convenience only. It is NOT the
+supported public appliance installation path — that is the signed SD-card image,
+which also provisions the partition table, recovery, identity, and updates.
+EOF
 
 log "overlay must be OFF to provision a persistent system (writes must hit the real disk)"
 if "${SSH[@]}" 'findmnt -no FSTYPE / | grep -q overlay'; then
@@ -29,16 +38,24 @@ log "apt: gstreamer + libcamera/rpicam + python-gi + venv tooling"
   samba \
   python3-venv python3-pip rsync curl'
 
-log "python venv (--system-site-packages so gi/Gst are visible) + pip deps"
-"${SSH[@]}" 'mkdir -p ~/prusa-cam && python3 -m venv --system-site-packages ~/prusa-cam/venv && \
-  ~/prusa-cam/venv/bin/pip install -q --upgrade pip aiohttp python-socketio'
+log "create $SERVICE_USER service account + app root $APP_ROOT"
+"${SSH[@]}" "set -e
+  id -u $SERVICE_USER >/dev/null 2>&1 || \
+    sudo useradd --system --create-home --home-dir $APP_ROOT --shell /usr/sbin/nologin $SERVICE_USER
+  sudo usermod -aG video $SERVICE_USER
+  sudo install -d -o $SERVICE_USER -g $SERVICE_USER $APP_ROOT"
 
-log "install + enable systemd units (template User=pi/home/pi → $PI_USER)"
-for u in rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam; do
-  sed -e "s/^User=pi\$/User=$PI_USER/" -e "s#/home/pi/#/home/$PI_USER/#g" "$SRC/systemd/$u.service" \
-    | "${SSH[@]}" "sudo tee /etc/systemd/system/$u.service >/dev/null"
+log "python venv under $APP_ROOT (--system-site-packages so gi/Gst are visible) + pip deps"
+"${SSH[@]}" "sudo python3 -m venv --system-site-packages $APP_ROOT/venv && \
+  sudo $APP_ROOT/venv/bin/pip install -q --upgrade pip aiohttp python-socketio && \
+  sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_ROOT"
+
+log "install + enable systemd units (verbatim: User=prusa-cam / /opt/prusa-cam)"
+for u in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
+         prusa-cam.service pi-persist.service prusa-data-ready.service data-ready.target; do
+  "${SSH[@]}" "sudo install -m 0644 /dev/stdin /etc/systemd/system/$u" < "$SRC/systemd/$u"
 done
-"${SSH[@]}" 'sudo systemctl daemon-reload && sudo systemctl enable rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam'
+"${SSH[@]}" 'sudo systemctl daemon-reload && sudo systemctl enable data-ready.target prusa-data-ready.service rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam pi-persist'
 
 log "deploy code + provision /etc/prusa-cam + quality.env (reuses deploy.sh)"
 "$SRC/deploy.sh" "$PI" || true   # prusa-cam will crash-loop until config.ini exists — that's fine
@@ -46,7 +63,8 @@ log "deploy code + provision /etc/prusa-cam + quality.env (reuses deploy.sh)"
 cat <<EOF
 
 $(printf '\033[1m✓ bootstrap done.\033[0m')  Final manual step — the token secret is not in the repo:
-  scp config.ini  $PI:~/prusa-cam/config.ini      # or re-mint a token in Prusa Connect
+  scp config.ini $PI:/tmp/config.ini
+  ssh $PI "sudo install -o $SERVICE_USER -g $SERVICE_USER -m 0600 /tmp/config.ini $APP_ROOT/config.ini && rm -f /tmp/config.ini"
   ssh $PI 'sudo systemctl restart prusa-cam && journalctl -u prusa-cam -n 20 --no-pager'
   # expect: /c/info response … registered=True, and Snapshot: 200
 

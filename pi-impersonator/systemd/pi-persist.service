@@ -4,10 +4,12 @@ RequiresMountsFor=/data
 # True no-op before the offline repartition creates /data: without this the unit
 # would be "failed (dependency failed)" at every boot pre-partition.
 ConditionPathIsMountPoint=/data
-Before=rpicam-source.service prusa-cam.service prusa-rtsp.service
+# Run before the readiness gate and every camera/app unit so the durable layout
+# exists before it is verified or used (AC-2, AC-7).
+Before=prusa-data-ready.service data-ready.target rpicam-source.service prusa-cam.service prusa-rtsp.service prusa-ha-rtsp.service
 [Service]
 Type=oneshot
-Environment=SERVICE_USER=pi
-ExecStart=/home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/persist_restore.py
+Environment=SERVICE_USER=prusa-cam
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/persist_restore.py
 [Install]
 WantedBy=multi-user.target

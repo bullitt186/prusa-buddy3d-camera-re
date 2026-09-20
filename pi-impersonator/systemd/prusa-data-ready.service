@@ -1,0 +1,18 @@
+# One-shot root gate that proves the durable PERSIST partition is mounted at
+# /data, labelled, not read-only, and writable before any camera/app unit starts
+# (AC-7). A failure here leaves data-ready.target unstarted, so the units that
+# Require it do not start and the appliance stays in recovery instead of running
+# on the volatile overlay with a look-alike /data.
+[Unit]
+Description=Verify the durable PERSIST partition is mounted and writable
+RequiresMountsFor=/data
+After=local-fs.target pi-persist.service
+Before=data-ready.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/data_ready.py
+
+[Install]
+WantedBy=data-ready.target

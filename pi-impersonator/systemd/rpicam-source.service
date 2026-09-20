@@ -8,17 +8,19 @@
 # -v 0: rpicam-vid's default level-1 frame stats (#N fps exp ag dg) emit ~30 lines/s,
 # which floods the volatile journal and evicts prusa-cam logs within minutes. Level 0
 # silences them; a pipeline failure still surfaces as this unit restarting.
+# data-ready.target gates this unit on a real, writable PERSIST /data mount (AC-7).
 [Unit]
 Description=Persistent H264 camera source (TCP)
-After=network.target
+After=network.target data-ready.target
+Requires=data-ready.target
 
 [Service]
 Type=simple
-User=pi
+User=prusa-cam
 Environment=CAM_WIDTH=1920 CAM_HEIGHT=1080
 EnvironmentFile=-/etc/prusa-cam/quality.env
 EnvironmentFile=-/etc/prusa-cam/quality.live.env
-ExecStart=/bin/bash -c '/usr/bin/rpicam-vid -v 0 --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --profile baseline --intra 30 --flush --inline -o - | /home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/stream_mux.py'
+ExecStart=/bin/bash -c '/usr/bin/rpicam-vid -v 0 --codec h264 -t 0 --width ${CAM_WIDTH} --height ${CAM_HEIGHT} --framerate 30 --rotation 180 --profile baseline --intra 30 --flush --inline -o - | /opt/prusa-cam/venv/bin/python /opt/prusa-cam/stream_mux.py'
 Restart=always
 RestartSec=2
 
