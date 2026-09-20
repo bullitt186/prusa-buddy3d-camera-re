@@ -564,12 +564,16 @@ different nested `WebRtcSignal` envelope used by viewers.
 
 ### WebRtcConnectionType (6 fields)
 
-**Corrected 2026-09-20 (direct 3.1.6 decompiler):** fields 2/3 are **numeric bytes**, not
-strings. Sender `FUN_000be3f8` -> encoder `FUN_000be050`/`FUN_000bdd3c` populates field 1
-(client id string) and fields 2/3 with the candidate-type byte; fields 4/5/6 are not populated by
-that sender and their semantics are `[assumption]`/unknown. Candidate-type translator
-`FUN_000b5098`: 1=HOST, 2=SERVER_REFLEXIVE, 3=PEER_REFLEXIVE, 4=RELAYED, 0=UNDEFINED, else=UNKNOWN,
-forced to 6 when no candidate pair is selected.
+**Field types UNCONFIRMED (2026-09-20).** Sender `FUN_000be3f8` -> encoder `FUN_000be050`/
+`FUN_000bdd3c` populates field 1 (client-id string) and fields 2/3 with the candidate type;
+the candidate-type translator `FUN_000b5098` names them
+`HOST`/`SERVER_REFLEXIVE`/`PEER_REFLEXIVE`/`RELAYED`/`UNKNOWN`/`UNDEFINED` (and a forced value
+when no pair is selected). Fields 4/5/6 are not populated by that sender. **The wire form of
+fields 2/3 (numeric vs string) is not settled:** a live numeric encoding was rejected by the
+server with the `error` event `webrtc_connection_info - Error: Read past limit`, while an
+earlier revision documented strings. Do **not** send this event until a genuine capture (or the
+C++ message's `.proto`) settles it — the impersonator implements the sender but gates it off by
+default (`PRUSA_WEBRTC_CONNECTION_INFO=1` to experiment).
 
 ```protobuf
 message WebRtcConnectionType {

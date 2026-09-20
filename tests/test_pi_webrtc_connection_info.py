@@ -235,7 +235,9 @@ class WebRtcModuleWiringTests(unittest.TestCase, _AstHelpers):
         ))
         ready = self._function(self.tree, '_on_stats_ready')
         self.assertIsNotNone(self._call_named(ready, 'candidate_type_code'))
-        self.assertTrue(any(
+        # An unextractable stats shape must skip, not misreport a forced 6/6
+        # (the numeric encoding was also rejected live as "Read past limit").
+        self.assertFalse(any(
             isinstance(n, ast.Attribute) and n.attr == 'CANDIDATE_TYPE_NO_PAIR'
             for n in ast.walk(ready)
         ))

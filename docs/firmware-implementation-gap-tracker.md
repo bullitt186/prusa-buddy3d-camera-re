@@ -735,7 +735,15 @@ closing the gap.
 
 ### GAP-WEBRTC-06 — Emit `webrtc_connection_info`
 
-- [~] **P1 · Implemented (local; live Connect verification pending); RE anchors now confirmed**
+- [~] **P1 · Implemented but GATED OFF: live server rejected the numeric encoding (field types unconfirmed)**
+- **Live 2026-09-20:** with the numeric encoding (fields 2/3 as bytes) the Pi emitted
+  `{1: client_id, 2: 6, 3: 6}` after ICE completed and the server answered the `error` event
+  **`webrtc_connection_info - Error: Read past limit`** — so fields 2/3 are most likely
+  **strings**, not bytes (the original `protocol.md` note). The numeric-vs-string question must be
+  settled from a genuine capture or the C++ message's `.proto`; per the no-guess rule the sender is
+  kept but **disabled by default** (`PRUSA_WEBRTC_CONNECTION_INFO=1` gates it). Separately, the
+  GStreamer `get-stats` scan did not find the selected pair on the Pi (emitted a misreporting 6/6),
+  so the extractor now **skips** rather than misreport when the pair is not extractable.
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:**
   - The sender is **`FUN_000be3f8`** (the older `FUN_000a3998` citation is wrong). It logs
     `"Sending connection type event for client %s: %d <-> %d"` and

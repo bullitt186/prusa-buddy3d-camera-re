@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import subprocess
 import quality
 import webrtc_lifecycle
@@ -12,6 +13,14 @@ import threading
 
 Gst.init(None)
 log = logging.getLogger('prusa-cam.webrtc')
+
+# GAP-WEBRTC-06: the candidate-type fields' wire form is NOT confirmed. The live
+# server rejected a numeric encoding (fields 2/3 as bytes) with the `error` event
+# "webrtc_connection_info - Error: Read past limit", so the numeric-vs-string
+# question must be settled from a genuine capture (or the C++ message's .proto)
+# before we ship it. The sender and event stay implemented but are gated off by
+# default; enable with PRUSA_WEBRTC_CONNECTION_INFO=1 for an experiment.
+CONNECTION_INFO_ENABLED = os.environ.get('PRUSA_WEBRTC_CONNECTION_INFO', '') == '1'
 
 def _munge_offer(sdp_text):
     """Restructure the GStreamer offer to match the firmware's libdatachannel one.
@@ -379,6 +388,11 @@ class PrusaWebRTC:
         """
         if self._connection_info_sent or self._webrtc is None:
             return
+        if not CONNECTION_INFO_ENABLED:
+            # Wire form unconfirmed (live server rejected the numeric encoding);
+            # see the module constant. Do not send a guessed message.
+            log.debug('WebRTC connection info disabled (PRUSA_WEBRTC_CONNECTION_INFO != 1)')
+            return
         self._connection_info_sent = True
         try:
             promise = Gst.Promise.new_with_change_func(self._on_stats_ready)
@@ -405,25 +419,21 @@ class PrusaWebRTC:
             log.warning('WebRTC connection info: stats unavailable; skipping event')
             return
         types = self._selected_candidate_types_from(stats)
-        if types == 'unparseable':
-            # A selected pair exists but its candidate types could not be read
-            # (version-dependent stats shape) - skip rather than misreport 6/6.
+        if not isinstance(types, tuple):
+            # We cannot reliably distinguish "no selected pair" from an unknown
+            # stats shape, so skip rather than misreport 6/6. (The firmware's 6 is
+            # its own internal no-pair detection, which we do not have.)
             log.warning(
-                'WebRTC connection info: selected pair present but candidate '
-                'types unreadable; skipping event'
+                'WebRTC connection info: selected pair not extractable; skipping event'
             )
             return
-        if types == 'no-pair':
-            local_code = remote_code = webrtc_lifecycle.CANDIDATE_TYPE_NO_PAIR
-            log.info('WebRTC connection info: no selected candidate pair; using 6/6')
-        else:
-            local_typ, remote_typ = types
-            local_code = webrtc_lifecycle.candidate_type_code(local_typ)
-            remote_code = webrtc_lifecycle.candidate_type_code(remote_typ)
-            log.info(
-                f'WebRTC connection info: local={local_typ}->{local_code} '
-                f'remote={remote_typ}->{remote_code}'
-            )
+        local_typ, remote_typ = types
+        local_code = webrtc_lifecycle.candidate_type_code(local_typ)
+        remote_code = webrtc_lifecycle.candidate_type_code(remote_typ)
+        log.info(
+            f'WebRTC connection info: local={local_typ}->{local_code} '
+            f'remote={remote_typ}->{remote_code}'
+        )
         client_id = self._request_id
         if self._loop and self._on_connection_info:
             self._loop.call_soon_threadsafe(
@@ -433,11 +443,11 @@ class PrusaWebRTC:
 
     @staticmethod
     def _selected_candidate_types_from(stats):
-        """Extract ``(local_typ, remote_typ)``, ``'no-pair'`` or ``'unparseable'``.
+        """Extract ``(local_typ, remote_typ)`` or ``'unparseable'``.
 
-        ``'no-pair'`` -> the firmware forces 6/6; ``'unparseable'`` -> a selected
-        pair exists but its candidate types could not be read (version-dependent
-        stats shape), so the caller skips the event rather than misreporting 6/6.
+        Returns the tuple only when both candidate types were read; otherwise a
+        non-tuple sentinel, and the caller skips the event (a version-dependent
+        stats shape must never be misreported as "no pair").
         """
         found = {}
         for name, value in _structure_items(stats):
@@ -450,7 +460,7 @@ class PrusaWebRTC:
         _scan_candidate_types(stats, None, found)
         if 'local' in found and 'remote' in found:
             return found['local'], found['remote']
-        return 'no-pair'
+        return 'unparseable'
 
     def _check_disconnected(self):
         """Resolve a DISCONNECTED grace period after the timeout (GLib thread)."""
