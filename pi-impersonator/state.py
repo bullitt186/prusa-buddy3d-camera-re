@@ -59,6 +59,11 @@ class CameraState:
         self.webrtc_mode = 1        # 0=disabled / 1=enabled
         self.webrtc_status = 1      # 0=stopped / 1=running
         self.streaming = False      # true while a WebRTC peer is active
+        # GAP-WEBRTC-05: true while an inbound viewer ICE candidate of type
+        # "relay" has been seen (a TURN client is online). Firmware locks the
+        # global quality tier against raises while this is set; it is cleared on
+        # WebRTC stream end and peer teardown.
+        self.turn_online = False
         self.info_dirty = True
         # GAP-STATUS-04: detected timezone (the /etc/TZ content) reported in
         # status; empty until the web API detection runs at startup.

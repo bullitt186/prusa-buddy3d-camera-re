@@ -51,8 +51,10 @@ each verified live:
 dispatcher `FUN_000a7940`; the earlier `FUN_000a89e0` "handler" was not a function).
 Live-mapped: `tag8.1` = video quality (1=SD/2=HD/3=FHD), `tag3.4` = `light_control`
 (IR sun/moon/auto), `tag3.5` = `set_snapshot_upload_interval` (10..600), `tag3.10` =
-active print-job name. `tag3.11`/`tag3.12` (RTSP) are still **pending** (not yet
-mapped). The JSON parser is only the QR/manual-config path.
+`set_printing_job_name` (active print-job name). **Wave 2:** `tag3.7` is plausibly
+`set_volume` (5..100) `[assumption]`; `tag3.11`/`tag3.12` are **uvarints** and the earlier
+"RTSP candidate" label is **refuted** (the RTSP mode is a small enum toggle elsewhere). The
+JSON parser is only the QR/manual-config path.
 
 **Capabilities pruned:** `IrMode`, `SpeakerVolume`, `FanControl` removed from the
 `/c/info` features (no hardware); `MicroSd` kept and backed by an emulated SD at
@@ -242,10 +244,10 @@ This is necessary for an offer to work after enrollment is unblocked, but cannot
 | Camera identity / auth (Socket.IO) | ✅ Working | `camera_authentication` → ACK `0` **[confirmed]** |
 | Camera info / metadata (`/c/info`) | ✅ Working | 200; name, firmware, model, Wi-Fi shown in app **[confirmed]** |
 | Appears online & paired, survives reboot | ✅ Working | web + mobile app; `Restart=always` **[confirmed]** |
-| Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC, 1080p, `--rotation 180` **[confirmed]** |
-| Dynamic video-quality tier-switching | ⚠️ Partial | reconfiguration plumbing works and the raw-byte mapping is now `{5:1,6:2,7:3}` (implemented + unit-tested); `GAP-QUALITY-01` live verification pending, `GAP-QUALITY-02` event/flag wiring still unrecovered **[confirmed from 3.1.6]** |
+| Local RTSP live view | ✅ Working | `rtsp://<pi>:8554/live` in VLC, 1080p, `--rotation 180` **[confirmed]**; the firmware default is `554` (`FUN_000b04d4`), so `8554` is a documented privileged-port Pi exception that Connect consumes (GAP-RTSP-01 closed) |
+| Dynamic video-quality tier-switching | ⚠️ Partial | reconfiguration plumbing works and the raw-byte mapping is now `{5:1,6:2,7:3}` (implemented + unit-tested); the TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`); `GAP-QUALITY-01` live verification pending, `GAP-QUALITY-02` per-payload flag documented but not read **[confirmed from 3.1.6]** |
 | Classified as a genuine Buddy camera | ❌ No | listed under "Other cameras" **[confirmed]** — a UI classification only. It was never the WebRTC blocker; the superseded "registry-membership gate" theory is in `dead-ends.md`, and genuine cameras are `origin: OTHER` too. |
-| Live WebRTC stream (app + browser) | ✅ Working | offer/answer/ICE completes and video plays live in both the Prusa app and the browser **[confirmed 2026-09-19/20]** |
+| Live WebRTC stream (app + browser) | ✅ Working | offer/answer/ICE completes and video plays live in both the Prusa app and the browser **[confirmed 2026-09-19/20]**; the video-only offer is accepted (audio optional, GAP-WEBRTC-07 closed) and the inbound field names are confirmed (GAP-WEBRTC-05) |
 
 ---
 
@@ -270,8 +272,10 @@ This is necessary for an offer to work after enrollment is unblocked, but cannot
   correct: SD 640×480 / HD 1280×720 / FHD 1920×1080. The raw
   `change_video_size`/`save_video_size` handler now maps bytes correctly (`{5:1,6:2,7:3}`,
   implemented + unit-tested). Firmware 3.1.6 uses `5=SD`, `6=HD`, `7=FHD`, and its shared
-  handler persists only when a callback flag is nonzero. Until `GAP-QUALITY-01` live
-  verification and `GAP-QUALITY-02` event/flag wiring close, raw-event parity is not confirmed.
+  handler persists only when a **per-payload** callback flag is nonzero (Wave 2). The
+  TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`).
+  Until `GAP-QUALITY-01` live verification and `GAP-QUALITY-02` flag wiring close, raw-event
+  parity is not confirmed.
 
 ### Streaming latency (measured 2026-07-14, [confirmed])
 
@@ -423,8 +427,12 @@ path; `webrtc` is wired to `webrtc.py`. Trigger tag 9 (reboot) dispatches throug
 (60 s), narrowly scoped `systemctl reboot` path in `device_control.py`; a second request inside
 the window or a failed command is logged and never reported as success. IR/speaker/fan/MicroSD
 are represented as unavailable on `CameraState`, and `configuration.light_control` is logged and
-rejected instead of being reported as applied; the `camera_status` hardware bytes remain unchanged
-pending the nested descriptor (`GAP-DEVICE-02`).
+rejected instead of being reported as applied. **GAP-DEVICE-02 closed (Wave 2):** the truthful
+`MicroSd` status is the `extended_status.4` storage block (already emitted correctly), and the
+remaining `camera_status` fields are pruned (`ir_mode`/`speaker_volume`) or moot, so the pinned
+hardware bytes are harmless. **TURN/scoped-quality lock implemented:** while a relay viewer
+candidate is online, `state.turn_online` locks the global quality tier against raises via
+`quality.quality_change_allowed`.
 
 **Single-camera contention:** libcamera allows one client. The snapshot loop now gates on active
 RTSP clients (via `/proc/net/tcp` on :8888) and on the WebRTC flag, so local RTSP viewing no

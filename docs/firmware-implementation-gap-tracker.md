@@ -66,11 +66,11 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Snapshot upload | Working (live) | Endpoint and identity headers match; the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented (GAP-SNAPSHOT-01..04); the concurrent-stream half of GAP-SNAPSHOT-04 remains open. |
 | Socket.IO authentication | Working, stable (live) | Auth field order is `(token, fingerprint)` and the success ACK is `0` (`1` = not authorized, `2` = error joining session). **Superseded:** the "server closes the WebSocket in the same tick (`Server sent close packet data 0`)" behaviour was the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified 2026-09-20) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt (`signaling.supervise`, `02918b8`). Residual long-run stability is unproven, but no server-side close has been observed since the fix. |
 | Initial metadata messages | Matched (live) | Core envelopes work; dynamic status values and request-id correlation are implemented (GAP-STATUS-01/02). |
-| Trigger handling | Implemented (policy actions declined) | Recovered descriptor `0x3f6f14` decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); timelapse enable/disable/make/file-list are implemented (GAP-TIMELAPSE-01); OTA returns an explicit truthful decline (GAP-OTA-01). Only per-action `client_trigger` result codes remain unimplemented. |
-| Configuration handling | Mostly wired | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality, `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), camera name, and RTSP/WebRTC mode are applied and persisted; only the `tag3.11/12` RTSP candidate mapping remains unmapped. |
-| RTSP | Partial | Local stream works; configuration-form mode changes are applied and persisted (GAP-RTSP-02). The firmware default and some command semantics still need a final evidence check (GAP-RTSP-01). |
-| WebRTC | Working (live); connection reporting implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser), lifecycle/teardown clears `state.streaming` and resumes snapshots, and the existing encoder is shared. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending); the inbound policy fields (GAP-WEBRTC-05) remain open with only RE-backed, Connect-observed fields eligible for enforcement. |
-| OTA/timelapse/device controls | Implemented | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline; timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD). |
+| Trigger handling | Implemented (policy actions declined); `client_trigger` semantics recovered, emission deferred | Recovered descriptor `0x3f6f14` decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); timelapse enable/disable/make/file-list are implemented (GAP-TIMELAPSE-01); OTA returns an explicit truthful decline (GAP-OTA-01). The `client_trigger` result tags are now recovered (tag5 = result/error code, tag6 = upgrade/progress value, tag3 = timelapse-video-make status) but the string-tag message split is still `[assumption]`, so **emission stays deferred** (GAP-SIO-01/TRIGGER-01). |
+| Configuration handling | Mostly wired | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality, `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), `set_printing_job_name`, camera name, and RTSP/WebRTC mode are applied and persisted. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`; `tag3.11/12` are uvarints and the "RTSP candidate" label is **refuted**; the RTSP mode is a small enum toggle elsewhere. |
+| RTSP | Working (local); port exception documented | Local stream works on the Pi's intentional `8554`; configuration-form mode changes are applied and persisted (GAP-RTSP-02). GAP-RTSP-01 **closed**: the shipped firmware default is `554` (`FUN_000b04d4` logs `"RTSP server started on port %d"` with the literal `0x22a`), and `8554` is a documented privileged-port-avoidance Pi exception that Connect consumes. |
+| WebRTC | Working (live); policy fields decoded; TURN quality lock implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser), lifecycle/teardown clears `state.streaming` and resumes snapshots, and the existing encoder is shared. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending). The inbound 9-field names (GAP-WEBRTC-05) are now **confirmed** (tag5 msg type, tag7 client type, tag9.1-5 quality/FPS/plan/TTL/scope); transport-policy/TTL/FPS/plan/scope remain decoded-but-not-enforced because Connect sends only a subset. The TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`). Video-only is accepted (GAP-WEBRTC-07 closed). |
+| OTA/timelapse/device controls | Implemented | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline; timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD), and its truthful status is the `extended_status.4` storage block, not `camera_status` (GAP-DEVICE-02 closed). |
 
 ## How to use the decompiled firmware evidence
 
@@ -442,14 +442,14 @@ These are explicit recovery prerequisites, not permission to guess:
 
 | Area | Known exactly | Still required before implementation |
 |---|---|---|
-| Trigger dispatcher | **Recovered 2026-09-18:** descriptor `0x3f6f14` (13 fields, tags 1–5/8–15) and the `FUN_000a963c` per-field `== 1`/`== 2` dispatch; `trigger.py` implements it. **2026-09-20:** result event is the `client_trigger` EVENT with descriptor `0x3f6f58` (not an ack) | Tag 13 string semantics; multi-field processing order; which `client_trigger` tag carries code/progress/message |
-| Configuration | **Resolved 2026-09-19: nested protobuf** (descriptor `0x3f73a4`, dispatcher `FUN_000a7940`); live-mapped `tag8.1` = video quality and top-level field 2 = `set_timelaps_interval` (`FUN_000a7940` logs `"Timelapse interval: %d seconds"`); the nlohmann JSON parser is only the QR/manual-config path. **2026-09-20:** `tag3` descriptor `0x3f6d2c` (11 fields) recovered | `tag3.11/12` are uvarints, not confirmed RTSP; a redacted golden capture |
-| Status | Top-level fields, struct size, many getters/translations, request correlation, and now the nested descriptor tables (dumpable) | Semantic tag-to-field annotation for every claimed nested value |
-| ICE config | The inbound `webrtc` message is 9 fields with nested submessages (`0x3f7680`, handler `FUN_000a43e0`), **not** the flat 12-field log string; tag4/tag8/tag9 offsets and sizes recovered | Exact name->tag binding for the 7 log names (`[assumption]`) |
+| Trigger dispatcher | **Recovered 2026-09-18:** descriptor `0x3f6f14` (13 fields, tags 1–5/8–15) and the `FUN_000a963c` per-field `== 1`/`== 2` dispatch; `trigger.py` implements it. **2026-09-20:** result event is the `client_trigger` EVENT with descriptor `0x3f6f58` (not an ack). **Wave 2:** tag5 = result/error code, tag6 = upgrade/progress value, tag3 = timelapse-video-make status | Tag 13 string semantics; multi-field processing order; the message/subtype split among the string tags 1/2/4 `[assumption]` |
+| Configuration | **Resolved 2026-09-19: nested protobuf** (descriptor `0x3f73a4`, dispatcher `FUN_000a7940`); live-mapped `tag8.1` = video quality and top-level field 2 = `set_timelaps_interval` (`FUN_000a7940` logs `"Timelapse interval: %d seconds"`); the nlohmann JSON parser is only the QR/manual-config path. **2026-09-20:** `tag3` descriptor `0x3f6d2c` (11 fields) recovered. **Wave 2 confirmed:** `tag3.4` = `light_control`, `tag3.5` = `set_snapshot_upload_interval` (10..600), `tag3.10` = `set_printing_job_name`. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`. | `tag3.11/12` are **uvarints** — the "RTSP candidate" label is **refuted**; the RTSP mode is a small enum toggle elsewhere (`iStack_74` 1/2/3, exact tag `[assumption]`); a redacted golden capture |
+| Status | Top-level fields, struct size, many getters/translations, request correlation, and now the nested descriptor tables (dumpable). `extended_status.4` is the truthful SD storage block; `camera_status` fields 1/3 are `ir_mode`/`speaker_volume` (features pruned) | Semantic tag-to-field annotation for every claimed nested value; `camera_status` fields 4-6 unresolved but moot (GAP-DEVICE-02 closed) |
+| ICE config | The inbound `webrtc` message is 9 fields with nested submessages (`0x3f7680`, handler `FUN_000a43e0`), **not** the flat 12-field log string; tag4/tag8/tag9 offsets and sizes recovered. **Wave 2 name binding confirmed:** tag2 = client id, tag4.1 = SDP, tag5 = msg type, tag7 = client type, tag8.2 = transport policy, tag8.3 = TTL, tag9 submessage (`0x3f7624`, 5 uvarints) = tag9.1 quality / tag9.2 FPS / tag9.3 plan / tag9.4 TTL / tag9.5 scope; "VideoCfg" hardcoded to 1 | Enforcement only: transport policy/TTL/FPS/plan/scope are decoded but **not enforced** (Connect sends only a subset); do not guess the unobserved fields |
 | Timelapse list | **Resolved 2026-09-19:** descriptor `0x3f701c` field 1 = `"<page>;<total>\n<chunk>"`, field 2 = HTTP token, field 3 = request_id (optional), field 4 never set; `FUN_000a1fa8` sender; `FUN_000ad7ec` composes `<name>;<status>\n` entries from the `*.avi` scan (`FUN_000ac934`) + `.timelapse_videos.csv` status (`FUN_000ac134`, default `U`) | None for the envelope; an empty list sends no message |
-| `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` (strings 1/2/4, uvarints 3/5/6); emitted as a Socket.IO **event**, ack callbacks are the server receipt ack; nine sender wrappers recovered | Which tag carries code vs progress vs message is `[assumption]`; exact payload fixtures |
-| RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
-| WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
+| `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` (strings 1/2/4, uvarints 3/5/6); emitted as a Socket.IO **event**, ack callbacks are the server receipt ack; nine sender wrappers recovered. **Wave 2 confirmed:** tag5 = result/error code (`FUN_000a2d68`=2, `FUN_000a2ca0`=5), tag6 = upgrade/progress value (`FUN_000a2e3c`=1, `FUN_000a2fec`=2, `FUN_000a2f80`=3), tag3 = timelapse-video-make status (`FUN_000a2bbc`=1 IN_PROGRESS / 2 FINISHED); tag1 = constant, tag4 = `FUN_0008286c()` (token-shaped), tag2 = shared global | The message/subtype split among the string tags 1/2/4 is `[assumption]`; emission is **deferred** until those strings are pinned and a consumer exists (this Connect version exposes no make-video/file-list UI) |
+| RTSP port | **Resolved Wave 2 [confirmed]:** the shipped firmware default is `554` (`FUN_000b04d4` logs `"RTSP server started on port %d"` with the literal `0x22a`=554). The Pi intentionally listens on `8554` (privileged-port avoidance) and advertises `rtsp://<ip>:8554/live`, which Connect consumes (the local stream works) | Documented intentional Pi exception; no firmware-parity change |
+| WebRTC audio | **Resolved Wave 2 [confirmed]:** the Pi offers video-only and the stream plays live in both the app and the browser, so Connect accepts a video-only offer | Audio is optional/not required; video-only is intentional (GAP-WEBRTC-07 closed) |
 | Signaling session lifecycle (residual long-run question) | **Superseded 2026-09-20:** the observed "server ACKs `camera_authentication` (ACK `0`) then closes the WebSocket in the same tick (`Server sent close packet data 0`)" was caused by the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt and exponential backoff (15s→120s), and drops the session on a rejected ACK/exception so the supervisor retries (`signaling.supervise`/`_drop_session`). | Whether the service can still be closed by a server-side eligibility/session policy over a long run is **not proven**. **Ruled out 2026-09-19:** handshake URL (`param_3` is an empty map; only `&t=` which engineio already sends), token `origin` (re-registered via the Buddy3D flow, `/c/info` `origin` went `OTHER`→`WEB`, close persists), post-auth pacing (immediate send and no-ACK batching both close), headers/transport, and stale-session resume. The post-auth-burst fix removes the known cause; any remaining close would need a fresh capture. |
 
 ### Gap-to-firmware cross-reference
@@ -460,13 +460,13 @@ closing the gap.
 
 | Gap | Primary firmware evidence | Remaining ambiguity, if any |
 |---|---|---|
-| `GAP-TRIGGER-01` | `FW-TRIGGER-STRINGS`; recovered descriptor `0x3f6f14` in `trigger.py`; `client_trigger` string at `lp_app.strings:10503` | Per-action result subtype (`client_trigger`) required |
-| `GAP-CONFIG-01` | `FW-CONFIG` and the exact dispatch table above; `tag3` descriptor `0x3f6d2c` (11 fields) | `tag3.11/12` are uvarints; the "RTSP candidate" label is `[assumption]` |
+| `GAP-TRIGGER-01` | `FW-TRIGGER-STRINGS`; recovered descriptor `0x3f6f14` in `trigger.py`; `client_trigger` string at `lp_app.strings:10503`; Wave-2 tag semantics (tag5 code / tag6 progress / tag3 timelapse status) | String-tag message split `[assumption]`; emission deferred until pinned and a consumer exists |
+| `GAP-CONFIG-01` | `FW-CONFIG` and the exact dispatch table above; `tag3` descriptor `0x3f6d2c` (11 fields); Wave-2 confirmed `tag3.4`/`tag3.5`/`tag3.10` | `tag3.11/12` are uvarints — "RTSP candidate" **refuted**; `tag3.7` = `set_volume` `[assumption]`; RTSP mode enum `iStack_74` exact tag `[assumption]` |
 | `GAP-WEBRTC-01` | WebRTC contract above; `FW-WEBRTC-GATE:54-101` copies ICE/session data | Nested `IceConfig` descriptor required |
 | `GAP-WEBRTC-02` | `FW-SNAPSHOT:62-77`; `FW-WEBRTC-GATE:79-101` | Pi sharing architecture is implementation-specific |
 | `GAP-WEBRTC-03` | `FW-WEBRTC-GATE`; peer queue at `101`; mode stop path `FW-WEBRTC-MODE:35-40` | Exact peer TTL worker should be traced while implementing |
 | `GAP-WEBRTC-04` | `FW-WEBRTC-MODE`, exact pseudocode above | None for enable/disable behavior |
-| `GAP-WEBRTC-05` | Descriptor `0x3f7680` (9 fields; handler `FUN_000a43e0`); `FW-WEBRTC-GATE:54-101`; TURN lock `FUN_000a7940`->`FUN_000b5ad4`/`FUN_000b4f90` (flag at singleton+0x278) | Exact name->tag binding for the 7 log names `[assumption]`; only Connect-observed fields may be enforced |
+| `GAP-WEBRTC-05` | Descriptor `0x3f7680` (9 fields; handler `FUN_000a43e0`); tag9 submessage `0x3f7624` (5 uvarints); `FW-WEBRTC-GATE:54-101`; TURN lock `FUN_000a7940`->`FUN_000b5ad4`/`FUN_000b4f90` (flag at singleton+0x278), implemented via `state.turn_online` + `quality.quality_change_allowed` | Field names **confirmed** (tag5 msg type, tag7 client type, tag2 client id, tag4.1 SDP, tag8.2 transport policy, tag8.3 TTL, tag9.1-5 quality/FPS/plan/TTL/scope, VideoCfg=1). Transport policy/TTL/FPS/plan/scope are decoded but **not enforced** (Connect sends only a subset); only Connect-observed fields may be enforced |
 | `GAP-WEBRTC-06` | Sender `FUN_000be3f8`; encoder `FUN_000be050`/`FUN_000bdd3c`; candidate translator `FUN_000b5098`; descriptor `0x3f65c8` | GStreamer selected-pair extraction is version-specific (best-effort, skips if unavailable) |
 | `GAP-STATUS-01` | `FW-STATUS`, translation table above | Some nested tag annotations still require fixture |
 | `GAP-STATUS-02` | `FW-STATUS:413-418`; `FW-PB-VERSION:60-65` | Initial SID versus requested correlation needs fixture |
@@ -475,9 +475,9 @@ closing the gap.
 | `GAP-INFO-01` | `FW-INFO-BUILD`; `FW-INFO-LOOP:42-61` | None for retry/dirty behavior |
 | `GAP-CAP-01` | `FW-FEATURES`; feature builder call `FW-INFO-BUILD:213-227` | Capability-removal effect needs live Connect test |
 | `GAP-QUALITY-01` | `FW-QUALITY-PB`, `FW-QUALITY-DIRECT`, `FW-QUALITY-DIMS` | None; mapping is exact |
-| `GAP-QUALITY-02` | Live-change branches `FW-QUALITY-DIRECT:32-109`; persistence flag branches at `46-51,68-73,93-98` | Confirm which indirectly registered Socket.IO callback supplies flag `0` versus `1` |
+| `GAP-QUALITY-02` | Live-change branches `FW-QUALITY-DIRECT:32-109`; persistence flag branches at `46-51,68-73,93-98` | The flag is **per-payload** for `change_video_size`, not a registration-time constant; best hypothesis `save_video_size`=persist / `change_video_size`=live-only `[assumption]`; do not guess a flag |
 | `GAP-QUALITY-03` | Current-value reads `FW-QUALITY-DIRECT:22-31`; status getter `FW-STATUS:386-399` | None for shared-state requirement |
-| `GAP-RTSP-01` | `FW-RTSP-INIT:24-42`; status URL `FW-STATUS:331-362` | Default port still requires config/live evidence |
+| `GAP-RTSP-01` | `FW-RTSP-INIT:24-42`; status URL `FW-STATUS:331-362`; default `554` from `FUN_000b04d4` (`"RTSP server started on port %d"`, literal `0x22a`) | **Closed [x]:** 8554 is an intentional Pi exception (privileged-port avoidance), consumed by Connect |
 | `GAP-RTSP-02` | `FW-RTSP-INIT`; direct/config action table in `FW-CONFIG` | Callback bodies are split by Ghidra and should be retyped |
 | `GAP-SNAPSHOT-03` | Snapshot capture path `FW-SNAPSHOT:62-77`; libjpeg quality 95 trace in `journal/findings.md:893-899` | Reconfirm quality argument if snapshot backend is replaced |
 | `GAP-SNAPSHOT-04` | Snapshot timer `FW-INFO-LOOP:64-94`; capture `FW-SNAPSHOT:62-77` | Concurrent Rockchip channels do not prescribe Pi architecture |
@@ -489,8 +489,8 @@ closing the gap.
 | `GAP-OTA-01` | `FW-CONFIG:174-192`; `start_fw_update` at `lp_app.strings:15084`; OTA endpoint/response keys in `journal/findings.md:1173-1181` | Full OTA state machine still needs focused call-path annotation |
 | `GAP-TIMELAPSE-01` | `FW-TIMELAPSE-SEND`, `FW-TIMELAPSE-REGISTER`; action strings `lp_app.strings:15309-15310` | None for the list envelope; make-video/list not yet exercised by the app |
 | `GAP-DEVICE-01` | `reboot_device` at `lp_app.strings:14127`; trigger dispatcher recovery item | Trigger enum/result response required |
-| `GAP-DEVICE-02` | `camera_status` descriptor `0x3f6cd0` (6 fields); `FW-CONFIG:193-228`; advertised list from `FW-FEATURES` | Tag->hardware binding needs sender `FUN_000a1394`; hardware absence is intentional |
-| `GAP-WEBRTC-07` | Codec/SDP strings summarized in `journal/findings.md:1040-1057` | Whether Connect requests audio needs a current offer |
+| `GAP-DEVICE-02` | `camera_status` descriptor `0x3f6cd0` (6 fields); `FW-CONFIG:193-228`; advertised list from `FW-FEATURES`; truthful `MicroSd` is in `extended_status.4` | **Closed [x]:** `camera_status` fields 1/3 are `ir_mode`/`speaker_volume` (features pruned); fields 4-6 unresolved but moot; no action |
+| `GAP-WEBRTC-07` | Codec/SDP strings summarized in `journal/findings.md:1040-1057` | **Closed [x]:** the Pi's video-only offer plays live in the app and browser, so Connect accepts video-only; audio is optional/not required |
 | `GAP-IDENTITY-01` | `FW-ID-MAC`, `FW-ID-SEED`, `FW-ID-MD5` | None for algorithm; persistence policy is Pi-specific |
 | `GAP-IDENTITY-02` | `FUN_00096cd8` (generateFingerPrint), `FW-ID-MAC`/`FW-ID-SEED`/`FW-ID-MD5`; `/c/info` use at `FW-INFO-BUILD:242-251` | **Resolved 2026-09-20:** already `wlan0`-MAC-derived with the token bound (live ACK `0`, `/c/info` 200); the runbook in `next-steps.md` applies only if the fingerprint is ever changed |
 | `GAP-IDENTITY-03` | MAC source from `FUN_00096cd8`/`FW-ID-MAC`; model table in `firmware-3.1.6.md` | **Closed 2026-09-20:** firmware does not inspect the OUI; the Pi-vendor OUI is a documented per-device difference and the registry-gate theory is superseded |
@@ -498,7 +498,7 @@ closing the gap.
 | `GAP-STATUS-04` | Time/status getter block `FW-STATUS:271-301` | Exact reported string needs getter rename/fixture |
 | `GAP-NETWORK-01` | Network getter block `FW-STATUS:214-234`; `/c/info` network getters `FW-INFO-BUILD:145-173` | Signal conversion helper needs focused trace |
 | `GAP-HTTP-03` | Long-running service loop `FW-INFO-LOOP`; HTTP build/send paths in `FW-INFO-BUILD` and `FW-SNAPSHOT` | Connection reuse is partly inside the bundled HTTP library |
-| `GAP-SIO-01` | `client_trigger` at `lp_app.strings:10503`; sender variants listed in `journal/findings.md:376-381` | Six-field descriptor subtype enums require annotation |
+| `GAP-SIO-01` | `client_trigger` at `lp_app.strings:10503`; sender variants listed in `journal/findings.md:376-381`; Wave-2 tag semantics (tag5 code / tag6 progress / tag3 timelapse status) | String-tag message/subtype split `[assumption]`; emission deferred until pinned and a consumer exists |
 
 ## P0 — core operation gaps
 
@@ -512,6 +512,16 @@ closing the gap.
   space / timelapse SD not mounted / RTSP start failed; FW upgrade progress 1..6;
   timelapse-video-make status 1 IN_PROGRESS / 2 FINISHED), but **which tag carries code vs
   progress vs message is unresolved** `[assumption]` — do not implement a wire format yet.
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** the `client_trigger`
+  descriptor `0x3f6f58` tag semantics are now recovered — **tag5 uvarint = result/error code**
+  (`FUN_000a2d68`=2, `FUN_000a2ca0`=5), **tag6 uvarint = upgrade/progress value** (`FUN_000a2e3c`=1,
+  `FUN_000a2fec`=2, `FUN_000a2f80`=3), **tag3 uvarint = timelapse-video-make status**
+  (`FUN_000a2bbc`=1 IN_PROGRESS / 2 FINISHED). tag1 = constant, tag4 = `FUN_0008286c()`
+  (token-shaped), tag2 = a shared global. The message/subtype split among the string tags 1/2/4
+  remains `[assumption]`. It is emitted as a Socket.IO **event**, not an ack. **Do not implement a
+  wire emission:** the string tags are unresolved and this Connect version exposes no
+  make-video/file-list UI to consume it; emission is deferred until the string tags are pinned and
+  a consumer exists.
 - **Firmware behavior:** decodes the trigger type and performs only the requested action: get
   features, get status, get protocol information, get snapshot, enable/disable snapshot upload,
   enable/disable timelapse, make timelapse video, list timelapse files, reboot, start firmware
@@ -553,11 +563,17 @@ closing the gap.
   **4 uvarint @0x1c = `light_control`**, **5 uvarint @0x20 = `set_snapshot_upload_interval`
   (10..600)**, 7 uvarint @0x24, 8 uvarint @0x28, 9 uvarint @0x2c, **10 string @0x30 =
   `set_printing_job_name`**, **11 uvarint @0x38**, **12 uvarint @0x3c**. Because tags 11/12 are
-  **uvarints**, the tracker's earlier "RTSP candidate" label for them is **unconfirmed**
-  `[assumption]`; do not implement an RTSP mapping from them without a genuine payload. The
+  **uvarints**, the tracker's earlier "RTSP candidate" label for them is **unconfirmed** here and
+  **refuted** in Wave 2 (below); do not implement an RTSP mapping from them. The
   dispatch-name pool also includes `set_volume` (5..100) + `play_voice`, `set_camera_name`,
   `set_rtsp_server_mode` (AUTO/ON/OFF), `set_webrtc_mode`, `set_timelaps_interval`,
   `set_timelaps_video_fps`, and the quality+TURN lock.
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** `tag3.4` = `light_control`,
+  `tag3.5` = `set_snapshot_upload_interval` (10..600), and `tag3.10` = `set_printing_job_name` are
+  confirmed. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`. **Tags `3.11`/`3.12` are
+  uvarints and the "RTSP candidate" label is REFUTED/unconfirmed** — do not implement an RTSP
+  mapping there. The RTSP mode is a small enum toggle elsewhere (`iStack_74` 1/2/3); the exact tag
+  remains `[assumption]`.
 - **Recovered (2026-09-19, direct decompile):** the config dispatcher is `FUN_000a7940` (`0xa7940`-`0xa885b`; Ghidra had not defined it as a function — recovered by forcing a function at the ARM prologue `push {r4-r9,sl,fp,lr}` and decompiling). It decodes descriptor `0x3f73a4` and dispatches by name: **top-level field 2 (struct offset `0x14`) = `set_timelaps_interval`** (dispatcher logs `"Timelapse interval: %d seconds"`), field 8 = video quality (`Video quality: %d`), the field-9 region = `set_timelaps_video_fps` (`"Timelapse video FPS: %d"`), and field 5 = `set_webrtc_mode` / `set_rtsp_server_mode`. Live Connect sends `configuration {2: <seconds>}` when the timelapse interval changes; `main.py` now maps it to `state.set_timelapse_interval` (1..3600).
 - **Implementation:** `main.py`'s `configuration` handler now parses JSON only (the generic protobuf fallback and all numeric-tag lookups are removed) and dispatches the recovered table exactly: `rtsp` on/off, `webrtc` on/off (with the paired `webrtc on → RTSP disabled` rule), `video_quality` sd/hd/fhd, `light_control` auto/night/day, `camera_name`, `snapshot_interval` 10..600, `start_fw_update` start, and the leading `code` rejecting `"42"`/`"66"`.
 - **Still open:** a redacted golden JSON capture from a genuine 3.1.6 device to pin exact value casing; `start_fw_update` remains a truthful no-op (owner decision).
@@ -570,10 +586,10 @@ closing the gap.
   `set_snapshot_upload_interval` (10..600), and the JSON name-keyed fields (`camera_name`,
   `rtsp`, `webrtc` incl. the paired `webrtc on → RTSP disabled` rule, `video_quality`,
   `start_fw_update` decline, `code` guard). `tag3.11/12` are logged as an unmapped candidate;
-  they are **uvarints** (`0x3f6d2c`), so the earlier "RTSP candidate" reading is only
-  `[assumption]`.
+  they are **uvarints** (`0x3f6d2c`), so the earlier "RTSP candidate" reading is **refuted**
+  (Wave 2); the RTSP mode is a small enum toggle elsewhere.
 - **Connect impact (resolved):** live setting changes are applied and persisted rather than
-  misidentified; only the `tag3.11/12` mapping is unknown (logged, not guessed).
+  misidentified; the `tag3.11/12` mapping remains unknown and is logged, not guessed.
 - **Before (superseded):** first attempted JSON decoding, then applied a generic flat protobuf
   decoder with guessed numeric tags, no presence tracking, enum types, signed integer handling,
   or nested-message schema; a valid Connect configuration payload could be misidentified,
@@ -699,7 +715,7 @@ closing the gap.
 
 ### GAP-WEBRTC-05 — Honor transport policy, TTL, SDP plan, scoped quality, FPS and scope
 
-- [ ] **P1 · Open; descriptor and enforcement path now confirmed, per-field name binding still `[assumption]`**
+- [~] **P1 · TURN/scoped-quality lock implemented; remaining policy fields confirmed but not enforced**
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:**
   - Descriptor **`0x3f7680`** (9 fields): 1/2/3 strings (token/client/session); **4 submessage @0x1c
     (16 B, SDP/candidate)**; **5/6/7 uvarints @0x2c/0x30/0x34**; **8 submessage @0x3c (16 B, ICE
@@ -713,23 +729,39 @@ closing the gap.
     branch calls `FUN_000b5ad4` -> `FUN_000b4f90` reads the "TURN client online" flag at
     **singleton+0x278**; if 0 -> allowed; else a cap check `FUN_000b51e8`; apply `FUN_000b4e98`
     (writes singleton+0x130). Log string `DAT_000a89c4`.
-  - The exact name->tag binding for the 7 log names remains **[assumption]** — do not implement
-    policy enforcement for unbound fields.
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** the per-field names are
+  now recovered from the handler `FUN_000a43e0` + descriptors — **tag7 = Client type, tag5 = Msg
+  type, tag2 = client id, tag4.f1 = SDP, tag8.2 = Transport policy, tag8.3 = TTL**, and the tag9
+  submessage (`0x3f7624`, 5 uvarints) = **tag9.1 Quality, tag9.2 FPS, tag9.3 Plan, tag9.4 TTL,
+  tag9.5 Scope**; "VideoCfg" is hardcoded to `1`. **Note the TURN lock above.** Transport
+  policy/TTL/FPS/plan/scope are **decoded but not enforced** (Connect sends only a subset), so they
+  remain documented-not-enforced rather than guessed. Do not implement them.
+- **Implementation (TURN/scoped-quality lock):** `CameraState.turn_online` is set when an inbound
+  viewer ICE candidate is of type `relay` (a TURN client) and cleared on WebRTC stream end and
+  peer teardown (`on_stream_ended`/`_teardown` -> `on_teardown`). The quality-apply path
+  (`main.handle_quality` -> `quality_control.handle_quality`) consults the pure
+  [`quality.quality_change_allowed`](../pi-impersonator/quality.py): while a TURN client is online a
+  raise (`requested > current`) is rejected with the recovered warning log and no live/persist
+  effect; lowering/equal and the no-TURN case are unchanged. Tests:
+  `tests/test_pi_turn_quality_lock.py`.
 - **Firmware behavior:** consumes inbound fields for transport policy, TTL, video configuration,
   plan, quality, FPS, scope/lifetime, and ICE configuration. It applies per-client quality limits
   and locks incompatible quality changes while a TURN client is active. **[confirmed]**
-- **Current behavior (corrected):** these fields are decoded but not enforced. **The stale claim
-  that `scope` is read from field 12 is wrong and is removed:** `proto.py` has no `scope` key at
-  all, and field 12 of the old flat table is not the camera-side schema (the inbound message is the
-  9-field descriptor above, whose field 9 is the scalar policy group). Video is always 30 FPS and
-  uses the locally persisted global quality.
+- **Current behavior (corrected):** the TURN/scoped-quality lock is now enforced (above). The
+  remaining policy fields are decoded but not enforced. **The stale claim that `scope` is read from
+  field 12 is wrong and is removed:** `proto.py` has no `scope` key at all, and field 12 of the old
+  flat table is not the camera-side schema (the inbound message is the 9-field descriptor above,
+  whose field 9 is the scalar policy group and tag9.5 is the scope). Video is always 30 FPS and uses
+  the locally persisted global quality.
 - **Connect impact:** relay-only requests, bandwidth limits, session lifetimes, and requested video
   profiles are not honored; only the fields Connect actually sends are candidates for enforcement.
-- **Implementation:** correct field mapping, type the fields, enforce transport policy and TTL,
-  configure plan/FPS, and add scoped-quality arbitration. **Only RE-backed, Connect-observed fields
-  may be enforced**; leave the rest documented as unenforced.
+  The TURN quality lock now matches firmware.
+- **Implementation (remaining):** enforce transport policy and TTL, configure plan/FPS, and add
+  per-client scoped-quality arbitration. **Only RE-backed, Connect-observed fields may be
+  enforced**; leave the rest documented as unenforced.
 - **Acceptance:** parameterized tests demonstrate distinct ALL/RELAY, TTL, SD/HD/FHD, and FPS
-  behavior; TURN sessions block global quality changes like firmware.
+  behavior; TURN sessions block global quality changes like firmware (covered by
+  `tests/test_pi_turn_quality_lock.py`).
 - **Code:** [`proto.py`](../pi-impersonator/proto.py#L100-L113),
   [`webrtc.py`](../pi-impersonator/webrtc.py#L56-L72)
 
@@ -931,16 +963,21 @@ closing the gap.
 ### GAP-QUALITY-02 — Reproduce the quality persistence flag and recover event wiring
 
 - [~] **P2 · Partial (d1ec311): live/persist split and failure rollback implemented and tested; event→flag wiring still unrecovered**
-- **RE status 2026-09-20 (Wave 1):** not recovered — the Wave-1 RE pass (W6) did not pin the
-  `change_video_size`/`save_video_size` registration callbacks or the persist-flag arguments, so
-  the flag assignment stays **open** and unassigned by event name.
+- **RE status 2026-09-20 (Wave 2) [confirmed]:** the persist flag is a **per-payload** flag for
+  `change_video_size` — `FUN_00072f08` calls the persistence setter only when `*param_3 != 0` — not
+  a registration-time constant. The `save_video_size` handler is in an unexported gap. Best
+  hypothesis: `save_video_size` = persist, `change_video_size` = live-only `[assumption]`; **do not
+  guess a flag.**
 - **Firmware behavior:** the recovered handler `FUN_00072f08` always attempts the live resolution
   change for raw values `5`, `6`, or `7`. It additionally calls the persistence setter only when
   `*param_3 != 0`, and updates its in-memory current value only after the live changer succeeds.
   **[confirmed]** The exact assignment of flag `0`/`1` to the indirectly registered
   `change_video_size` and `save_video_size` Socket.IO callbacks is **not yet confirmed**.
-- **Current behavior:** both events call `apply_quality()`, which persists and restarts the source
-  and RTSP service.
+- **Current behavior:** our code persists on both configuration quality paths (`tag8.1` and the JSON
+  `video_quality`), while both direct events are currently mapped live-only in
+  `QUALITY_EVENT_PERSIST` (`change_video_size`/`save_video_size` -> `False`) and do not read the
+  per-payload flag. Either refine later to read the payload flag or keep documenting it; do not
+  infer the flag from the event name.
 - **Connect impact:** persistence occurs even on the non-persisting firmware path, and failed live
   changes can still be recorded as if they succeeded.
 - **Implementation:** split `apply_live_quality(raw)` from `persist_quality(raw)`. Make live apply
@@ -971,24 +1008,21 @@ closing the gap.
 
 ### GAP-RTSP-01 — Align RTSP port and advertised URL
 
-- [~] **P2 · Firmware default needs one final evidence check**
-- **RE status 2026-09-20 (Wave 1):** not recovered — the Wave-1 RE pass (W7) did not pin the
-  shipped RTSP default port, so it stays **open**; do not change 8554 without config-image or
-  genuine-payload evidence.
+- [x] **P2 · Closed 2026-09-20 (Wave 2): firmware default confirmed 554; 8554 is an intentional Pi exception**
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** the shipped firmware RTSP
+  default is **554** — `FUN_000b04d4` logs `"RTSP server started on port %d"` with the literal
+  `0x22a` = 554.
 - **Firmware parameter:** loads the RTSP mode/port through configuration getters, starts the service
-  when mode equals `2`, and advertises an RTSP URL assembled from runtime state. The binary logs the
-  selected port dynamically. Older notes identify the effective default as `554`, but that literal
-  is not established by `FW-RTSP-INIT` alone. **[confirmed for dynamic/configured behavior; default
-  port requires config-image or live-payload confirmation]**
-- **Current parameter:** listens on `8554` and advertises `rtsp://<ip>:8554/live`.
-- **Connect impact:** any consumer assuming the OEM default port sees a different endpoint. Connect
-  may accept the explicitly advertised URL; this needs live verification.
-- **Implementation:** first recover the default from the shipped config or a genuine status payload.
-  If it is 554, prefer that port using service capabilities; otherwise retain the recovered value.
-  Document 8554 as an intentional Pi exception only after verifying Connect consumes the advertised
-  URL.
-- **Acceptance:** selected behavior is consistent between listener, status, documentation, and a
-  real Connect/local-client test.
+  when mode equals `2`, and advertises an RTSP URL assembled from runtime state. **[confirmed]**
+- **Current parameter (intentional exception):** the Pi listens on `8554` (privileged-port
+  avoidance) and advertises `rtsp://<ip>:8554/live`. **Live-verified:** the local stream works and
+  Connect consumes the advertised URL.
+- **Connect impact (resolved):** Connect uses the explicitly advertised URL, so the Pi's `8554`
+  endpoint works despite the OEM default.
+- **Decision:** retain `8554` as a documented intentional Pi exception rather than requiring
+  privileged port `554`; do not change the listener/status URL.
+- **Acceptance (met):** listener, status, and documentation agree on `8554`, and a real
+  Connect/local-client test consumes it.
 - **Code:** [`rtsp_server.py`](../pi-impersonator/rtsp_server.py),
   [`signaling.py`](../pi-impersonator/signaling.py#L257-L261)
 
@@ -1280,7 +1314,11 @@ closing the gap.
 
 ### GAP-DEVICE-02 — IR, speaker, fan and MicroSD feature truthfulness
 
-- [~] **P2 · Partially implemented; `camera_status` descriptor now confirmed, tag binding unresolved**
+- [x] **P2 · Closed 2026-09-20 (Wave 2): truthful `MicroSd` lives in `extended_status.4`; `camera_status` fields are pruned/moot**
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** the truthful `MicroSd`
+  status is in **`extended_status.4`** (already emitted correctly by `timelapse.storage_status`),
+  **not** `camera_status`. `camera_status` fields 1/3 are `ir_mode`/`speaker_volume`, whose
+  features are pruned (GAP-CAP-01); fields 4-6 are unresolved but moot. **No action needed.**
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:** the `camera_status`
   descriptor is **`0x3f6cd0`** (6 fields): 1 uvarint @0x00, 2 submsg @0x08, 3 uvarint @0x10,
   4 uvarint @0x14, 5 uvarint @0x18, 6 uvarint @0x1c. The **tag -> hardware binding**
@@ -1302,10 +1340,11 @@ closing the gap.
   (`auto`/`day`/`night` -> 1/2/3, `FW-CONFIG:193-228`), logs that the Pi has no IR illuminator,
   returns `False`, and leaves `ir_mode` unavailable instead of claiming the mode was applied;
   `main.py`'s configuration handler routes `light_control` through it. Tests:
-  `test_pi_device_control.py` (`HardwareAvailabilityTests`). **Limitation:** the nested
-  `camera_status` tag-to-field mapping remains `descriptor required`, so the hardcoded IR/speaker
-  bytes in [`status.py`](../pi-impersonator/status.py) are left unchanged rather than guessed
-  (pinned by `test_status_hardware_bytes_unchanged_pending_descriptor`). **Correction:** capability
+  `test_pi_device_control.py` (`HardwareAvailabilityTests`). **Closed (Wave 2):** the truthful
+  `MicroSd` status is the already-correct `extended_status.4` block, and the remaining
+  `camera_status` fields are either pruned (`ir_mode`/`speaker_volume`) or moot, so the hardcoded
+  IR/speaker bytes in [`status.py`](../pi-impersonator/status.py) are left pinned harmlessly
+  (`test_status_hardware_bytes_unchanged_pending_descriptor`). **Correction:** capability
   removal under GAP-CAP-01 **is** done — `IrMode`/`SpeakerVolume`/`FanControl` were pruned from the
   advertised features (while `MicroSd` is kept for the emulated SD), so Connect no longer exposes
   those controls even though the status bytes remain pinned.
@@ -1337,20 +1376,19 @@ closing the gap.
 
 ### GAP-WEBRTC-07 — Decide audio-track compatibility
 
-- [ ] **P2 · Open; optional-path verification required**
+- [x] **P2 · Closed 2026-09-20 (Wave 2): Connect accepts a video-only offer; audio is optional**
+- **Resolution [confirmed]:** the Pi offers video-only and the stream **plays live in both the app
+  and the browser**, so Connect accepts a video-only offer — audio is optional/not required. Document
+  video-only as intentional; no audio path is needed.
 - **Firmware behavior:** contains WebRTC audio support including AAC-HBR/MPEG4-GENERIC at 48 kHz
   stereo, with G.726, PCMA, and PCMU paths also present. The recovered primary video profile remains
-  H.264 constrained baseline. **[confirmed in firmware; whether current Connect offers require audio
-  is not yet verified]**
+  H.264 constrained baseline. **[confirmed in firmware; not required by current Connect]**
 - **Current behavior:** publishes a video-only WebRTC pipeline and cannot accept or answer an audio
-  media section with a microphone track.
-- **Connect impact:** none if Connect deliberately negotiates video-only; otherwise SDP negotiation or
-  an expected listen/talk feature may be incomplete.
-- **Implementation choice:** capture and inspect a genuine current Connect offer before adding audio.
-  If audio is optional, document video-only as intentional; if required, add the negotiated firmware
-  codec and a truthful hardware capability path.
-- **Acceptance:** a real or canonical offer negotiates successfully with the same accepted/rejected
-  media sections as firmware.
+  media section with a microphone track. This is intentional.
+- **Connect impact (resolved):** none — Connect negotiates video-only and the stream plays.
+- **Implementation choice (decided):** keep video-only; document it as intentional.
+- **Acceptance (met):** a real Connect offer negotiates successfully with a video-only media
+  section and plays in the app and browser.
 - **Code:** [`webrtc.py`](../pi-impersonator/webrtc.py#L66-L98)
 
 ## P3 — parity and diagnostics
@@ -1522,7 +1560,7 @@ closing the gap.
 
 ### GAP-SIO-01 — Firmware-style error and progress messages
 
-- [~] **P3 · Sender, descriptor, and emit mechanism confirmed; tag semantics still unresolved**
+- [~] **P3 · Tag semantics recovered; emission deferred (string-tag split `[assumption]` + no consumer)**
 - **WP-6 partial (offline):** the generic sender is `FUN_000a2754`, confirmed by the emitted event name `client_trigger` and the 6-field descriptor `0x3f6f58`. It populates only a subset of the message: a constant (`DAT_000a2ab4`), the result of `FUN_0008286c` (token-shaped), and the result of `FUN_0009f69c(param_1)` (request-id-shaped); the ack callback is `DAT_000a2ae0/ae4`. Which tag carries the result/error/progress code is not yet mapped — do not guess.
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:** descriptor `0x3f6f58`
   = 6 fields (strings 1/2/4, uvarints 3/5/6). **The emit mechanism is a Socket.IO EVENT
@@ -1531,6 +1569,13 @@ closing the gap.
   mounted / RTSP start failed; FW upgrade progress 1..6; timelapse-video-make status 1
   IN_PROGRESS / 2 FINISHED). **Which tag carries code vs progress vs message is unresolved**
   `[assumption]`; do not implement a wire format yet.
+- **RE 2026-09-20 (Wave 2, direct 3.1.6 decompiler/ELF) [confirmed]:** tag semantics recovered —
+  **tag5 uvarint = result/error code** (`FUN_000a2d68`=2, `FUN_000a2ca0`=5), **tag6 uvarint =
+  upgrade/progress value** (`FUN_000a2e3c`=1, `FUN_000a2fec`=2, `FUN_000a2f80`=3), **tag3 uvarint =
+  timelapse-video-make status** (`FUN_000a2bbc`=1 IN_PROGRESS / 2 FINISHED); tag1 = constant,
+  tag4 = `FUN_0008286c()` (token-shaped), tag2 = a shared global. The message/subtype split among
+  the string tags 1/2/4 is `[assumption]`. **Emission stays deferred** — the string tags are
+  unresolved and this Connect version exposes no make-video/file-list UI to consume the event.
 - **Firmware behavior:** uses `client_trigger` variants for generic result/error codes, OTA progress,
   and timelapse-video progress. **[confirmed]**
 - **Current behavior:** never emits `client_trigger`.
@@ -1564,7 +1609,18 @@ closing the gap.
 - [x] Quality dimensions: protobuf enum `1=640×480`, `2=1280×720`, `3=1920×1080`.
 - [x] Raw quality command mapping: firmware uses `5=SD`, `6=HD`, `7=FHD`; implemented in `state.py`/`quality_control.py` (`d1ec311`).
 - [x] Trigger message descriptor `0x3f6f14` (13 fields) and the `FUN_000a963c` per-field dispatch, recovered 2026-09-18 and implemented in `trigger.py` (`9291968`).
-- [x] `ClientTrigger` descriptor `0x3f6f58` types (strings 1/2/4, uvarints 3/5/6); semantics still unresolved.
+- [x] `ClientTrigger` descriptor `0x3f6f58` types (strings 1/2/4, uvarints 3/5/6) and Wave-2 tag
+  semantics (tag5 = result/error code, tag6 = upgrade/progress value, tag3 = timelapse-video-make
+  status); the message/subtype split among the string tags 1/2/4 is still `[assumption]`.
+- [x] Inbound WebRTC field names (Wave 2): tag5 = msg type, tag7 = client type, tag2 = client id,
+  tag4.f1 = SDP, tag8.2 = transport policy, tag8.3 = TTL; tag9 submessage (`0x3f7624`) =
+  tag9.1 quality / tag9.2 FPS / tag9.3 plan / tag9.4 TTL / tag9.5 scope; "VideoCfg" = 1.
+- [x] TURN/scoped-quality lock: while a relay (TURN) viewer candidate is online, the config quality
+  path rejects a raise; implemented via `state.turn_online` + `quality.quality_change_allowed`.
+- [x] Firmware RTSP default port is `554` (`FUN_000b04d4`, literal `0x22a`); the Pi's `8554` is an
+  intentional privileged-port exception.
+- [x] Connect accepts a video-only WebRTC offer (stream plays live in app and browser); audio is
+  optional/not required.
 - [x] Timelapse file-list descriptor `0x3f701c`: event `file_list`, field 1 = `"<page>;<total>\n<chunk>"`, field 2 = HTTP token, field 3 = request_id (optional), field 4 never set; an empty list sends nothing.
 - [x] H.264 intent: constrained baseline, level 3.1, packetization mode 1.
 - [x] Default snapshot interval is 10 seconds.
@@ -1621,6 +1677,10 @@ address notes live in [`reverse-engineering.md`](reverse-engineering.md), with t
 | WebRTC answer/candidate sender | `FW-WEBRTC-SEND` — `000a3e90__FUN_000a3e90.c:5-166` |
 | WebRTC offer gate/session enqueue | `FW-WEBRTC-GATE` — `000b996c__FUN_000b996c.c:39-107` |
 | WebRTC enable/disable behavior | `FW-WEBRTC-MODE` — `000b94ac__FUN_000b94ac.c:16-52` |
+| WebRTC inbound field names / tag9 policy group | handler `FUN_000a43e0`; descriptor `0x3f7680`; tag9 submessage descriptor `0x3f7624` (5 uvarints) |
+| TURN/scoped-quality lock | `FUN_000a7940` -> `FUN_000b5ad4` -> `FUN_000b4f90` (flag at `singleton+0x278`), cap check `FUN_000b51e8`, apply `FUN_000b4e98`; log `DAT_000a89c4` |
+| `client_trigger` result/progress/status tags | tag5 code `FUN_000a2d68`/`FUN_000a2ca0`; tag6 progress `FUN_000a2e3c`/`FUN_000a2fec`/`FUN_000a2f80`; tag3 timelapse status `FUN_000a2bbc`; sender `FUN_000a2754` |
+| RTSP default port | `FUN_000b04d4` logs `"RTSP server started on port %d"` with literal `0x22a` = 554 |
 
 When closing an item, record the implementing commit, tests, live verification date if applicable,
 and whether the conclusion is **confirmed** or remains an **assumption**.

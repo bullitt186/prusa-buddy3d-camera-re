@@ -131,11 +131,12 @@ def _scan_candidate_types(node, side, found):
 
 class PrusaWebRTC:
     def __init__(self, on_offer, on_ice_candidate, on_stream_ended=None,
-                 on_connection_info=None):
+                 on_connection_info=None, on_teardown=None):
         self._on_offer = on_offer
         self._on_ice = on_ice_candidate
         self._on_stream_ended = on_stream_ended
         self._on_connection_info = on_connection_info
+        self._on_teardown = on_teardown
         self._pipe = None
         self._webrtc = None
         self._request_id = None
@@ -173,6 +174,9 @@ class PrusaWebRTC:
         self._ice_connected = False
         self._ended_notified = False
         self._connection_info_sent = False
+        # GAP-WEBRTC-05: notify the owner that this peer is gone so its
+        # TURN-client/quality-lock flag is cleared (stream-end also clears it).
+        self._notify_teardown()
         # Disconnect the old pipeline's ICE-state handler BEFORE NULL so a stale
         # CLOSED signal cannot set _ended_notified and suppress the next session's
         # genuine end notification (GAP-WEBRTC-03 review note).
@@ -483,6 +487,19 @@ class PrusaWebRTC:
         if not self._ice_connected:
             self._notify_stream_ended('no-ice-connection')
         return False
+
+    def _notify_teardown(self):
+        """Notify the owner that the peer was torn down (GAP-WEBRTC-05).
+
+        Runs on the caller's thread (create_offer/stop); the callback only clears
+        a boolean on the shared state, so no asyncio marshalling is required.
+        """
+        if self._on_teardown is None:
+            return
+        try:
+            self._on_teardown()
+        except Exception as e:
+            log.warning(f'on_teardown callback failed: {e}')
 
     def _notify_stream_ended(self, reason):
         """Report the end of the session once, marshalled to the asyncio loop."""

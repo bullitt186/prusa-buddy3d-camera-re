@@ -154,8 +154,11 @@ message SetWebRtcMode {
 Also dispatched internally as an action name within `configuration`. Single-byte or integer
 payload: `1` = disabled, `2` = enabled. On `2`, the firmware starts its configured RTSP service;
 on `1`, it stops it. Firmware 3.1.6 loads the port through a configuration getter and builds the
-advertised URL from runtime state. The shipped default has not yet been pinned from a configuration
-image or genuine status capture; older notes naming port 554 are not sufficient evidence.
+advertised URL from runtime state. The shipped default is **554** — `FUN_000b04d4` logs
+`"RTSP server started on port %d"` with the literal `0x22a` **[confirmed 2026-09-20]**. The Pi
+intentionally listens on **8554** (privileged-port avoidance) and advertises
+`rtsp://<ip>:8554/live`; Connect consumes the advertised URL (local stream works), so this is a
+documented Pi exception, not a parity gap.
 
 ```protobuf
 message SetRtspServerMode {
@@ -178,9 +181,21 @@ after success. A third callback argument controls whether it also persists the v
 ### `save_video_size`
 
 Same raw-value domain as `change_video_size`. The recovered shared handler always performs the
-live change and persists only when its third callback argument is nonzero. Which indirectly
-registered Socket.IO event supplies flag `0` versus `1` remains to be recovered; do not infer that
+live change and persists only when its third callback argument is nonzero. **Wave 2 [confirmed]:**
+the persist flag is a **per-payload** flag for `change_video_size`, not a registration-time
+constant; the `save_video_size` handler is in an unexported gap. Best hypothesis:
+`save_video_size` = persist, `change_video_size` = live-only `[assumption]` — do not infer the
 wiring from the event names. See `GAP-QUALITY-02` in the implementation gap tracker.
+
+### TURN/scoped-quality lock (config quality path)
+
+**[confirmed 2026-09-20]** While a TURN client is online the config quality path
+(`FUN_000a7940` -> `FUN_000b5ad4` -> `FUN_000b4f90`, flag at `singleton+0x278`) rejects a quality
+**raise** and logs `"TURN client ONLINE - WebRTC is active, video quality change is not allowed"`;
+lowering or keeping the current tier is allowed, and with no TURN client the change is always
+allowed. The impersonator tracks `state.turn_online` (set by an inbound viewer ICE candidate of
+type `relay`, cleared on stream end/peer teardown) and enforces the same rule through
+`quality.quality_change_allowed` in `quality_control.handle_quality`.
 
 ### `configuration`
 
@@ -199,10 +214,11 @@ Live-mapped SIO fields:
 |---|---|---|
 | `2` | `set_timelaps_interval` | interval seconds; `FUN_000a7940` logs `"Timelapse interval: %d seconds"` |
 | `8.1` | video quality | `1`=SD, `2`=HD, `3`=FHD |
-| `3.4` | `light_control` (IR) | `1`=auto, `2`=day, `3`=night |
-| `3.5` | `set_snapshot_upload_interval` | snapshot upload interval seconds, valid **10..600** (`"Invalid upload interval: %d"` otherwise) |
-| `3.10` | active print-job name | string; e.g. `Voron_…_54m_b`, `unknown_timelapse` when idle |
-| `3.11` / `3.12` | RTSP candidate | **unmapped** (mapping pending; `{11:2,12:2}` = on observed) |
+| `3.4` | `light_control` (IR) **[confirmed]** | `1`=auto, `2`=day, `3`=night |
+| `3.5` | `set_snapshot_upload_interval` **[confirmed]** | snapshot upload interval seconds, valid **10..600** (`"Invalid upload interval: %d"` otherwise) |
+| `3.7` | plausibly `set_volume` `[assumption]` | `5..100` |
+| `3.10` | `set_printing_job_name` **[confirmed]** | string; e.g. `Voron_…_54m_b`, `unknown_timelapse` when idle |
+| `3.11` / `3.12` | **uvarints — the earlier "RTSP candidate" label is refuted** | mapping unknown; do not implement an RTSP mapping here. The RTSP mode is a small enum toggle elsewhere (`iStack_74` 1/2/3, exact tag `[assumption]`) |
 | `4` | two strings (`0x3f7418`) | empty in observed messages |
 | `6` | token | echoed |
 
@@ -385,7 +401,9 @@ wraps the whole string in literal `[` and `]` before protobuf encoding.
 message CameraInfoMessage {
     SubMessage field1 = 1;             // 32 bytes; descriptor confirmed, not populated in SendCameraInfoMessage decompile
     SubMessage timelapse_status = 2;   // 32 bytes; timelapse service interval/enable/name/state/temp-like values
-    SubMessage camera_status = 3;      // 32 bytes; IR mode, upload interval/status, speaker volume
+    SubMessage camera_status = 3;      // 32 bytes; fields 1/3 = ir_mode/speaker_volume (features
+                                       // pruned); 4-6 unresolved but moot. The truthful MicroSd
+                                       // status is in extended_status.4, NOT here.
     SubMessage network_info = 4;       // 68 bytes; ssid, mac/bssid, ipv4, signal
     SubMessage extended_status = 5;    // 152 bytes; firmware, HW, camera name, RTSP, services, WebRTC
     SubMessage field6 = 6;             // 8 bytes; descriptor confirmed, not populated in SendCameraInfoMessage decompile
@@ -528,22 +546,26 @@ Scope: %d`) rendered as if it were the wire schema. The actual inbound message d
 the SIO `webrtc` handler (lambda `0xa4a78`, `pb_decode` descriptor `0x3f7680`) has **9
 fields**, several of them nested, not 12 flat fields:
 
-| Tag | Type | Notes |
+**Field names recovered 2026-09-20 (Wave 2, handler `FUN_000a43e0` + descriptors) [confirmed]:**
+
+| Tag | Type | Meaning |
 |---|---|---|
-| 1 | string | |
-| 2 | string | |
-| 3 | string | |
-| 4 | submessage | 2 string fields |
-| 5 | uvarint | |
-| 6 | uvarint | |
-| 7 | uvarint | |
-| 8 | submessage | bytes + 2 uvarint |
-| 9 | submessage | 5 uvarint |
+| 1 | string | token/request id |
+| 2 | string | **client id** |
+| 3 | string | session id |
+| 4 | submessage | `4.1` = **SDP** (candidate for type 4) |
+| 5 | uvarint | **Msg type** (3=offer, 4=candidate, …) |
+| 6 | uvarint | (checked `==1` by the handler) |
+| 7 | uvarint | **Client type** |
+| 8 | submessage | ICE config; `8.2` = **Transport policy**, `8.3` = **TTL** |
+| 9 | submessage | descriptor `0x3f7624`, 5 uvarints: `9.1` = **Quality**, `9.2` = **FPS**, `9.3` = **Plan**, `9.4` = **TTL**, `9.5` = **Scope** |
 
 The 12 named values in the log therefore come from the nested submessages (e.g. `Quality`
-is rendered through `FUN_000a11f4`, the protobuf-quality-to-string helper). The exact
-tag-to-log-value mapping is **not** yet recovered, so `GAP-WEBRTC-05` must not be
-implemented from the flat 12-field table. Do not guess the nested tags.
+is rendered through `FUN_000a11f4`, the protobuf-quality-to-string helper). "VideoCfg" is
+hardcoded to `1`. **Transport policy/TTL/FPS/plan/scope are decoded but not enforced** —
+Connect sends only a subset (live offers carry `[1,2,3,5,7,8,9]`), so they remain
+documented-not-enforced rather than guessed. The TURN/scoped-quality lock is enforced; see
+the config quality-path note above and `GAP-WEBRTC-05`.
 
 ### WebRTCMessage — outbound answer
 
@@ -589,18 +611,21 @@ message WebRtcConnectionType {
 
 ### ClientTrigger (6 fields)
 
-Recovered 3.1.6 descriptor `0x3f6f58` (sender `FUN_000a2754`). Types are now known; the
-semantic names are not (the sender populates only a subset), so this remains
-`descriptor required` for meaning:
+Recovered 3.1.6 descriptor `0x3f6f58` (sender `FUN_000a2754`). Emitted as the Socket.IO
+**event** `client_trigger`, not an ack. **[confirmed 2026-09-20]:** `tag5` = result/error code,
+`tag6` = upgrade/progress value, `tag3` = timelapse-video-make status; `tag1` = constant,
+`tag4` = token-shaped (`FUN_0008286c`), `tag2` = shared global. The message/subtype split among
+the string tags 1/2/4 is `[assumption]`, so emission stays deferred until those are pinned and a
+consumer exists (this Connect version exposes no make-video/file-list UI).
 
 ```protobuf
 message ClientTrigger {
-    string field1 = 1;
-    string field2 = 2;
-    uint32 field3 = 3;
-    string field4 = 4;
-    uint32 field5 = 5;
-    uint32 field6 = 6;
+    string field1 = 1;   // constant
+    string field2 = 2;   // shared global
+    uint32 field3 = 3;   // timelapse-video-make status: 1 IN_PROGRESS / 2 FINISHED
+    string field4 = 4;   // token-shaped (FUN_0008286c)
+    uint32 field5 = 5;   // result/error code
+    uint32 field6 = 6;   // upgrade/progress value
 }
 ```
 

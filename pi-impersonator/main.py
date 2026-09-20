@@ -45,6 +45,7 @@ import quality_control
 import rtsp_control
 import trigger
 import webrtc_control
+import webrtc_lifecycle
 import local_http
 import timezone
 import ota
@@ -93,9 +94,14 @@ def handle_quality(raw_byte, persist):
     """Shared GAP-QUALITY-02 handler: always live-apply; persist only on flag.
 
     The control flow lives in stdlib-only ``quality_control`` so it is testable
-    without ``gi``/``aiohttp``/systemd.
+    without ``gi``/``aiohttp``/systemd. GAP-WEBRTC-05: the shared state's current
+    tier and TURN-client flag are passed so a raise is locked while a relay
+    viewer is online.
     """
-    return quality_control.handle_quality(raw_byte, persist, apply_live_quality, persist_quality)
+    return quality_control.handle_quality(
+        raw_byte, persist, apply_live_quality, persist_quality,
+        current_enum=state.quality, turn_online=state.turn_online,
+    )
 
 
 def _save_persisted_state(state):
@@ -574,11 +580,22 @@ async def main():
 
     async def on_stream_ended(reason):
         # GAP-WEBRTC-03: a failed/closed/disconnected peer must resume snapshots.
+        if state.turn_online:
+            # GAP-WEBRTC-05: no viewer peer -> no TURN client, unlock quality.
+            state.turn_online = False
+            log.info(f'TURN client offline after WebRTC stream ended ({reason})')
         if state.streaming:
             state.streaming = False
             log.info(f'Resuming snapshots after WebRTC stream ended ({reason})')
         else:
             log.debug(f'WebRTC stream ended ({reason}); snapshots already running')
+
+    def on_teardown():
+        # GAP-WEBRTC-05: peer teardown (stop or a new offer) clears the TURN
+        # client flag so a later quality raise is not locked by a stale session.
+        if state.turn_online:
+            state.turn_online = False
+            log.info('TURN client offline after WebRTC peer teardown')
 
     async def on_connection_info(client_id, local_code, remote_code):
         # GAP-WEBRTC-06: report the selected ICE candidate pair once connected.
@@ -589,6 +606,7 @@ async def main():
         on_ice_candidate=on_ice_candidate,
         on_stream_ended=on_stream_ended,
         on_connection_info=on_connection_info,
+        on_teardown=on_teardown,
     )
     webrtc.start()
 
@@ -736,6 +754,12 @@ async def main():
                 candidate = _find_candidate(msg)
                 if candidate:
                     webrtc.add_ice_candidate(candidate)
+                    # GAP-WEBRTC-05: a viewer relay candidate means a TURN
+                    # client is online, which locks the global quality tier
+                    # against raises until the stream/peer ends.
+                    if webrtc_lifecycle.parse_candidate_type(candidate) == 'relay':
+                        state.turn_online = True
+                        log.info('WebRTC inbound relay candidate: TURN client online')
                     log.info(f'WebRTC inbound candidate added (mid={msg["client_id"]})')
                 else:
                     log.warning('WebRTC candidate message carried no candidate')

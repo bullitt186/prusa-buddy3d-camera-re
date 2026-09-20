@@ -11,6 +11,28 @@ import os
 RESOLUTIONS = {1: (640, 480), 2: (1280, 720), 3: (1920, 1080)}
 DEFAULT_QUALITY = 3  # FHD
 
+
+def quality_change_allowed(current_enum, requested_enum, turn_online):
+    """GAP-WEBRTC-05 TURN/scoped-quality lock (pure policy).
+
+    Recovered 3.1.6: while a TURN client is online the config quality path
+    (``FUN_000a7940`` -> ``FUN_000b5ad4`` -> ``FUN_000b4f90``, flag at
+    ``singleton+0x278``) rejects a quality *raise* and logs ``"TURN client
+    ONLINE - WebRTC is active, video quality change is not allowed"``. Lowering
+    or keeping the current tier stays allowed. With no TURN client the change is
+    always allowed.
+
+    ``current_enum``/``requested_enum`` are the 1/2/3 protobuf quality tiers.
+    ``None`` means the tier is unknown, so the caller has no basis to compare and
+    the change is not blocked.
+    """
+    if not turn_online:
+        return True
+    if current_enum is None or requested_enum is None:
+        return True
+    return requested_enum <= current_enum
+
+
 # Absolute (home-dir independent) so the same path works for pi/ and bullitt/ installs.
 # Overridable via env for the self-check below.
 QUALITY_ENV = os.environ.get('PRUSA_QUALITY_ENV', '/etc/prusa-cam/quality.env')

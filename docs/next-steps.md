@@ -21,11 +21,21 @@ app and the browser (live-verified); the old "backend gate / no offer" framing w
 wrong. Timelapse storage is live-confirmed (2026-09-19) and persistent across reboots
 (2026-09-20, `GAP-PERSIST-01`). See `status.md`'s 2026-09-19 and 2026-09-20 sections.
 
-**Genuinely open:** wire the RTSP `configuration` `tag3.11`/`tag3.12` through
-`rtsp_control`; finish mapping the remaining `configuration` `tag3` subfields; the
-`file_list` envelope is implemented + unit-tested but this app version has no file-list
-view to exercise it; and thermal throttling still needs a heatsink/fan or a lighter
-stream (81–84 °C, no under-voltage).
+**Genuinely open:** enforce the remaining `webrtc` policy fields (transport policy/TTL/FPS/
+plan/scope are decoded but Connect sends only a subset, so they stay documented-not-enforced);
+the `file_list` envelope is implemented + unit-tested but this app version has no file-list
+view to exercise it; `client_trigger` result/progress emission is deferred until the string-tag
+message split is pinned and a consumer exists; and thermal throttling still needs a heatsink/fan
+or a lighter stream (81–84 °C, no under-voltage).
+
+**Closed since the last revision (Wave 2):** the RTSP port question — the shipped firmware
+default is **554** (`FUN_000b04d4`), and the Pi's `8554` is an intentional privileged-port
+exception Connect consumes (GAP-RTSP-01 closed); `MicroSd` truthfulness lives in
+`extended_status.4`, not `camera_status` (GAP-DEVICE-02 closed); and video-only WebRTC is
+accepted by Connect (GAP-WEBRTC-07 closed). The `configuration` `tag3.4`/`tag3.5`/`tag3.10`
+semantics are confirmed and `tag3.11`/`tag3.12` are **uvarints** (the "RTSP candidate" label is
+refuted); the RTSP mode is a small enum toggle elsewhere. The TURN/scoped-quality lock is
+implemented (`state.turn_online` + `quality.quality_change_allowed`).
 
 **Timelapse storage — DONE (live-confirmed in Connect 2026-09-19; persistent across
 reboots 2026-09-20, `GAP-PERSIST-01`).** The app previously said *"Time lapse not
@@ -70,8 +80,13 @@ Already done for timelapse:
   timelapse frames/`.avi`/CSV survived, SMB unchanged, `quality.live.env` still ephemeral.
 
 Also open (smaller):
-- Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.
-- Finish mapping the remaining `configuration` protobuf `tag3` subfields.
+- **`tag3.11`/`tag3.12` are uvarints, not an RTSP mapping** (refuted); the RTSP mode is a small
+  enum toggle elsewhere (`iStack_74` 1/2/3, exact tag `[assumption]`). `tag3.7` is plausibly
+  `set_volume` (5..100) `[assumption]`.
+- **`GAP-QUALITY-02`:** the persist flag is a per-payload flag for `change_video_size` (not a
+  registration-time constant); `save_video_size` is the likely persist path `[assumption]`. Our
+  code persists on both configuration quality paths and maps both direct events live-only; do not
+  guess the flag.
 - **`file_list` envelope verification pending:** implemented + unit-tested and the make path
   is verified directly on the Pi, but this Connect version has no make-video button or
   file-list view, so the sender cannot be exercised through the app (only a raw Socket.IO

@@ -19,6 +19,12 @@ from state import RAW_TO_ENUM
 
 log = logging.getLogger('prusa-cam.quality')
 
+# Exact firmware log string (DAT_000a89c4) emitted by the config quality path
+# when a TURN client is online and a raise is rejected (GAP-WEBRTC-05).
+TURN_QUALITY_LOCK_LOG = (
+    'TURN client ONLINE - WebRTC is active, video quality change is not allowed'
+)
+
 
 def restart_services():
     """Restart the encoder/RTSP units. Returns the process return code (0 = ok)."""
@@ -77,11 +83,21 @@ def persist_quality(qenum):
     quality.write_current(qenum)
 
 
-def handle_quality(raw_byte, persist, live_apply, persist_fn):
-    """Shared GAP-QUALITY-02 handler: always live-apply; persist only on flag."""
+def handle_quality(raw_byte, persist, live_apply, persist_fn,
+                   current_enum=None, turn_online=False):
+    """Shared GAP-QUALITY-02 handler: always live-apply; persist only on flag.
+
+    GAP-WEBRTC-05: when ``turn_online`` is set, a requested tier above the
+    current one is rejected before any live/persist effect, matching the
+    recovered TURN lock. ``current_enum`` is the shared state's current 1/2/3
+    tier; when it is not supplied (older callers/tests) the lock is inert.
+    """
     qenum = RAW_TO_ENUM.get(raw_byte)
     if qenum is None:
         log.warning(f'quality: unknown raw byte {raw_byte!r}')
+        return False
+    if not quality.quality_change_allowed(current_enum, qenum, turn_online):
+        log.warning(TURN_QUALITY_LOCK_LOG)
         return False
     if not live_apply(raw_byte):
         return False
