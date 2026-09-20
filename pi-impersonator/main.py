@@ -54,6 +54,7 @@ import timezone
 import ota
 import timelapse
 import settings_store
+from settings_coordinator import SettingsCoordinator, persist_state
 
 logging.basicConfig(
     # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
@@ -110,18 +111,13 @@ def handle_quality(raw_byte, persist):
 def _save_persisted_state(state):
     """Persist the durable subset of ``state`` to /data (GAP-PERSIST-01).
 
-    Inert while /data is not a mountpoint, so this is safe to call before the
-    offline repartition creates the partition. Returns True only on success.
+    WP-1 AC-4: serialization and the ``state.json`` write are owned by
+    ``settings_coordinator``; this helper is retained as the injected persist
+    callback and delegates to it. Inert while /data is not a mountpoint, so it
+    is safe to call before the offline repartition creates the partition.
+    Returns True only on success.
     """
-    if not settings_store.available():
-        log.debug('settings: /data not mounted; not persisting state')
-        return False
-    data = state.persistable_state()
-    if settings_store.save(data):
-        log.info(f'persisted settings: {",".join(sorted(data))}')
-        return True
-    log.warning('settings: could not persist state')
-    return False
+    return persist_state(state)
 
 
 def redact_secrets(value, token, fingerprint):
@@ -487,6 +483,36 @@ async def main():
     token = cfg['identity']['token']
     server = cfg['upload']['server']
 
+    # WP-1 AC-4: one settings coordinator is the sole mutation path for every
+    # control source. The WebRTC service callables are declared up front (bound
+    # to the ``webrtc`` cell assigned below) so the coordinator can exist before
+    # the startup restore, which also routes through it.
+    webrtc = None
+
+    def start_webrtc_service():
+        # GLib loop already running → just report status (GAP-WEBRTC-04).
+        if webrtc is not None and not webrtc.is_running:
+            webrtc.start()
+
+    def stop_webrtc_service():
+        if webrtc is not None and webrtc.is_running:
+            webrtc.stop()
+        # A stopped service has no peer; do not leave snapshots paused forever.
+        state.streaming = False
+
+    coordinator = SettingsCoordinator(
+        state,
+        persist=_save_persisted_state,
+        publish=state.mark_info_dirty,
+        quality_apply=apply_live_quality,
+        quality_persist=persist_quality,
+        rtsp_start=rtsp_service_start,
+        rtsp_stop=rtsp_service_stop,
+        rtsp_query=rtsp_service_active,
+        webrtc_start=start_webrtc_service,
+        webrtc_stop=stop_webrtc_service,
+    )
+
     # GAP-QUALITY-03: start from the persisted tier and publish it everywhere.
     qenum, _, _ = quality.read_current()
     state.set_quality(qenum)
@@ -526,10 +552,11 @@ async def main():
     # GAP-PERSIST-01: overlay persisted settings (from /data) on top of the
     # file-based seeds above. quality_tier/rtsp_mode are also materialized into
     # /etc/prusa-cam by pi-persist.service, so the existing file reads stay.
+    # WP-1: restore routes through the coordinator and never rewrites state.json.
     persisted = settings_store.load()
     if persisted:
-        applied = state.apply_persisted(persisted)
-        log.info(f'Loaded persisted settings: {", ".join(applied) or "none"}')
+        restored = coordinator.restore(persisted)
+        log.info(f'Loaded persisted settings: {", ".join(restored.changed) or "none"}')
 
     mac, ip, ssid, fingerprint = get_network_info(cfg['identity'].get('fingerprint'))
     # Pi-only local extension: Home Assistant consumes an independent RTSP
@@ -605,17 +632,6 @@ async def main():
     )
     webrtc.start()
 
-    def start_webrtc_service():
-        # GLib loop already running → just report status (GAP-WEBRTC-04).
-        if not webrtc.is_running:
-            webrtc.start()
-
-    def stop_webrtc_service():
-        if webrtc.is_running:
-            webrtc.stop()
-        # A stopped service has no peer; do not leave snapshots paused forever.
-        state.streaming = False
-
     async def dispatch_trigger_action(action, request_id):
         """Perform exactly one planned trigger action (GAP-TRIGGER-01).
 
@@ -644,21 +660,15 @@ async def main():
                     f'Trigger snapshot error: {redact_secrets(str(e), token, fingerprint)}'
                 )
         elif action in (trigger.SNAPSHOT_ENABLE, trigger.SNAPSHOT_DISABLE):
-            trigger.apply_snapshot_upload(action, state)
-            log.info(f'Trigger: snapshot_upload_enabled={state.snapshot_upload_enabled}')
-            _save_persisted_state(state)
+            result = coordinator.set_snapshot_upload(action == trigger.SNAPSHOT_ENABLE)
+            if result.ok:
+                log.info(f'Trigger: snapshot_upload_enabled={state.snapshot_upload_enabled}')
         elif action in (trigger.RTSP_START, trigger.RTSP_STOP):
             mode = (rtsp_control.RTSP_ENABLED if action == trigger.RTSP_START
                     else rtsp_control.RTSP_DISABLED)
-            rtsp_control.apply_mode(
-                mode, state,
-                start_service=rtsp_service_start,
-                stop_service=rtsp_service_stop,
-                query_service=rtsp_service_active,
-                persist=rtsp_control.write_mode,
-            )
-            log.info(f'Trigger {action}: mode={state.rtsp_mode} running={state.rtsp_running}')
-            _save_persisted_state(state)
+            result = coordinator.set_rtsp_mode(mode)
+            if result.ok:
+                log.info(f'Trigger {action}: mode={state.rtsp_mode} running={state.rtsp_running}')
         elif action == trigger.REBOOT:
             # GAP-DEVICE-01: the trigger dispatcher is the only path here. The
             # guard rejects a second request inside its window and never fakes
@@ -669,9 +679,9 @@ async def main():
             # GAP-OTA-01: truthful decline; no firmware is flashed on the Pi.
             decline_firmware_update('trigger fw_update')
         elif action in (trigger.TIMELAPSE_ENABLE, trigger.TIMELAPSE_DISABLE):
-            if timelapse.apply_enable(action, state):
+            result = coordinator.set_timelapse_enabled(action)
+            if result.ok:
                 log.info(f'Trigger {action}: timelapse_enabled={state.timelapse_enabled}')
-                _save_persisted_state(state)
         elif action == trigger.TIMELAPSE_MAKE:
             width, height = state.resolution()
             path = timelapse.build_avi(
@@ -793,13 +803,13 @@ async def main():
             vq = msg.get(8)
             if isinstance(vq, dict) and vq.get(1) in (1, 2, 3):
                 raw = ENUM_TO_RAW.get(vq[1])
-                if raw is not None and handle_quality(raw, persist=True):
-                    state.mark_info_dirty()
-                    log.info(
-                        f'Config: video_quality → enum {vq[1]} '
-                        f'({state.resolution()})'
-                    )
-                    _save_persisted_state(state)
+                if raw is not None:
+                    result = coordinator.set_quality(raw, persist=True)
+                    if result.ok:
+                        log.info(
+                            f'Config: video_quality → enum {vq[1]} '
+                            f'({state.resolution()})'
+                        )
             # GAP-CONFIG-01: top-level field 2 = set_timelaps_interval. Recovered
             # from the configuration dispatcher FUN_000a7940 (field 2 at struct
             # offset 0x14 dispatches the name "set_timelaps_interval", logging
@@ -807,9 +817,9 @@ async def main():
             # when the timelapse interval changes; it does not arrive via trigger.
             tl_interval = msg.get(2)
             if tl_interval is not None:
-                if state.set_timelapse_interval(tl_interval):
+                result = coordinator.set_timelapse_interval(tl_interval)
+                if result.ok:
                     log.info(f'Config: timelapse_interval → {state.timelapse_interval}s')
-                    _save_persisted_state(state)
                 else:
                     log.warning(
                         f'Config: timelapse_interval {tl_interval!r} rejected '
@@ -834,12 +844,12 @@ async def main():
                 # cameras page "Displayed Frame Update Interval" slider sends this.
                 up = t3.get(5)
                 if up is not None:
-                    if state.set_snapshot_interval(up):
+                    result = coordinator.set_snapshot_interval(up)
+                    if result.ok:
                         log.info(
                             f'Config: snapshot_upload_interval (tag3.5) → '
                             f'{state.snapshot_interval}s'
                         )
-                        _save_persisted_state(state)
                     else:
                         log.warning(
                             f'Config: snapshot_upload_interval (tag3.5) {up!r} rejected '
@@ -857,19 +867,18 @@ async def main():
                 return
             name = msg.get('camera_name')
             if name is not None:
-                if state.set_camera_name(name):
+                result = coordinator.set_camera_name(name)
+                if result.ok:
                     # GAP-CONTROL-01/GAP-INFO-01: the service loop republishes
                     # /c/info with the new name.
-                    state.mark_info_dirty()
                     log.info(f'Config: camera_name → {state.camera_name!r}')
-                    _save_persisted_state(state)
                 else:
                     log.warning(f'Config: camera_name {name!r} rejected (empty)')
             interval_val = msg.get('snapshot_interval')
             if interval_val is not None:
-                if state.set_snapshot_interval(interval_val):
+                result = coordinator.set_snapshot_interval(interval_val)
+                if result.ok:
                     log.info(f'Config: snapshot_interval → {interval_val}s (live)')
-                    _save_persisted_state(state)
                 else:
                     log.warning(f'Config: snapshot_interval {interval_val!r} rejected (10..600)')
             vq = msg.get('video_quality')
@@ -882,10 +891,13 @@ async def main():
                     # ASSUMPTION (GAP-CONFIG-01/GAP-QUALITY-02): the dispatch table
                     # confirms sd/hd/fhd -> raw 5/6/7 but not that this path
                     # persists; persist=True here is an inference, not evidence.
-                    if raw is not None and handle_quality(raw, persist=True):
-                        state.mark_info_dirty()
-                        log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
-                        _save_persisted_state(state)
+                    if raw is not None:
+                        result = coordinator.set_quality(raw, persist=True)
+                        if result.ok:
+                            log.info(
+                                f'Config: video_quality → {vq} '
+                                f'(enum {qenum}, {state.resolution()})'
+                            )
             lc = msg.get('light_control')
             if lc is not None:
                 # GAP-DEVICE-02: no IR illuminator on the Pi; the policy logs the
@@ -900,18 +912,12 @@ async def main():
                 if rtsp_mode is None:
                     log.warning(f'Config: rtsp {rtsp!r} not recognized (expected on/off)')
                 else:
-                    rtsp_control.apply_mode(
-                        rtsp_mode, state,
-                        start_service=rtsp_service_start,
-                        stop_service=rtsp_service_stop,
-                        query_service=rtsp_service_active,
-                        persist=rtsp_control.write_mode,
-                    )
-                    log.info(
-                        f'Config: rtsp → mode={state.rtsp_mode} '
-                        f'running={state.rtsp_running}'
-                    )
-                    _save_persisted_state(state)
+                    result = coordinator.set_rtsp_mode(rtsp_mode)
+                    if result.ok:
+                        log.info(
+                            f'Config: rtsp → mode={state.rtsp_mode} '
+                            f'running={state.rtsp_running}'
+                        )
             wrtc = msg.get('webrtc')
             if wrtc is not None:
                 requested = None
@@ -919,28 +925,22 @@ async def main():
                     requested = {'on': 1, 'off': 0}.get(wrtc.strip().lower())
                 if requested is None:
                     log.warning(f'Config: webrtc {wrtc!r} not recognized (expected on/off)')
-                elif webrtc_control.apply_mode(
-                    requested, state,
-                    start_service=start_webrtc_service,
-                    stop_service=stop_webrtc_service,
-                ):
-                    log.info(
-                        f'Config: webrtc → mode={state.webrtc_mode} '
-                        f'status={state.webrtc_status}'
-                    )
-                    _save_persisted_state(state)
-                    # FW-CONFIG:108-140: the paired rule — `webrtc on` also
-                    # forces RTSP disabled.
-                    if requested == 1 and state.rtsp_mode != 1:
-                        rtsp_control.apply_mode(
-                            1, state,
-                            start_service=rtsp_service_start,
-                            stop_service=rtsp_service_stop,
-                            query_service=rtsp_service_active,
-                            persist=rtsp_control.write_mode,
+                else:
+                    result = coordinator.set_webrtc_mode(requested)
+                    if result.ok:
+                        log.info(
+                            f'Config: webrtc → mode={state.webrtc_mode} '
+                            f'status={state.webrtc_status}'
                         )
-                        log.info('Config: webrtc on → RTSP forced disabled (paired rule)')
-                        _save_persisted_state(state)
+                        # FW-CONFIG:108-140: the paired rule — `webrtc on` also
+                        # forces RTSP disabled.
+                        if requested == 1 and state.rtsp_mode != 1:
+                            rtsp_result = coordinator.set_rtsp_mode(1)
+                            if rtsp_result.ok:
+                                log.info(
+                                    'Config: webrtc on → RTSP forced disabled '
+                                    '(paired rule)'
+                                )
             fw = msg.get('start_fw_update')
             if fw is not None and str(fw).lower() == 'start':
                 decline_firmware_update('start_fw_update')
@@ -949,43 +949,32 @@ async def main():
             if rtsp_mode is None:
                 log.warning('set_rtsp_server_mode: invalid payload (expected field 1 = 1/2)')
             else:
-                rtsp_control.apply_mode(
-                    rtsp_mode, state,
-                    start_service=rtsp_service_start,
-                    stop_service=rtsp_service_stop,
-                    query_service=rtsp_service_active,
-                    persist=rtsp_control.write_mode,
-                )
-                log.info(
-                    f'set_rtsp_server_mode: mode={state.rtsp_mode} '
-                    f'running={state.rtsp_running}'
-                )
-                _save_persisted_state(state)
+                result = coordinator.set_rtsp_mode(rtsp_mode)
+                if result.ok:
+                    log.info(
+                        f'set_rtsp_server_mode: mode={state.rtsp_mode} '
+                        f'running={state.rtsp_running}'
+                    )
         elif event == 'set_webrtc_mode':
             requested = webrtc_control.decode_mode(data)
             if requested is None:
                 log.warning('set_webrtc_mode: invalid payload (expected field 1 = 0/1)')
-            elif webrtc_control.apply_mode(
-                requested, state,
-                start_service=start_webrtc_service,
-                stop_service=stop_webrtc_service,
-            ):
-                log.info(
-                    f'set_webrtc_mode: mode={state.webrtc_mode} '
-                    f'status={state.webrtc_status}'
-                )
-                _save_persisted_state(state)
+            else:
+                result = coordinator.set_webrtc_mode(requested)
+                if result.ok:
+                    log.info(
+                        f'set_webrtc_mode: mode={state.webrtc_mode} '
+                        f'status={state.webrtc_status}'
+                    )
         elif event in ('change_video_size', 'save_video_size'):
             val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
             # GAP-QUALITY-01/02: raw 5/6/7 -> SD/HD/FHD, live apply always, persist
             # only per the (currently unresolved) event flag map.
             persist = QUALITY_EVENT_PERSIST.get(event, False)
-            if handle_quality(val, persist):
+            result = coordinator.set_quality(val, persist=persist)
+            if result.ok:
                 # GAP-INFO-01/02: republish the quality-derived resolution.
-                state.mark_info_dirty()
                 log.info(f'{event}: quality → raw {val} (enum {state.quality}, {state.resolution()})')
-                if persist:
-                    _save_persisted_state(state)
             else:
                 log.warning(f'{event}: quality byte {val!r} not fully applied (live or persist failed)')
         elif event == 'timelapse_get_file_list':

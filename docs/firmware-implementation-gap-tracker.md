@@ -1283,8 +1283,9 @@ closing the gap.
 - **Tests:** `tests/test_pi_settings_store.py` (round-trip, version, missing/corrupt→`.bad`,
   unavailable no-op, atomic-on-replace-failure), `tests/test_pi_state.py::PersistedStateTests`
   (contents + valid/invalid apply), `tests/test_pi_timelapse.py::MainTimelapseWiringTests`
-  (AST: `_save_persisted_state` defined and called ≥6× in `handle_event`; startup
-  loads/applies), `tests/test_pi_persist_restore.py` (`frames_to_prune` oldest-first,
+  (AST: `_save_persisted_state` is the injected persist callback; `handle_event` routes
+  ≥6 mutations through `settings_coordinator`; startup loads and restores via the coordinator),
+  `tests/test_pi_persist_restore.py` (`frames_to_prune` oldest-first,
   `quality_env_values`, import safety).
 - **Live verification 2026-09-20:** the SD was repartitioned offline (p2 → 10.3G, `mmcblk0p3` 4G
   ext4 LABEL `PERSIST` PARTUUID `46f0d7c3-03`), then a deploy added

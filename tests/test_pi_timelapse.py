@@ -371,19 +371,23 @@ class MainTimelapseWiringTests(unittest.TestCase):
             for n in ast.walk(fn)
         ))
 
-    def test_save_persisted_state_defined_and_called_from_event_handler(self):
-        # GAP-PERSIST-01: every successful mutation in handle_event persists.
+    def test_event_handler_routes_mutations_through_coordinator(self):
+        # GAP-PERSIST-01 / WP-1 AC-4: every successful mutation in handle_event
+        # persists through the shared settings coordinator, which owns the
+        # durable-state write. _save_persisted_state remains the injected
+        # persist callback.
         self._function('_save_persisted_state')
         fn = self._function('handle_event')
         calls = [
             n for n in ast.walk(fn)
             if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name)
-            and n.func.id == '_save_persisted_state'
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == 'coordinator'
         ]
         self.assertGreaterEqual(len(calls), 6)
 
-    def test_startup_loads_and_applies_persisted_settings(self):
+    def test_startup_loads_and_restores_persisted_settings(self):
         fn = self._function('main')
         calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
         self.assertTrue(any(
@@ -393,9 +397,13 @@ class MainTimelapseWiringTests(unittest.TestCase):
             and n.func.value.id == 'settings_store'
             for n in calls
         ))
+        # WP-1 AC-4: startup applies persisted settings through the shared
+        # settings coordinator (which owns persistence and publication).
         self.assertTrue(any(
             isinstance(n.func, ast.Attribute)
-            and n.func.attr == 'apply_persisted'
+            and n.func.attr == 'restore'
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == 'coordinator'
             for n in calls
         ))
 
