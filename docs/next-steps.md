@@ -97,7 +97,13 @@ Also open (smaller):
 Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
 maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
 
-## Identity migration runbook (GAP-IDENTITY-02/03) — fresh token + MAC-derived fingerprint
+## Identity migration runbook (GAP-IDENTITY-02/03) — only if the fingerprint is ever changed
+
+**Status 2026-09-20: not needed — the Pi already derives its fingerprint from `wlan0`.** The deployed
+`config.ini` has no explicit `[identity] fingerprint` and there is no fallback-seed file, so
+`identity.resolve_fingerprint` yields `md5("D8:3A:DD:32:1C:AC")` = `142486ddfee8889f2eb8de723411221d`,
+and the token is already bound to it (live `camera_authentication` ACK `0`, `/c/info` 200). Use the
+steps below **only** if you deliberately change the fingerprint (which invalidates the token).
 
 The firmware-derived fingerprint is `md5("<UPPERCASE:COLON:MAC>")` of the `wlan0` MAC
 (`FUN_00096cd8` -> `FUN_00097e78` `SIOCGIFHWADDR` -> `FUN_00097a4c` MD5 lowercase hex;
@@ -117,10 +123,11 @@ changed under an existing token: a later change returns `400 {"detail":"Invalid 
    `200`, `camera_authentication` ACK `0`, and the outbound `X-Camera-Fingerprint` header equals
    `md5("<UPPERCASE:COLON:MAC>")`. Then repeat the viewer registry/auth checks.
 
-**GAP-IDENTITY-03 note:** the firmware does **not** inspect the MAC OUI; it hashes whatever
-`wlan0` reports, so the Pi-vendor OUI is an expected per-device difference, not a defect. The
+**GAP-IDENTITY-03 note (closed 2026-09-20):** the firmware does **not** inspect the MAC OUI; it hashes
+whatever `wlan0` reports, so the Pi-vendor OUI is an expected per-device difference, not a defect. The
 `smsc95xx` cmdline MAC is the `eth0` placeholder and is irrelevant. The only untested place the OUI
-could matter is the Connect registry gate — keep this item open pending a genuine-OUI source.
+could have mattered — the Connect registry gate — is superseded (WebRTC works live). No action; keep a
+genuine-OUI test only if a reliable source ever appears.
 
 ---
 

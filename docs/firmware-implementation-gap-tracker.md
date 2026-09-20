@@ -492,8 +492,8 @@ closing the gap.
 | `GAP-DEVICE-02` | `camera_status` descriptor `0x3f6cd0` (6 fields); `FW-CONFIG:193-228`; advertised list from `FW-FEATURES` | Tag->hardware binding needs sender `FUN_000a1394`; hardware absence is intentional |
 | `GAP-WEBRTC-07` | Codec/SDP strings summarized in `journal/findings.md:1040-1057` | Whether Connect requests audio needs a current offer |
 | `GAP-IDENTITY-01` | `FW-ID-MAC`, `FW-ID-SEED`, `FW-ID-MD5` | None for algorithm; persistence policy is Pi-specific |
-| `GAP-IDENTITY-02` | `FUN_00096cd8` (generateFingerPrint), `FW-ID-MAC`/`FW-ID-SEED`/`FW-ID-MD5`; `/c/info` use at `FW-INFO-BUILD:242-251` | Live migration requires a fresh token (runbook in `next-steps.md`) |
-| `GAP-IDENTITY-03` | MAC source from `FUN_00096cd8`/`FW-ID-MAC`; model table in `firmware-3.1.6.md` | Genuine OUI unknown; firmware does not inspect the OUI |
+| `GAP-IDENTITY-02` | `FUN_00096cd8` (generateFingerPrint), `FW-ID-MAC`/`FW-ID-SEED`/`FW-ID-MD5`; `/c/info` use at `FW-INFO-BUILD:242-251` | **Resolved 2026-09-20:** already `wlan0`-MAC-derived with the token bound (live ACK `0`, `/c/info` 200); the runbook in `next-steps.md` applies only if the fingerprint is ever changed |
+| `GAP-IDENTITY-03` | MAC source from `FUN_00096cd8`/`FW-ID-MAC`; model table in `firmware-3.1.6.md` | **Closed 2026-09-20:** firmware does not inspect the OUI; the Pi-vendor OUI is a documented per-device difference and the registry-gate theory is superseded |
 | `GAP-STATUS-03` | Entire `FW-STATUS`; zero-init/presence rule at `133-138` | Nested descriptor fixture required |
 | `GAP-STATUS-04` | Time/status getter block `FW-STATUS:271-301` | Exact reported string needs getter rename/fixture |
 | `GAP-NETWORK-01` | Network getter block `FW-STATUS:214-234`; `/c/info` network getters `FW-INFO-BUILD:145-173` | Signal conversion helper needs focused trace |
@@ -1383,7 +1383,13 @@ closing the gap.
 
 ### GAP-IDENTITY-02 — Deploy exact fingerprint only with a fresh token
 
-- [~] **P3 · Implemented and live-verified; fresh-token migration runbook documented**
+- [x] **P3 · Resolved 2026-09-20: already using the `wlan0`-MAC-derived fingerprint (token bound; live ACK 0)**
+- **Live state 2026-09-20 (verified):** the deployed `config.ini` has **no `[identity] fingerprint`**
+  line and there is **no fallback-seed file**, so `identity.resolve_fingerprint` derives from `wlan0`
+  (`d8:3a:dd:32:1c:ac`) → `md5("D8:3A:DD:32:1C:AC")` = `142486ddfee8889f2eb8de723411221d`. Auth
+  succeeds (`camera_authentication` ACK `0`) and `/c/info` is `200` — i.e. **the token is already
+  bound to the MAC-derived fingerprint**, so the firmware-equivalent identity is in place and **no
+  migration is needed**. The runbook below applies only if the fingerprint is ever changed.
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:** `FUN_00096cd8` is
   `generateFingerPrint`; it reads **`wlan0`** via `SIOCGIFHWADDR` (`FUN_00097e78`), formats
   `"%02X:%02X:%02X:%02X:%02X:%02X"` (uppercase, colon-separated, 17 chars), and hashes with MD5
@@ -1411,7 +1417,13 @@ closing the gap.
 
 ### GAP-IDENTITY-03 — Track the physical Wi-Fi MAC/OUI difference
 
-- [ ] **P3 · Open experiment, not a protocol defect; OUI not inspected**
+- [x] **P3 · Closed 2026-09-20: documented per-device difference, not a defect; OUI not inspected and the registry-gate theory is superseded**
+- **Resolution 2026-09-20:** the Pi reports and hashes its real `wlan0` MAC (`d8:3a:dd:32:1c:ac`), so
+  it exposes a Raspberry-Pi OUI — the same algorithm the firmware uses, on different hardware. The
+  firmware never inspects the OUI (it hashes whatever `SIOCGIFHWADDR` returns), and the only place it
+  could conceivably have mattered — the Connect camera-service registry gate — is **superseded**
+  (WebRTC works live in the app and browser, GAP-WEBRTC-03). **No action.** Keep the experiment note
+  below only if a genuine Buddy3D MAC/OUI ever becomes available from reliable evidence.
 - **RE 2026-09-20 (Wave 1, direct 3.1.6 decompiler/ELF) [confirmed]:** the firmware does **not**
   inspect the OUI. It formats and hashes whatever `wlan0` reports, so the Pi-vendor OUI is an
   expected per-device difference, **not a defect**. The `smsc95xx` cmdline MAC is the `eth0`
