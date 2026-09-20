@@ -62,13 +62,15 @@ await sio.connect(
     transports=['websocket']
 )
 
-# Build protobuf: field 1 = fingerprint, field 2 = token
+# Build protobuf: field 1 = token, field 2 = fingerprint (firmware FUN_000a3058)
 auth_msg = encode_protobuf({
-    1: fingerprint,  # string
-    2: token,        # string
+    1: token,        # string
+    2: fingerprint,  # string
 })
 ack = await sio.emit('camera_authentication', auth_msg, callback=True)
-# ack[0] should be 1 (bare integer)
+# Success ACK is the bare integer 0
+# (1 = not authorized, 2 = error joining session). Nothing is sent post-auth:
+# status/features/protobuf_version are trigger-driven (tags 1/2/12).
 ```
 
 ### Protobuf Encoding (minimal, no .proto needed)
@@ -100,7 +102,13 @@ def encode_protobuf(fields):
 
 ---
 
-## Step 2: Send Camera Status
+## Step 2: Send Camera Status (trigger tag 1)
+
+> **Trigger-driven, not post-auth.** Firmware `FUN_000a05e4` sends **nothing** after a
+> successful auth ACK; the server drives the camera with `trigger` polls. Steps 2–4 are the
+> responses to trigger tags `1` (status), `12` (protobuf_version), and `2` (features)
+> respectively — do not emit them unsolicited after auth (the server answers an unsolicited
+> `protobuf_version` with ACK `1` + `CameraIsNotSessionMemberError`).
 
 ```python
 # Event: "status"
@@ -187,10 +195,10 @@ await sio.emit('status', status_msg)
 
 ---
 
-## Step 3: Send Protocol Version
+## Step 3: Send Protocol Version (trigger tag 12)
 
 ```python
-# Event: "protobuf_version"
+# Event: "protobuf_version"; sent in response to trigger tag 12, never unsolicited.
 version_msg = encode_protobuf({
     1: token,        # http.token; firmware uses FUN_00081c18 here
     2: "4.4",        # protocol schema version (MUST be "4.4")
@@ -200,26 +208,34 @@ await sio.emit('protobuf_version', version_msg)
 
 ---
 
-## Step 4: Send Supported Features
+## Step 4: Send Supported Features (trigger tag 2)
 
 ```python
-# Event: "features"
-# The features string is comma-separated quoted names
+import hashlib
+
+# Event: "features"; sent in response to trigger tag 2, never unsolicited.
+# The features string is comma-separated quoted names.
+# GAP-CAP-01/GAP-DEVICE-02: IrMode, SpeakerVolume and FanControl are NOT advertised
+# (the Pi has no such hardware). MicroSd IS advertised — the Pi backs it with the
+# emulated SD at /mnt/sdcard, so Connect's timelapse UI works.
 FEATURES = (
     '"SocketCom","UploadInterval","TimelapseEn","TimelapseInterval",'
     '"TimelapseVideoMake","TimelapseFileList","VideoStream","RtspStream",'
-    '"GetSnapshot","IrMode","SpeakerVolume","WiFi","FwVer","HwVer",'
+    '"GetSnapshot","WiFi","FwVer","HwVer",'
     '"CameraName","MicroSd","FwUpdate","CameraReboot","McuTemp",'
-    '"VideoQuality","WebRtc","TurnVideoQualityChange","trigger_scheme","FanControl"'
+    '"VideoQuality","WebRtc","TurnVideoQualityChange","trigger_scheme"'
 )
 
+features_json = "[" + FEATURES + "]"
 features_msg = encode_protobuf({
     2: token,
     3: firmware_version,
     4: hardware_name,
     5: "4.4",
-    6: "[" + FEATURES + "]",
-    7: "4.4",  # protocol_version, confirmed via DAT_000a8440 → 0x3f1f18
+    6: features_json,
+    # field 7 is the MD5 of the bracket-wrapped features JSON, NOT the literal "4.4"
+    # (firmware hash-building path; `signaling.send_features` computes this).
+    7: hashlib.md5(features_json.encode()).hexdigest(),
 })
 await sio.emit('features', features_msg)
 ```
@@ -266,9 +282,9 @@ import json
 FEATURES_LIST = [
     "SocketCom", "UploadInterval", "TimelapseEn", "TimelapseInterval",
     "TimelapseVideoMake", "TimelapseFileList", "VideoStream", "RtspStream",
-    "GetSnapshot", "IrMode", "SpeakerVolume", "WiFi", "FwVer", "HwVer",
+    "GetSnapshot", "WiFi", "FwVer", "HwVer",
     "CameraName", "MicroSd", "FwUpdate", "CameraReboot", "McuTemp",
-    "VideoQuality", "WebRtc", "TurnVideoQualityChange", "trigger_scheme", "FanControl"
+    "VideoQuality", "WebRtc", "TurnVideoQualityChange", "trigger_scheme"
 ]
 
 async def upload_info(token, fingerprint, mac, ip, ssid, server="connect.prusa3d.com",
@@ -326,8 +342,10 @@ For trigger events (get_snapshot, etc.), decode the protobuf and respond appropr
 
 ### set_webrtc_mode Handler
 
-The server sends this to enable/disable the WebRTC service on real Buddy cameras.
-An impersonator with `origin: OTHER` will not receive it, but a handler is prudent:
+The server sends this to enable/disable the WebRTC service. **Superseded:** earlier notes
+claimed an impersonator with `origin: OTHER` would never receive it. WebRTC now works live
+with `origin: OTHER`, and the handler is implemented (`webrtc_control.apply_mode`), decoding
+protobuf field 1 and keeping `webrtc_mode` (`+0x13d`) separate from `webrtc_status` (`+0x13e`).
 
 ```python
 @sio.on('set_webrtc_mode')
@@ -336,7 +354,7 @@ async def handle_set_webrtc_mode(data):
     enable = msg.get(1, 0)
     print(f"set_webrtc_mode: enable={enable}")
     # Real firmware writes to webrtc_mode (+0x13d) and starts/stops the WebRTC service.
-    # For the impersonator: log and ignore, or update internal state if implementing WebRTC.
+    # The impersonator mirrors this via webrtc_control.apply_mode (mode != status).
 ```
 
 ---
@@ -345,22 +363,31 @@ async def handle_set_webrtc_mode(data):
 
 ### Enable Gate
 
-The firmware's offer handler (`FUN_000b87b4`) silently drops any inbound offer unless
-both singleton bytes are non-zero:
+The firmware's offer gate silently drops any inbound offer unless both singleton bytes are
+non-zero:
 - `+0x13d` (`webrtc_mode`) — written by `set_webrtc_mode`
 - `+0x13e` (`webrtc_status`) — set when the WebRTC service starts
 
-The server only sends `set_webrtc_mode` to cameras that registered with an `origin`
-other than `OTHER`. An impersonator registered as `OTHER` will never receive that event,
-so both bytes stay zero and WebRTC offers are gated out. To enable WebRTC for an
-impersonator, self-report both as enabled in the `status` message field `5.11`
-(the WebRTC mode/status block). The real firmware encodes `{1: 1, 2: 2}` in that block
-(mode enabled, status running).
+> **Function-name resolved (2026-09-20):** earlier revisions cited `FUN_000b87b4` for this gate.
+> VMA `0xb87b4` is **not** a function entry — it lies 0x18 bytes inside the unrelated
+> `FUN_000b879c`. The authoritative gate (and the `singleton + 0x140` enqueue) is
+> `FUN_000b996c`, matching the gap tracker's `FW-WEBRTC-GATE` row and `webrtc_control.py`.
+> `protocol.md` §10 has been corrected.
+
+**Superseded:** earlier notes claimed the server only sends `set_webrtc_mode` to cameras
+registered with an `origin` other than `OTHER`, that an `origin: OTHER` impersonator would
+therefore never receive it, and that WebRTC had to be unblocked by self-reporting both bytes
+enabled in `status` field `5.11`. Controlled `WEB`/`OTHER` tests disproved `origin` as the
+gate, and WebRTC now works live with `origin: OTHER`; the gate is driven by the actual
+`set_webrtc_mode` state, not a hardcoded status claim.
 
 ### Inbound Offer Field Table
 
-Decoded from `parseWebRtcMessage` (VMA `0xa36a4`). The server sends `msg_type = 3`
-for offers; all other values cause an error response.
+**Superseded — viewer-side/log-format schema.** The flat 12-field table below is the
+`parseWebRtcMessage` (VMA `0xa36a4`) log format string (`0x3f61c6`), rendered as if it were
+the wire schema; it is **not** the camera-side inbound message. The camera-side inbound
+message is the 9-field descriptor `0x3f7680` with nested submessages (see the table after
+this one). Do not implement from the flat table (`GAP-WEBRTC-05`).
 
 | Field | Semantic | Wire type | Notes |
 |-------|----------|-----------|-------|
@@ -377,6 +404,20 @@ for offers; all other values cause an error response.
 | 11 | `scope` | varint | Session scope |
 | 12 | `ice_config` | submessage | TURN/STUN server list |
 
+**Camera-side inbound (descriptor `0x3f7680`, 9 fields):** `msg_type` values are `1=request`,
+`2=answer`, `3=offer`, `4=candidate`.
+
+| Tag | Type | Notes |
+|---|---|---|
+| 1 | string | token |
+| 2 | string | `request_id` (offer/answer) / `mid` (candidate) / `client_id` (ICE config) |
+| 3 | string | fingerprint / `session` (candidate) / `session_id` (ICE config) |
+| 4 | submessage | `{1: SDP}` for offer/answer; `{1: candidate}` for candidate |
+| 5 | uvarint | msg type (`1=request`, `2=answer`, `3=offer`, `4=candidate`) |
+| 7 | uvarint | 1 (offer) / 2 (answer/candidate/ICE config) |
+| 8 | submessage | ICE config (ICE-config message only) |
+| 9 | submessage | 5 uvarints (ICE-config message only) |
+
 ### Response Flow
 
 When the server wants live video, it sends a `"webrtc"` event with an SDP offer
@@ -388,7 +429,8 @@ async def handle_webrtc(data):
     msg = decode_protobuf(data)
     request_id = msg[1]
     msg_type = msg[2]
-    sdp = msg[4]  # field 4 is the SDP body in inbound offers
+    # field 4 carries the SDP for offers (nested {1: SDP} per descriptor 0x3f7680)
+    sdp = msg[4]
 
     if msg_type == 3:  # offer
         # Create PeerConnection, set remote description, create answer
@@ -425,8 +467,9 @@ INIT → CONNECTING → AUTHENTICATING → READY → STREAMING
 
 - **INIT**: Load config, init camera
 - **CONNECTING**: Socket.IO connect
-- **AUTHENTICATING**: Send auth, wait ACK
-- **READY**: Send status + version + features, start upload loop
+- **AUTHENTICATING**: Send auth (`token`, `fingerprint`), wait for ACK `0`
+- **READY**: Send **nothing** post-auth; start the snapshot upload loop and wait for server
+  `trigger` polls (tags 1/2/12 drive status/features/protobuf_version)
 - **STREAMING**: Handle WebRTC + triggers + config events
 - **RECONNECTING**: On disconnect, re-auth on reconnect
 
@@ -493,7 +536,7 @@ impersonator/
 
 1. **Snapshot upload works**: PUT /c/snapshot returns 200
 2. **Camera appears in Prusa Connect**: visible in web UI after auth
-3. **Auth succeeds**: ACK response is `1` (bare integer)
+3. **Auth succeeds**: ACK response is `0` (bare integer; `1` = not authorized)
 4. **Reconnection**: survives network drop + re-authenticates
 5. **WebRTC stream**: "Watch live" button in Prusa Connect shows video
 

@@ -130,9 +130,10 @@ class PrusaSignaling:
             await self._drop_session()
             return
         log.info(f'Auth ACK: {ack!r}')
-        # GAP-AUTH-01: only the exact integer 1 is a successful ACK; anything else
-        # (0, 5, malformed, bool) must not emit post-auth messages. Drop the
-        # session so the supervisor retries with a fresh client + backoff.
+        # GAP-AUTH-01: only the exact integer 0 is a successful ACK (1 = not
+        # authorized, 2 = error joining session); anything else (malformed, bool)
+        # must not emit post-auth messages. Drop the session so the supervisor
+        # retries with a fresh client + backoff.
         if not auth_ack_is_success(ack):
             log.warning(f'Auth not accepted (ACK={ack!r}); dropping session for supervised retry')
             await self._drop_session()

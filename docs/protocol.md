@@ -55,7 +55,8 @@ The complete firmware trace confirms that the token is opaque input, not a devic
    `/data/xhr_config.ini` and `/data/xhr_http_token.conf`. `FUN_000842d4` reloads that file at
    startup.
 4. The same stored value is used unchanged in HTTP `Token` headers and the protobuf
-   `camera_authentication`/`send_sio_info` messages.
+   `camera_authentication` message. (`send_sio_info` is an internal firmware function
+   name, not an emitted protobuf or Socket.IO message — see §3.)
 
 There is therefore no algorithm for recreating a token from camera data. A valid token must be
 minted by Connect and delivered to the camera. On first camera communication, Connect associates
@@ -184,9 +185,11 @@ wiring from the event names. See `GAP-QUALITY-02` in the implementation gap trac
 ### `configuration`
 
 **Correction 2026-09-19 (live-verified):** the Socket.IO `configuration` event is a
-**nested protobuf**, descriptor `0x3f73a4` (9 fields), decoded by `FUN_000a89e0` and
-dispatched by *name* after decoding (`'video_quality'`, `'light_control'`,
-`'motor_controll'`, `'set_snapshot_upload_interval'`). The name-keyed table below is the
+**nested protobuf**, descriptor `0x3f73a4` (9 fields), decoded and dispatched by *name*
+by `FUN_000a7940` (`0xa7940`–`0xa885b`; `FUN_000a89e0` is not a function — Ghidra had
+not defined the real dispatcher, which was recovered by forcing a function at its ARM
+prologue). Names include `'video_quality'`, `'light_control'`, `'motor_controll'`,
+`'set_snapshot_upload_interval'`, and `'set_timelaps_interval'`. The name-keyed table below is the
 **QR / manual-config** path (JSON via nlohmann, `FUN_0006fb94`), not the Socket.IO
 message. The JSON handler rejected every live setting change as "not valid JSON".
 
@@ -194,9 +197,12 @@ Live-mapped SIO fields:
 
 | Tag | Meaning | Values |
 |---|---|---|
+| `2` | `set_timelaps_interval` | interval seconds; `FUN_000a7940` logs `"Timelapse interval: %d seconds"` |
 | `8.1` | video quality | `1`=SD, `2`=HD, `3`=FHD |
 | `3.4` | `light_control` (IR) | `1`=auto, `2`=day, `3`=night |
-| `3.11` / `3.12` | RTSP candidate | mapping pending (`{11:2,12:2}` = on observed) |
+| `3.5` | `set_snapshot_upload_interval` | snapshot upload interval seconds, valid **10..600** (`"Invalid upload interval: %d"` otherwise) |
+| `3.10` | active print-job name | string; e.g. `Voron_…_54m_b`, `unknown_timelapse` when idle |
+| `3.11` / `3.12` | RTSP candidate | **unmapped** (mapping pending; `{11:2,12:2}` = on observed) |
 | `4` | two strings (`0x3f7418`) | empty in observed messages |
 | `6` | token | echoed |
 
@@ -506,9 +512,14 @@ Decoded from `parseWebRtcMessage` (VMA `0xa36a4`). The log format string at
 | 12 | `ice_config` | submessage | TURN/STUN server list |
 
 Processing path: `parseWebRtcMessage` → enable gate check (see §10) →
-`FUN_000b7a9c` (get WebRTC singleton) → `FUN_000b87b4` (create peer connection,
-enqueue to `singleton + 0x140` work queue). SDP answer emitted back on the
+`FUN_000b7a9c` (get WebRTC singleton) → `FUN_000b996c` (the gate + enqueue:
+`FUN_000b2f10(singleton + 0x140, …)`). SDP answer emitted back on the
 `webrtc` Socket.IO event.
+
+**Citation correction (2026-09-20):** earlier revisions cited `FUN_000b87b4` here. VMA
+`0xb87b4` is **not** a function entry — it lies 0x18 bytes inside the unrelated
+`FUN_000b879c`. The authoritative gate/enqueue function is `FUN_000b996c`
+(`FW-WEBRTC-GATE`, `000b996c__FUN_000b996c.c:39-107`).
 
 **Correction (2026-09-18, direct 3.1.6 descriptor dump):** the table above is the *log
 format string* (`0x3f61c6`: `Client type: %d, Msg type: %d, ID len: %d, SDP len: %d,
@@ -784,7 +795,7 @@ Profile: Constrained Baseline (`42e01f`), Level 3.1, packetization-mode=1.
 
 ### Enable Gate
 
-`FUN_000b87b4` (VMA `0xb87b4`) processes inbound WebRTC offers. Its first check:
+`FUN_000b996c` (VMA `0xb996c`) processes inbound WebRTC offers. Its first check:
 
 ```c
 if ((*(char *)(singleton + 0x13d) == '\0') &&   // webrtc_mode == 0
@@ -816,9 +827,9 @@ camera is absent from the camera-service registry and viewer authentication retu
 
 Config Value is the single byte carried by the `change_video_size`/`save_video_size` events
 (`5=SD`, `6=HD`, `7=FHD`). This is confirmed independently by the protobuf-to-raw converter,
-configuration dispatcher, direct handler, and dimension selector in firmware 3.1.6. The current
-impersonator handler still uses the obsolete reversed mapping; track its correction under
-`GAP-QUALITY-01`.
+configuration dispatcher, direct handler, and dimension selector in firmware 3.1.6. The
+impersonator now uses the corrected mapping (`state.py` `RAW_TO_ENUM = {5: 1, 6: 2, 7: 3}`);
+the earlier obsolete reversed mapping is fixed (`GAP-QUALITY-01`).
 
 ---
 

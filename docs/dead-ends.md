@@ -74,8 +74,10 @@ lives in [`journal/findings.md`](journal/findings.md) and [`status.md`](status.m
   protocol" part of this entry turned out to be wrong. It also turned out our long-running
   impersonator's *actual* deployed token had been `origin: WEB` the whole time (nobody had
   verified this) — and it ran the full Socket.IO/protobuf Buddy3D protocol successfully for the
-  entire project up to this point: `camera_authentication` ACK `1`, `/c/info` 200, snapshots all
-  worked. So `origin: WEB` does **not** block a non-browser client from using the Buddy3D wire
+   entire project up to this point: `camera_authentication` ACK `1`, `/c/info` 200, snapshots all
+   worked. **[superseded — the success ACK is `0`, not `1`; the `1` recorded here was a
+   misread of the callback value (see `protocol.md` §3 and `GAP-AUTH-01`).]** So `origin: WEB`
+   does **not** block a non-browser client from using the Buddy3D wire
   protocol — that assumption was too strong. What's still true: a live, controlled test (fresh
   `origin: OTHER` token, same impersonator, `registered: true`) got the *identical* ACK `5` as the
   `WEB` token, so origin is still not the WebRTC gate — just confirmed by direct experiment now

@@ -1,5 +1,12 @@
 # Prusa Buddy3D Camera — Linux Impersonator Specification
 
+> **[superseded — early 3.1.5-era design sketch, retained as history]** The implemented
+> protocol is documented in [`../protocol.md`](../protocol.md) and
+> [`../status.md`](../status.md). In particular the `AUTHENTICATED` sequence below is wrong:
+> the camera sends **nothing** after `camera_authentication` (firmware `FUN_000a05e4`), there
+> is no `send_sio_info` Socket.IO event, and `status`/`protobuf_version`/`features` are
+> trigger-driven (tags 1/2/12).
+
 ## Goal
 
 A Linux application that impersonates a Prusa Buddy3D camera, connecting to Prusa Connect cloud services and streaming video from any V4L2 camera source. It must be indistinguishable from a real Buddy3D camera from the server's perspective.

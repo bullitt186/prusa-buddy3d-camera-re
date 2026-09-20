@@ -795,9 +795,10 @@ async def main():
                         f'({timelapse.INTERVAL_MIN}..{timelapse.INTERVAL_MAX})'
                     )
             # tag3 carries the remaining settings. tag3.4 = light_control (the
-            # "sun" icon): FUN_000a89e0 reads struct offset 0x38 (iStack_90) and
-            # dispatches 'light_control'. The Pi has no IR illuminator, so this
-            # is a truthful unavailable result (never a fake applied state).
+            # "sun" icon): the configuration dispatcher FUN_000a7940 reads struct
+            # offset 0x38 (iStack_90) and dispatches 'light_control'. The Pi has
+            # no IR illuminator, so this is a truthful unavailable result (never
+            # a fake applied state).
             t3 = msg.get(3)
             if isinstance(t3, dict):
                 lc = t3.get(4)

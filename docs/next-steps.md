@@ -5,27 +5,33 @@ through the complete 3.1.6 decompilation. Earlier revisions incorporated Prusa's
 manual and PrusaLink camera guide — see `status.md`'s Bottom line for the full story.
 **Firmware follow-up (2026-09-17):** 3.1.6 was compared directly with 3.1.5 and contains no
 cloud-protocol change; see [`firmware-3.1.6.md`](firmware-3.1.6.md).
-**Context:** Camera impersonator works (snapshots, Socket.IO auth, `/c/info`, RTSP) but the
-mobile app never sends WebRTC offers and shows "Kamera-Kommunikation Fehlgeschlagen".
-The immediate software-only lead is an exact MAC/fingerprint consistency retest with a fresh
-token. Firmware hashes an uppercase, colon-separated MAC preimage; the 2026-07-09 one-off test did
-not preserve its preimage/casing and is not reproducible. The other remaining routes are backend
-rollout/enrollment, real Buddy3D hardware for comparison, or SSL-unpinning on a jailbroken client.
+**Context (superseded 2026-09-19):** WebRTC live view now works in both the app and the
+browser; the old "the mobile app never sends WebRTC offers / Kamera-Kommunikation
+Fehlgeschlagen" framing was wrong. The gate was four firmware-parity bugs (auth field
+order + ACK `0`, TURN credentials, camera-is-offerer + candidate handling, H.264 SPS
+profile), not a backend gate, so the MAC/fingerprint retest lead is obsolete. See the
+CURRENT section below and `status.md`'s 2026-09-19 / 2026-09-20 sections.
 
 ---
 
-## CURRENT (2026-09-19) — live WebRTC works; finish SD/timelapse
+## CURRENT (2026-09-20) — WebRTC works; timelapse + persistence done
 
-The sections below are historical. **Superseded:** WebRTC live view now works
-(verified live). The old "backend gate / no offer" framing is wrong; it was four
-firmware-parity bugs (auth field order + ACK `0`, TURN credentials, offerer
-direction + candidate handling, and the H.264 SPS profile). See `status.md`'s
-2026-09-19 section.
+The sections below are historical. **Superseded:** WebRTC live view works in both the
+app and the browser (live-verified); the old "backend gate / no offer" framing was
+wrong. Timelapse storage is live-confirmed (2026-09-19) and persistent across reboots
+(2026-09-20, `GAP-PERSIST-01`). See `status.md`'s 2026-09-19 and 2026-09-20 sections.
 
-**Timelapse storage (live-confirmed in Connect 2026-09-19; capture/list round-trip
-pending).** The app says *"Time lapse not available, camera storage not detected, insert
-SD card"* and reads storage from the `status` message, block `extended_status.4`
-(descriptor `0x3f72b0`).
+**Genuinely open:** wire the RTSP `configuration` `tag3.11`/`tag3.12` through
+`rtsp_control`; finish mapping the remaining `configuration` `tag3` subfields; the
+`file_list` envelope is implemented + unit-tested but this app version has no file-list
+view to exercise it; and thermal throttling still needs a heatsink/fan or a lighter
+stream (81–84 °C, no under-voltage).
+
+**Timelapse storage — DONE (live-confirmed in Connect 2026-09-19; persistent across
+reboots 2026-09-20, `GAP-PERSIST-01`).** The app previously said *"Time lapse not
+available, camera storage not detected, insert SD card"* because `status` did not report
+the SD/storage state. Storage is read from the `status` message, block
+`extended_status.4` (descriptor `0x3f72b0`).
 
 - Firmware (descriptor re-trace, **[confirmed]**): `{1:<mounted 1|2>, 2:totalMB,
   3:freeMB, 4:usedMB, 5:<mode string>}` — tag1 `FUN_000744ac` (1=mounted, 2=absent),
@@ -33,10 +39,12 @@ SD card"* and reads storage from the `status` message, block `extended_status.4`
   (`"RW"`/`"RO"`/`"UNKNOWN"`). The earlier note's `FUN_000abcb0`/`FUN_000abaf4`
   getters belong to `timelapse_status` (field 2), not this block, and `MODEL` was
   never tag 5.
-- Ours now: `timelapse.storage_status()` reports the emulated `/mnt/sdcard`
+- Ours: `timelapse.storage_status()` reports the emulated `/mnt/sdcard`
   (`{1:1,2:total,3:free,4:used,5:"RW"}` when present, `{1:2,2:0,3:0,4:0,5:"UNKNOWN"}`
-  otherwise) and `signaling` supplies it. Confirm live that Connect stops reporting
-  "storage not detected".
+  otherwise) and `signaling` supplies it. **Live 2026-09-19:** Connect shows timelapse
+  available with size/used/free and a configurable interval, and frames record to
+  `/mnt/sdcard/timelapse`. **2026-09-20:** `/data/sdcard` is bind-mounted onto
+  `/mnt/sdcard`, so recordings survive a reboot.
 
 Already done for timelapse:
 - Emulated SD at `/mnt/sdcard/timelapse` (the firmware path), shared over SMB
@@ -96,6 +104,12 @@ maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
 P.1 traced the remaining extended-status sub-block; the answer is "a hardware-derived value is
 sent, but it's a small, guessable model string, not an unforgeable serial." Full evidence in
 `protocol.md`'s `extended_status` section and `status.md`'s "ruled out" table.
+
+> **[superseded 2026-09-19 — WebRTC works]** The P.2/P.3 MAC/OUI and fingerprint leads
+> below are retained as history. WebRTC live view was unblocked by firmware-parity fixes
+> (auth order/ACK, TURN, camera-is-offerer + candidate handling, SPS), not by MAC/OUI
+> identity; no further MAC/fingerprint retest is needed. See `status.md`'s 2026-09-19 /
+> 2026-09-20 sections.
 
 **P.2 (MAC/OUI and fingerprint consistency) is again the top priority (corrected 2026-09-18).** `origin:
 LINK` was downgraded, then **both `origin` (WEB vs OTHER) and source-IP/network-reputation were
@@ -206,8 +220,10 @@ hex MD5 digest of that exact string. If MAC lookup fails, it hashes a random 10-
 - [x] **P.3.2** Confirmed the "careful" concern was real: changing fingerprint against the
   *existing* token broke it (`403`). Worked around by registering a fresh token instead — see P.2.
 
-**Current order:** P.1 is complete. Repeat P.2 + P.3 once with the exact uppercase MAC preimage
-and a fresh token; then return to real hardware or SSL-unpinning if the gate remains unchanged.
+**Current order [superseded 2026-09-19 — WebRTC works]:** P.1 is complete, and the P.2/P.3 MAC
+retest is obsolete now that WebRTC works. Historical text follows: repeat P.2 + P.3 once with the
+exact uppercase MAC preimage and a fresh token; then return to real hardware or SSL-unpinning if
+the gate remains unchanged.
 
 ---
 
@@ -402,7 +418,13 @@ hypotheses this was meant to distinguish:
 
 ---
 
-## Step 3 — Add `@sio.on('webrtc')` handler to `signaling.py`
+## Step 3 — Add `@sio.on('webrtc')` handler to `signaling.py` — DONE (live-verified 2026-09-19/20)
+
+**Done.** The `@sio.on('webrtc')` handler is implemented and wired to `webrtc.py`; the
+camera creates the offer, applies the viewer's trickle candidates
+(`proto.find_webrtc_candidate`), and emits the answer, with the session stable and
+snapshots resumed via the ICE watchdog. The original plan below is retained as history
+(its field numbers are superseded by the recovered 9-field camera schema).
 
 The impersonator silently drops any inbound `webrtc` Socket.IO event. This step adds
 the handler, wires it to `webrtc.py`'s existing peer connection logic, and adds the
@@ -613,7 +635,12 @@ power-loss robustness section in `status.md` and `.agent/pi-ops.md`.
 
 ---
 
-## Step 5 — Deeper `status` message tracing (field 5 sub-fields)
+## Step 5 — Deeper `status` message tracing (field 5 sub-fields) — DONE / superseded 2026-09-19
+
+**Superseded.** WebRTC works live, so the premise here — that the backend reads
+`status` field 5.11 (`GetWebRtcMode`/`GetWebRtcStatus`) to gate WebRTC eligibility —
+is disproven. The tracing below is retained as history; no `status` field-5 change was
+needed to unblock streaming.
 
 Field 5.11 (`GetWebRtcMode` / `GetWebRtcStatus`) at CameraInfoMessage offset `0x144`
 is the most interesting untraced field — if the backend reads it to determine WebRTC
@@ -717,6 +744,11 @@ backend publishes that gate WebRTC in the app.
 ---
 
 ## Summary / dependency graph
+
+> **[superseded 2026-09-19 — WebRTC works]** This dependency graph and the "minimum
+> useful state" verdict are historical. The leads below are resolved: WebRTC works, so
+> MAC/OUI, mitmproxy, and the token-registry probes no longer gate anything. Kept as
+> history.
 
 ```
 [2026-07-09, done] origin (WEB vs OTHER) ruled out — live experiment

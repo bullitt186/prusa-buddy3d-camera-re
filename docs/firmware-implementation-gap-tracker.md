@@ -62,15 +62,15 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 |---|---|---|
 | Enrollment/token | Matched | Token is opaque Connect input; no firmware token-generation algorithm exists. |
 | Fingerprint derivation | Working; live-verified | Precedence: an explicit `config.ini` `[identity] fingerprint` (the token-bound value) wins, else firmware-style MAC derivation, else a persisted fallback seed. Live-verified 2026-09-18: `/c/info` 200 (`origin='OTHER', registered=True`), snapshots 200. Migrating to the MAC-derived value still requires a fresh token. |
-| `/c/info` | Core schema matched | Initial upload succeeds, but refresh/retry behavior and dynamic values are incomplete. |
-| Snapshot upload | Working | Endpoint and identity headers match; capture quality, scheduling, and control behavior differ. |
-| Socket.IO authentication | Working, but signaling link unstable (live) | Auth ACK is `1` and the gate is now strict, but the server closes the WebSocket in the same tick as the auth ACK (`Server sent close packet data 0`) for the running service. Isolated clients with the identical auth sometimes stay, so this is intermittent and likely server-side session policy; the client now owns reconnection with a fresh client per attempt (`signaling.supervise`, commit `02918b8`). |
-| Initial metadata messages | Mostly matched | Core envelopes work; dynamic status and request correlation are incomplete. |
-| Trigger handling | Partial | Recovered descriptor `0x3f6f14` now decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); policy actions (OTA/timelapse) and `client_trigger` result codes remain unimplemented. |
-| Configuration handling | Partial | Quality partly works; most settings are logged or ignored. |
-| RTSP | Partial | Local stream works but port, startup state, and command semantics differ. |
-| WebRTC | Wire envelope matched; behavior incomplete | Connect ICE/TURN settings, lifecycle, camera sharing, and connection reporting are missing. |
-| OTA/timelapse/device controls | Partial | Reboot implemented behind a 60 s rate limit; OTA/timelapse remain unsupported; IR/speaker/fan/MicroSD are represented as unavailable and controls never fake success. |
+| `/c/info` | Core schema matched | Initial upload succeeds; periodic refresh (`info_service_loop`) and dynamic values (name/quality/network) are implemented (GAP-INFO-01/02, live 200s). |
+| Snapshot upload | Working (live) | Endpoint and identity headers match; the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented (GAP-SNAPSHOT-01..04); the concurrent-stream half of GAP-SNAPSHOT-04 remains open. |
+| Socket.IO authentication | Working, stable (live) | Auth field order is `(token, fingerprint)` and the success ACK is `0` (`1` = not authorized, `2` = error joining session). **Superseded:** the "server closes the WebSocket in the same tick (`Server sent close packet data 0`)" behaviour was the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified 2026-09-20) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt (`signaling.supervise`, `02918b8`). Residual long-run stability is unproven, but no server-side close has been observed since the fix. |
+| Initial metadata messages | Matched (live) | Core envelopes work; dynamic status values and request-id correlation are implemented (GAP-STATUS-01/02). |
+| Trigger handling | Implemented (policy actions declined) | Recovered descriptor `0x3f6f14` decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); timelapse enable/disable/make/file-list are implemented (GAP-TIMELAPSE-01); OTA returns an explicit truthful decline (GAP-OTA-01). Only per-action `client_trigger` result codes remain unimplemented. |
+| Configuration handling | Mostly wired | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality, `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), camera name, and RTSP/WebRTC mode are applied and persisted; only the `tag3.11/12` RTSP candidate mapping remains unmapped. |
+| RTSP | Partial | Local stream works; configuration-form mode changes are applied and persisted (GAP-RTSP-02). The firmware default and some command semantics still need a final evidence check (GAP-RTSP-01). |
+| WebRTC | Working (live); connection reporting open | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser), lifecycle/teardown clears `state.streaming` and resumes snapshots, and the existing encoder is shared. Only `webrtc_connection_info` (GAP-WEBRTC-06) and the inbound policy fields (GAP-WEBRTC-05) remain open. |
+| OTA/timelapse/device controls | Implemented | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline; timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD). |
 
 ## How to use the decompiled firmware evidence
 
@@ -450,7 +450,7 @@ These are explicit recovery prerequisites, not permission to guess:
 | `client_trigger` | Dedicated 6-field descriptor `0x3f6f58` with known types | Semantic names/result/progress enums and exact payload fixtures |
 | RTSP port | Runtime getter and advertised URL path are present | Confirm default value from config image or genuine status capture before changing 8554 |
 | WebRTC audio | Codec implementations exist in the binary | Confirm whether current Connect camera offers request/require an audio m-line |
-| Signaling session lifecycle (live blocker) | The server ACKs `camera_authentication` then closes the WebSocket in the same tick for the running service (`Server sent close packet data 0`); the client supervises reconnection with a fresh client per attempt and exponential backoff (15s→120s), and drops the session on a rejected ACK/exception so the supervisor retries (`signaling.supervise`/`_drop_session`) | Why the full service is closed. **Ruled out 2026-09-19:** handshake URL (`param_3` is an empty map; only `&t=` which engineio already sends), token `origin` (re-registered via the Buddy3D flow, `/c/info` `origin` went `OTHER`→`WEB`, close persists), post-auth pacing (immediate send and no-ACK batching both close), headers/transport, and stale-session resume. Remaining: a server-side eligibility/session policy for the camera signaling service. |
+| Signaling session lifecycle (residual long-run question) | **Superseded 2026-09-20:** the observed "server ACKs `camera_authentication` (ACK `0`) then closes the WebSocket in the same tick (`Server sent close packet data 0`)" was caused by the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt and exponential backoff (15s→120s), and drops the session on a rejected ACK/exception so the supervisor retries (`signaling.supervise`/`_drop_session`). | Whether the service can still be closed by a server-side eligibility/session policy over a long run is **not proven**. **Ruled out 2026-09-19:** handshake URL (`param_3` is an empty map; only `&t=` which engineio already sends), token `origin` (re-registered via the Buddy3D flow, `/c/info` `origin` went `OTHER`→`WEB`, close persists), post-auth pacing (immediate send and no-ACK batching both close), headers/transport, and stale-session resume. The post-auth-burst fix removes the known cause; any remaining close would need a fresh capture. |
 
 ### Gap-to-firmware cross-reference
 
@@ -537,7 +537,7 @@ closing the gap.
 ### GAP-CONFIG-01 — Replace guessed configuration decoding with the recovered schema
 
 - [~] **P0 · Corrected 2026-09-19: the SIO `configuration` event is a nested protobuf, NOT JSON; video_quality mapped, others in progress**
-- **Correction (live-verified):** the earlier "JSON" conclusion was wrong for the Socket.IO path. Live Connect setting changes arrive as a **nested protobuf** (descriptor `0x3f73a4`, 9 fields; handler `FUN_000a89e0` decodes it and dispatches by name — `'video_quality'`, `'light_control'`, `'motor_controll'`, `'set_snapshot_upload_interval'`). The JSON parser (`nlohmann`, `FUN_0006f9dc`) is only the QR/manual-config path. The JSON handler rejected every live setting change ("not valid JSON").
+- **Correction (live-verified):** the earlier "JSON" conclusion was wrong for the Socket.IO path. Live Connect setting changes arrive as a **nested protobuf** (descriptor `0x3f73a4`, 9 fields; handler `FUN_000a7940` decodes it and dispatches by name — `'video_quality'`, `'light_control'`, `'motor_controll'`, `'set_snapshot_upload_interval'`, `'set_timelaps_interval'`). `FUN_000a89e0` is **not** a function; Ghidra had not defined the real dispatcher, which was recovered by forcing a function at its ARM prologue. The JSON parser (`nlohmann`, `FUN_0006f9dc`) is only the QR/manual-config path. The JSON handler rejected every live setting change ("not valid JSON").
 - **Mapped (live):** `tag8.1` = video quality enum (1=SD/2=HD/3=FHD) — implemented in `main.py` via `handle_quality`. Verified: the encoder actually changes tier; the WebRTC viewer must stop/start the stream to pick up the new resolution (the peer connection is built with the resolution at offer time) — acceptable.
 - **Mapped (live 2026-09-19):** `tag3.5` = `set_snapshot_upload_interval`. Connect's cameras page **"Displayed Frame Update Interval"** slider sends `configuration {3: {5: <seconds>}}`; the Pi previously logged and ignored it. Direct evidence: `FUN_000a7940` reads tag3.5, logs `"Upload interval: %d seconds"` / `"Setting upload interval: %d seconds"`, rejects outside **10..600** (`"Invalid upload interval: %d"`), and dispatches the name `set_snapshot_upload_interval`. Wired to `state.set_snapshot_interval`; **verified live**: slider → `{3: {5: 20}}` → `Config: snapshot_upload_interval (tag3.5) → 20s` and the snapshot cadence settled to exactly 20 s. Note: the runtime interval is not persisted (reverts to `config.ini` on reboot) — persistence is a follow-up.
 - **In progress:** `tag3` carries the remaining settings (subfields 4/11/12 observed live).
@@ -547,11 +547,19 @@ closing the gap.
 - **Firmware behavior:** decodes a protobuf configuration message and dispatches named settings
   including `rtsp`, `webrtc`, `video_quality`, `start_fw_update`, `light_control`, `camera_name`,
   and `snapshot_interval`. **[confirmed]**
-- **Current behavior:** first attempts JSON decoding, then applies a generic flat protobuf decoder
-  with guessed numeric tags. It has no presence tracking, enum types, signed integer handling, or
-  nested-message schema.
-- **Connect impact:** a valid Connect configuration payload can be misidentified, ignored, or
-  interpreted as a different setting.
+- **Current behavior (implemented):** decodes the nested protobuf `0x3f73a4` and dispatches the
+  recovered table: top-level field 2 (`set_timelaps_interval`), `tag8.1` video quality,
+  `tag3.4` `light_control` (truthful unavailable — no IR hardware), `tag3.5`
+  `set_snapshot_upload_interval` (10..600), and the JSON name-keyed fields (`camera_name`,
+  `rtsp`, `webrtc` incl. the paired `webrtc on → RTSP disabled` rule, `video_quality`,
+  `start_fw_update` decline, `code` guard). `tag3.11/12` are logged as an unmapped RTSP
+  candidate.
+- **Connect impact (resolved):** live setting changes are applied and persisted rather than
+  misidentified; only the `tag3.11/12` mapping is unknown (logged, not guessed).
+- **Before (superseded):** first attempted JSON decoding, then applied a generic flat protobuf
+  decoder with guessed numeric tags, no presence tracking, enum types, signed integer handling,
+  or nested-message schema; a valid Connect configuration payload could be misidentified,
+  ignored, or interpreted as a different setting.
 - **Implementation:** define the exact configuration schema and typed decoder from the nanopb
   descriptor/callback paths; preserve optional-field presence; reject malformed values exactly
   where firmware does.
@@ -562,15 +570,17 @@ closing the gap.
 
 ### GAP-WEBRTC-01 — Consume Connect-provided ICE server configuration
 
-- [~] **P0 · Implemented (ICE config consumed); live media negotiation still open**
+- [~] **P0 · Implemented (ICE config consumed); live media negotiation verified**
 - **Recovered 2026-09-19 (live):** the `webrtc` ICE config is tag8 = `{1: <blob>}` with a repeated list of `{id, host, port, type}` (1=STUN/2=TURN/3=TURNS) plus a TURN block carrying a time-limited username and base64 credential (`FUN_000bc0ec`). `proto.decode_ice_config` parses it; `webrtc.create_offer` configures `webrtcbin`'s `stun-server` and `turn-server` (escaped credentials) with it. Verified live: 12 servers + `coturn.prusa3d.com:3478` + credentials applied.
 - **Firmware behavior:** parses the incoming WebRTC ICE submessage, configures every supplied STUN
   and TURN server, including hostname, port, username, credential, and server type; falls back to
   its defaults only when no servers were supplied. **[confirmed]**
-- **Current behavior:** field 12 is not decoded as `ice_config`; GStreamer is always configured with
-  only `stun://stun.l.google.com:19302`.
-- **Connect impact:** remote/cloud viewing will commonly fail when direct ICE is unavailable and
-  TURN relay is required.
+- **Current behavior (implemented):** the nested `tag8` ICE config is decoded and all supplied
+  STUN/TURN servers and credentials are mapped into `webrtcbin`, with firmware-equivalent fallback
+  servers. Media negotiation is live-verified (browser and app).
+- **Before (superseded):** field 12 was not decoded as `ice_config`; GStreamer was always configured
+  with only `stun://stun.l.google.com:19302`, so remote/cloud viewing would commonly fail when
+  direct ICE was unavailable and TURN relay was required.
 - **Implementation:** recover and implement the ICE submessage; map all supplied URLs and TURN
   credentials into `webrtcbin`; retain firmware-equivalent fallback servers.
 - **Acceptance:** unit fixtures recover the complete ICE list; an integration test forces relay and
@@ -580,14 +590,15 @@ closing the gap.
 
 ### GAP-WEBRTC-02 — Share the existing camera encoder instead of opening libcamera twice
 
-- [~] **P0 · Implemented (shared mux source); live verification pending**
+- [~] **P0 · Implemented (shared mux source); live-verified**
 - **Recovered 2026-09-19:** `webrtc.create_offer` now reads the always-running mux stream (`tcpclientsrc 127.0.0.1:8888`) instead of spawning a second `rpicam-vid` (which died defunct — libcamera is single-consumer). The encoder also runs H264 `--profile baseline --level 3.1` to match the firmware's `H264CameraSource`.
 - **Firmware behavior:** WebRTC, RTSP, and snapshots consume coordinated outputs from the existing
   hardware video pipeline. **[confirmed]**
-- **Current behavior:** `rpicam-source.service` continuously owns the camera, while WebRTC starts a
-  second independent `rpicam-vid` process.
-- **Connect impact:** the WebRTC process is likely to fail with a camera-busy error once an offer
-  finally reaches the Pi.
+- **Current behavior (implemented):** WebRTC reads the shared `stream_mux` output; the live-verified
+  browser and app sessions ran without a second libcamera owner or camera-busy errors.
+- **Before (superseded):** `rpicam-source.service` continuously owned the camera, while WebRTC
+  started a second independent `rpicam-vid` process, which was likely to fail with a camera-busy
+  error once an offer reached the Pi.
 - **Implementation:** feed WebRTC from `stream_mux.py` or provide one shared capture/encode service
   with independent RTSP, JPEG, and WebRTC consumers.
 - **Acceptance:** RTSP, periodic snapshots, and a WebRTC session can run without a second libcamera
@@ -633,8 +644,10 @@ closing the gap.
   [`proto.find_webrtc_candidate`](../pi-impersonator/proto.py), which also unwraps the
   UTF-8-collapsed tag4 `str` (the live 14-of-21 drop). Tests:
   `test_pi_proto.py::FindWebRtcCandidateTests`, `test_pi_webrtc_lifecycle.py`. The firmware's
-  exact peer TTL worker remains untraced, so the watchdog is explicitly Pi-side policy; live
-  Connect verification and explicit TTL tests are still pending.
+  exact peer TTL worker remains untraced, so the watchdog is explicitly Pi-side policy.
+  **Live-verified (app and browser, 2026-09-19):** connect, media, and teardown (ICE failed/closed/
+  disconnected clears `state.streaming` and resumes snapshots). Only explicit TTL-expiry tests
+  remain.
 
 ## P1 — Connect-visible control and state gaps
 
@@ -643,9 +656,13 @@ closing the gap.
 - [~] **P1 · Implemented; live verification pending**
 - **Firmware behavior:** protobuf field 1 value `1` starts/enables the WebRTC service; `0` stops and
   disables it. Mode and runtime status are separate values and gate inbound offers. **[confirmed]**
-- **Current behavior:** the event is logged but has no state or service effect; status always reports
-  mode `1`, status `1`.
-- **Connect impact:** Connect cannot control the service and receives false state.
+- **Current behavior (implemented):** `webrtc_control.apply_mode` decodes field 1, starts/stops the
+  `PrusaWebRTC` loop, tracks `state.webrtc_mode` and `state.webrtc_status` separately, gates
+  inbound offers, and reports the real mode/status in `status`.
+- **Connect impact (resolved):** Connect can control the service and sees the actual mode/runtime
+  state.
+- **Before (superseded):** the event was logged but had no state or service effect; status always
+  reported mode `1`, status `1`.
 - **Implementation:** decode field 1, persist/track mode, start or stop WebRTC resources, reject
   offers while disabled, and report actual mode/runtime status.
 - **Acceptance:** enable/disable fixtures alter the gate and subsequent `status` payload exactly as
@@ -657,8 +674,10 @@ closing the gap.
   and exposes the `FUN_000b996c` gate (`offer_allowed`). `main.py`'s offer handler consults the gate,
   and `set_webrtc_mode` / `configuration.webrtc` start/stop the `PrusaWebRTC` GLib loop with
   `state.webrtc_mode` and `state.webrtc_status` tracked separately. Tests:
-  `test_pi_webrtc_control.py`. The paired rule where `configuration.webrtc=on` also forces RTSP
-  disabled is not implemented; WebRTC mode persistence across reboot is not implemented (in-memory).
+  `test_pi_webrtc_control.py`. **Correction:** the paired rule where `configuration.webrtc=on` also
+  forces RTSP disabled **is implemented** (`main.py` `handle_event`, `Config: webrtc on → RTSP
+  forced disabled (paired rule)`), consistent with GAP-CONFIG-01; WebRTC mode is persisted via
+  `settings_store` / `state.json` (GAP-PERSIST-01), not memory-only.
 
 ### GAP-WEBRTC-05 — Honor transport policy, TTL, SDP plan, scoped quality, FPS and scope
 
@@ -697,11 +716,12 @@ closing the gap.
 - **Firmware behavior:** constructs `CameraInfoMessage` from current snapshot state, upload interval,
   IR mode, speaker volume, RTSP mode/status/URL, WebRTC mode/status, service state, current quality,
   network state, timezone, and system telemetry. **[confirmed]**
-- **Current behavior:** many values are fixed defaults. In particular, WebRTC is always
-  enabled/running, video quality is always FHD, upload interval remains 10, and RTSP state does not
-  follow the systemd service.
-- **Connect impact:** UI state can disagree with actual camera behavior; Connect may make decisions
-  from stale or false capabilities/status.
+- **Current behavior (implemented):** `CameraState` drives status; quality, camera name,
+  snapshot/timelapse intervals, WebRTC mode/status, and RTSP mode/running (queried from the
+  systemd service) are read from shared runtime state rather than fixed defaults.
+- **Connect impact (resolved):** UI state tracks actual camera behavior for the supported settings.
+- **Before (superseded):** many values were fixed defaults — WebRTC always enabled/running, video
+  quality always FHD, upload interval fixed at 10, and RTSP state not following the service.
 - **Implementation:** introduce a single runtime state model shared by command handlers and status
   encoding; read the persisted quality at startup; query actual service states where necessary.
 - **Acceptance:** after every supported command, a decoded `status` fixture shows the resulting
@@ -715,9 +735,14 @@ closing the gap.
   corresponding presence flag is set. Initial live captures also show the Socket.IO SID in this
   position, so the exact source depends on send context. **[confirmed for conditional firmware
   path; initial-vs-response selection needs a fixture]**
-- **Current behavior:** `send_status(request_id=...)` accepts a request ID but `_status_message()`
-  ignores it and always encodes the Socket.IO SID.
-- **Connect impact:** a requested status response may not correlate with the request that caused it.
+- **Current behavior (implemented):** `build_status_message` sets field 10 from `request_id` for a
+  request-triggered status, and falls back to the Socket.IO SID when a trigger carries no
+  request-id. (The old "unsolicited initial status" path no longer exists — nothing is sent
+  post-auth, GAP-AUTH-01.)
+- **Connect impact (resolved):** a requested status response correlates with the request that
+  caused it.
+- **Before (superseded):** `send_status(request_id=...)` accepted a request ID but the status
+  encoder ignored it and always encoded the Socket.IO SID.
 - **Implementation:** distinguish unsolicited initial status from request-triggered status and set
   field 10 from the correct context.
 - **Acceptance:** initial-status and request-response fixtures encode different expected field 10
@@ -726,12 +751,17 @@ closing the gap.
 
 ### GAP-SNAPSHOT-01 — Apply snapshot upload interval changes
 
-- [~] **P1 · Implemented and unit-tested (d1ec311); live cadence verification pending**
+- [x] **P1 · Implemented and unit-tested (d1ec311); live cadence verified (20 s, GAP-CONFIG-01)**
 - **Firmware behavior:** accepts `snapshot_interval` in seconds, validates the inclusive range
   `10–600`, stores milliseconds in configuration, and changes the active upload cadence.
   **[confirmed]**
-- **Current behavior:** reads the interval once at loop creation and only logs later valid changes.
-- **Connect impact:** the UI setting has no effect.
+- **Current behavior (implemented):** the interval lives in shared mutable state; a valid change
+  wakes/reschedules the active loop and updates status. **Live-verified:** the Connect
+  "Displayed Frame Update Interval" slider sent `{3:{5:20}}` and the snapshot cadence settled to
+  exactly 20 s (GAP-CONFIG-01).
+- **Connect impact (resolved):** the UI setting takes effect live.
+- **Before (superseded):** the interval was read once at loop creation and later valid changes were
+  only logged, so the UI setting had no effect.
 - **Implementation:** keep interval in shared mutable state, persist it if desired, wake/reschedule
   the active loop, and update status.
 - **Acceptance:** changing 10→60→10 seconds changes measured upload scheduling without restart;
@@ -744,9 +774,12 @@ closing the gap.
 - [~] **P1 · Implemented and unit-tested (9291968); live verification pending**
 - **Firmware behavior:** `enable_snapshot_upload` and `disable_snapshot_upload` control the periodic
   uploader independently of immediate get-snapshot requests. **[confirmed]**
-- **Current behavior:** the periodic loop always runs unless locally paused for RTSP/WebRTC; trigger
-  enable/disable is not decoded.
-- **Connect impact:** remote snapshot control does nothing.
+- **Current behavior (implemented):** trigger tags 4/5 values `1`/`2` set the shared
+  `state.snapshot_upload_enabled`, which `periodic_snapshot_allowed` reads; immediate
+  get-snapshot remains independent of that switch.
+- **Connect impact (resolved):** remote snapshot control starts/stops the periodic uploader.
+- **Before (superseded):** the periodic loop always ran unless locally paused for RTSP/WebRTC;
+  trigger enable/disable was not decoded, so remote snapshot control did nothing.
 - **Implementation:** add an explicit upload-enabled state and handle both trigger values; reflect it
   in status while preserving immediate snapshot behavior.
 - **Acceptance:** disable stops periodic uploads, get-snapshot still performs its defined action, and
@@ -765,9 +798,13 @@ closing the gap.
 - [~] **P1 · Implemented; live verification pending**
 - **Firmware behavior:** retries attribute upload and marks it dirty after relevant configuration or
   state changes. The recovered service loop retries on a countdown until successful. **[confirmed]**
-- **Current behavior:** performs one `/c/info` upload during process startup and never refreshes it.
-- **Connect impact:** a transient startup failure leaves stale/missing metadata until restart;
-  camera-name, quality, network, or other changed attributes remain stale.
+- **Current behavior (implemented):** `info_service` runs the firmware-style dirty/countdown loop
+  (`next_info_action`, reload to 10 on failure) and marks dirty on camera-name, quality,
+  snapshot-interval, and RTSP/WebRTC mode changes, so `/c/info` is republished rather than sent once.
+- **Connect impact (resolved):** a transient failure recovers without restart, and changed
+  attributes are republished.
+- **Before (superseded):** performed one `/c/info` upload during startup and never refreshed it, so a
+  transient failure or later attribute change left stale metadata until restart.
 - **Implementation:** add bounded retry/backoff and a dirty/update mechanism invoked by relevant
   changes and reconnect/network events.
 - **Acceptance:** injected HTTP failures recover without restart; changing a published attribute
@@ -785,7 +822,7 @@ closing the gap.
 ### GAP-CAP-01 — Stop overpromising unsupported features, or implement their wire behavior
 
 - [x] **P1 · Resolved 2026-09-19: prune the hardware-absent features**
-- **Decision:** stop advertising features the Pi cannot honor. `/c/info` now advertises only what is implemented: `SocketCom, UploadInterval, TimelapseEn/Interval/VideoMake/FileList, VideoStream, RtspStream, GetSnapshot, WiFi, FwVer, HwVer, CameraName, FwUpdate, CameraReboot, McuTemp, VideoQuality, WebRtc, TurnVideoQualityChange, trigger_scheme`. Removed `IrMode`, `SpeakerVolume`, `FanControl`, `MicroSd` (no such hardware on the Pi — Connect was showing the IR sun/moon/auto control that could never work). `configuration.light_control` still returns a truthful unavailable result if it ever arrives.
+- **Decision:** stop advertising features the Pi cannot honor. `/c/info` now advertises only what is implemented: `SocketCom, UploadInterval, TimelapseEn/Interval/VideoMake/FileList, VideoStream, RtspStream, GetSnapshot, WiFi, FwVer, HwVer, CameraName, MicroSd, FwUpdate, CameraReboot, McuTemp, VideoQuality, WebRtc, TurnVideoQualityChange, trigger_scheme`. Removed `IrMode`, `SpeakerVolume`, `FanControl` (no such hardware on the Pi — Connect was showing the IR sun/moon/auto control that could never work). **`MicroSd` is kept** — the Pi backs it with the emulated SD at `/mnt/sdcard`, so Connect's timelapse UI works (GAP-TIMELAPSE-01). `configuration.light_control` still returns a truthful unavailable result if it ever arrives.
 - **Firmware behavior:** advertises features it implements: `SocketCom`, `UploadInterval`,
   `TimelapseEn`, `TimelapseInterval`, `TimelapseVideoMake`, `TimelapseFileList`, `VideoStream`,
   `RtspStream`, `GetSnapshot`, `IrMode`, `SpeakerVolume`, `WiFi`, `FwVer`, `HwVer`, `CameraName`,
@@ -810,10 +847,11 @@ closing the gap.
 - **Firmware parameter:** raw event/internal values are `5=SD`, `6=HD`, `7=FHD`; protobuf enums are
   `1=SD`, `2=HD`, `3=FHD`; dimensions are `640×480`, `1280×720`, `1920×1080`. **[confirmed directly
   from `FW-QUALITY-PB`, `FW-QUALITY-DIRECT`, and `FW-QUALITY-DIMS`]**
-- **Current parameter:** the dimension table is correct, but the direct event handler maps
-  `5→HD`, `6→FHD`, `7→SD`.
-- **Connect impact:** every `change_video_size`/`save_video_size` raw-byte command selects the wrong
-  tier. The string-form configuration mapping happens to use the correct local protobuf enum.
+- **Current parameter (implemented):** `state.py` `RAW_TO_ENUM = {5: 1, 6: 2, 7: 3}` and the
+  dimension table is correct, so raw bytes 5/6/7 select SD/HD/FHD.
+- **Connect impact (resolved):** raw-byte commands select the intended tier.
+- **Before (superseded):** the direct event handler mapped `5→HD`, `6→FHD`, `7→SD`, so every
+  `change_video_size`/`save_video_size` raw-byte command selected the wrong tier.
 - **Implementation:** use raw-to-protobuf mapping `{5: 1, 6: 2, 7: 3}` and preserve the existing
   protobuf-enum-to-dimensions table.
 - **Acceptance:** raw bytes 5/6/7 yield SD/HD/FHD respectively and status reports enums 1/2/3.
@@ -846,9 +884,12 @@ closing the gap.
 - [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware behavior:** starts from its stored quality and reports the translated current enum.
   **[confirmed]**
-- **Current behavior:** module state starts as FHD and status always encodes FHD even if
-  `quality.env` contains HD or SD. WebRTC independently reads the persisted value.
-- **Connect impact:** state and actual stream resolution disagree after restart or a previous change.
+- **Current behavior (implemented):** the persisted tier is loaded once into shared state and used
+  for the source, WebRTC, `/c/info`, and status (live-verified after reboot: `state.json`
+  `{"quality_tier": 2}` → `quality.env` `1280x720` → encoder starts 1280×720; GAP-PERSIST-01).
+- **Connect impact (resolved):** state and actual stream resolution agree after restart.
+- **Before (superseded):** module state started as FHD and status always encoded FHD even if
+  `quality.env` contained HD or SD, so state and stream resolution could disagree after a restart.
 - **Implementation:** load `quality.read_current()` once into shared state and use it for source,
   WebRTC, `/c/info`, and status.
 - **Acceptance:** starting with each persisted tier produces matching encoder dimensions,
@@ -879,9 +920,13 @@ closing the gap.
 - [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** handles disabled/enabled modes (`1`/`2` on the recovered direct event),
   starts/stops the server, tracks clients, and reports mode/status/URL dynamically. **[confirmed]**
-- **Current behavior:** direct start/stop calls systemd, but the service is enabled at boot and status
-  remains hardcoded. Configuration-form RTSP changes are only logged.
-- **Connect impact:** reported and actual RTSP state diverge, particularly across reboot.
+- **Current behavior (implemented):** direct and configuration-form commands share
+  `rtsp_control.apply_mode`, which starts/stops `prusa-rtsp.service`, sets `state.rtsp_mode`, and
+  resolves `state.rtsp_running` from `systemctl is-active`; the configured mode persists at
+  `/etc/prusa-cam/rtsp.mode` (and in `state.json` via GAP-PERSIST-01).
+- **Connect impact (resolved):** reported and actual RTSP state stay consistent.
+- **Before (superseded):** direct start/stop called systemd but status remained hardcoded and
+  configuration-form RTSP changes were only logged, so reported and actual state could diverge.
 - **Implementation:** define persisted/configured mode and actual service state; handle direct and
   configuration-form commands through one path; choose boot behavior from mode.
 - **Acceptance:** disable survives the intended persistence boundary, status follows service state,
@@ -901,9 +946,9 @@ closing the gap.
 
 - [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
 - **Firmware parameter:** snapshot JPEG conversion uses quality `95`. **[confirmed]**
-- **Current parameter:** GStreamer `jpegenc quality=85`.
-- **Connect impact:** different image quality and payload size; unlikely to affect authentication or
-  registration.
+- **Current parameter (implemented):** GStreamer `jpegenc quality=95` (`camera.py`).
+- **Connect impact (resolved):** JPEG quality and payload size match firmware.
+- **Before (superseded):** GStreamer `jpegenc quality=85`.
 - **Implementation:** set 95 unless Pi bandwidth/CPU testing justifies and documents a deliberate
   deviation.
 - **Acceptance:** encoder configuration and a captured image report quality target 95.
@@ -914,16 +959,21 @@ closing the gap.
 - [~] **P2 · Scheduling half implemented; concurrent-stream half open**
 - **Firmware behavior:** coordinated hardware channels allow snapshot service state to be controlled
   independently from RTSP/WebRTC. **[confirmed at service/state level]**
-- **Current behavior:** periodic snapshots are skipped while an RTSP mux connection or the global
-  WebRTC flag is active; sleep begins after capture/upload, so request duration is added to the
-  nominal interval.
+- **Current behavior (scheduling half implemented):** the monotonic start-to-start deadline is
+  implemented; the RTSP/WebRTC pause is intentionally retained (the mux source is shared, but JPEG
+  capture still opens its own consumer), so snapshots are still skipped while an RTSP connection or
+  the WebRTC streaming flag is active. WebRTC teardown now clears the flag, so the pause no longer
+  persists indefinitely after one offer.
 - **Implementation (staged, commit pending):** the scheduling half uses a monotonic start-to-start
   deadline ([`scheduling.py`](../pi-impersonator/scheduling.py) `next_deadline`) so capture/upload
   duration no longer inflates the cadence and an interval change catches up immediately; the
   RTSP/WebRTC pause is intentionally retained until one shared camera source exists. Tests:
   `test_pi_scheduling.py`.
-- **Connect impact:** snapshots appear stale during local viewing and, with the current WebRTC
-  lifecycle bug, indefinitely after one offer.
+- **Connect impact (partly resolved):** snapshots pause during local/WebRTC viewing as before, but
+  the earlier "indefinitely after one offer" symptom is fixed by the WebRTC teardown
+  (GAP-WEBRTC-03), which resumes snapshots on stream end.
+- **Before (superseded):** periodic snapshots were skipped while RTSP/WebRTC was active and, with the
+  then-current WebRTC lifecycle bug, indefinitely after one offer.
 - **Implementation:** once all outputs share one source, capture JPEG frames without pausing for
   RTSP/WebRTC; schedule against a monotonic deadline if firmware cadence requires start-to-start
   intervals.
@@ -935,9 +985,11 @@ closing the gap.
 
 - [~] **P2 · Implemented and unit-tested (d1ec311); live handshake verification pending**
 - **Firmware parameter:** sends `Expect: 100-continue` for JPEG snapshot uploads. **[confirmed]**
-- **Current parameter:** sends the body immediately without the header.
-- **Connect impact:** the live server already accepts current uploads; difference matters mainly for
-  bandwidth on rejected/throttled requests.
+- **Current parameter (implemented):** the snapshot PUT sets aiohttp `expect100=True`, so the
+  `Expect: 100-continue` header is sent.
+- **Connect impact (resolved):** the handshake matches firmware; live handshake verification still
+  pending.
+- **Before (superseded):** sent the body immediately without the header.
 - **Implementation:** enable aiohttp's `expect100` behavior for snapshot PUT and verify no latency or
   proxy regression.
 - **Acceptance:** capture shows the header and successful `100`/final response flow.
@@ -948,10 +1000,14 @@ closing the gap.
 - [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** distinguishes successful, blocked/throttled, redirected, and failed upload
   paths and changes service/retry behavior accordingly. **[confirmed]**
-- **Current behavior:** returns/logs only the status code for snapshots; `/c/info` returns raw body;
-  every loop uses a new session and fixed cadence regardless of result.
-- **Connect impact:** avoidable repeated failures, no redirect/alternate-host behavior, and no clear
-  handling of server blocking.
+- **Current behavior (implemented):** `http_result` classifies responses into
+  `success`/`redirect`/`blocked`(403)/`client_error`/`server_error`/`timeout`/`connection_error`
+  and bounds transient retries; one session is reused for the app lifetime; redirects are
+  classified but not auto-followed (firmware shows none).
+- **Connect impact (resolved):** blocked/failed uploads take the firmware-equivalent path instead of
+  being retried blindly.
+- **Before (superseded):** returned/logged only the status code for snapshots, used a new session and
+  fixed cadence regardless of result, and had no clear handling of server blocking.
 - **Implementation:** reuse an HTTP session, classify responses, follow only firmware-equivalent safe
   redirects, and implement bounded retry/backoff/throttle behavior.
 - **Acceptance:** mocked 2xx, 3xx, 4xx-blocked, 5xx, timeout, and TLS failures take the documented
@@ -970,9 +1026,12 @@ closing the gap.
 - [~] **P2 · Implemented; live verification pending**
 - **Firmware behavior:** publishes the current configured name, resolution, network values, model,
   firmware, manufacturer, trigger scheme, options, capabilities, and feature list. **[confirmed]**
-- **Current behavior:** name and dimensions come from startup config while live quality has separate
-  persisted state; later name/quality/network changes do not update the document.
-- **Connect impact:** metadata shown in Connect can disagree with actual state.
+- **Current behavior (implemented):** `info_body` builds the JSON body from `CameraState`
+  (`state.resolution()`/`state.camera_name`), so `/c/info`, status, and the encoder share one state;
+  the dirty loop republishes after changes.
+- **Connect impact (resolved):** metadata shown in Connect tracks the shared runtime state.
+- **Before (superseded):** name and dimensions came from startup config while live quality had
+  separate persisted state; later name/quality changes did not update the document.
 - **Implementation:** build `/c/info` from the shared runtime/config state used by status and command
   handlers.
 - **Acceptance:** one state fixture produces mutually consistent `/c/info`, status, and encoder
@@ -984,7 +1043,7 @@ closing the gap.
 
 ### GAP-AUTH-01 — Require successful authentication ACK
 
-- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
+- [x] **P2 · Implemented and unit-tested (d1ec311); live-verified 2026-09-20 (ACK `0`, stable session)**
 - **Firmware behavior:** continues its post-authentication flow only on the successful ACK path.
   **[confirmed]**
 - **Current behavior:** only the exact success ACK `0` proceeds; no post-auth events are sent
@@ -1001,11 +1060,14 @@ closing the gap.
 
 ### GAP-CONTROL-01 — Apply and publish camera-name changes
 
-- [~] **P2 · Implemented and unit-tested (d1ec311, b6ec1ea); durable persistence under the overlay still open**
+- [~] **P2 · Implemented and unit-tested (d1ec311, b6ec1ea); durable persistence implemented (GAP-PERSIST-01)**
 - **Firmware behavior:** stores the new camera name and includes it in subsequent status and
   `/c/info`. **[confirmed]**
-- **Current behavior:** logs the value only; all outbound metadata stays `Buddy3D Camera`.
-- **Connect impact:** rename control has no durable or visible effect.
+- **Current behavior (implemented):** `state.set_camera_name` updates shared state, status and
+  `/c/info` are republished via the dirty flag, and the name is persisted in `state.json`
+  (GAP-PERSIST-01), so it survives reboot.
+- **Connect impact (resolved):** rename control has a durable, visible effect.
+- **Before (superseded):** logged the value only; all outbound metadata stayed `Buddy3D Camera`.
 - **Implementation:** store the configured name in shared state, update status, mark `/c/info` dirty,
   and define safe persistence under the read-only-overlay deployment model.
 - **Acceptance:** rename is reflected in both outbound surfaces and survives the intended reboot
@@ -1020,10 +1082,13 @@ closing the gap.
 - **Firmware behavior:** periodically queries the OTA endpoint, compares release/version metadata,
   downloads and verifies an update, observes update policy/time windows, installs/reboots, and
   reports progress through `client_trigger`. **[confirmed]**
-- **Current behavior:** makes one GET at startup, logs up to 200 response characters, never updates,
-  and still advertises `FwUpdate`.
-- **Connect impact:** Connect can request an update that never runs and receives no progress/error
-  state.
+- **Current behavior (implemented):** a periodic (6 h) `ota_loop` parses and classifies the
+  check-in and verifies SHA-1, and both `start_fw_update` and the `fw_update` trigger return an
+  explicit unsupported result (`decline_firmware_update`); `FwUpdate` remains advertised.
+- **Connect impact (resolved):** Connect receives an explicit decline rather than a silent no-op; no
+  unsafe installation path exists. Progress `client_trigger` remains open (GAP-SIO-01).
+- **Before (superseded):** made one GET at startup, logged up to 200 response characters, never
+  updated, and still advertised `FwUpdate`.
 - **Implementation choice:** implement a safe Pi-software update mechanism and OEM-shaped progress
   responses, or remove `FwUpdate` and return an explicit unsupported result if the protocol permits.
 - **Acceptance:** staged fixtures cover no update, available update, integrity failure, successful
@@ -1040,7 +1105,7 @@ closing the gap.
 - **Live (Pi-side) 2026-09-19:** deployed via `deploy.sh` (overlay maintenance flow, services `active`); `/mnt/sdcard` is owned by the service user and writable; the deployed `timelapse.storage_status()` returns `(1, <total>, <free>, <used>, 'RW')` (present, RW); `smbd` active; `/c/info` 200 and `status` sent (387 bytes).
 - **Live (app-side) confirmed 2026-09-19:** after the deploy, Connect shows timelapse **available**; the storage page displays SD size/used/free and the interval is configurable.
 - **Live end-to-end test 2026-09-19:** enable/disable works via trigger tag 5 (`Trigger timelapse_enable`/`timelapse_disable`); frame capture works — 9 `frame_NNNNN.jpg` written to `/mnt/sdcard/timelapse` at the capture cadence (that run used the old `frame_NNNNN.jpg` naming, since superseded by `timelapse_<HH-MM-SS-mmm>.jpg`). Changing the app's interval sent `configuration {2: 30}` (previously ignored); now wired to `state.timelapse_interval` via the recovered `set_timelaps_interval` mapping (GAP-CONFIG-01). **Redeployed and re-verified:** the log shows `Config: timelapse_interval → 30s` and 7 frames landed exactly **35 s apart** (30 s interval + ~5 s capture), proving the interval now takes effect live.
-- **Limitation (2026-09-19):** `/mnt/sdcard` is a plain directory on the read-only overlay root, so recordings live in the tmpfs upper layer and are **lost on reboot** (the maintenance reboot wiped the first test's 9 frames). Frames are retrievable over SMB until the next reboot. Persisting the emulated SD is a separate, not-yet-requested change.
+- **Limitation (2026-09-19) [superseded by GAP-PERSIST-01]:** `/mnt/sdcard` was a plain directory on the read-only overlay root, so recordings lived in the tmpfs upper layer and were **lost on reboot** (the maintenance reboot wiped the first test's 9 frames). **Resolved 2026-09-20:** a 4 GB ext4 `PERSIST` partition at `/data` is bind-mounted to `/mnt/sdcard`, and frames + `.avi` + `.timelapse_videos.csv` were live-verified to survive a real reboot (GAP-PERSIST-01). Frames remain retrievable over SMB.
 - **Firmware artifact naming (recovered 2026-09-19, decompile):** individual frames are JPEGs written by `FUN_000ac5d4` (`std::ofstream`, log `Saved jpeg frame to file: %s`) as **`timelapse_<HH-MM-SS-mmm>.jpg`** (time format `%02d-%02d-%02d-%03d` from `FUN_000ac2e8`), under `/mnt/sdcard/timelapse/`; the service path component at object `+0x10` (also reported as `timelapse_status` tag 4) is prepended when non-empty (`FUN_000ac4b4`). The assembled video is **`.avi`** with a hidden **`.timelapse_videos.csv`** index (`FUN_000ac134` writes `<name>:<status>` rows — `D`/`E`/`P` from `FUN_000aee3c`); the file-list composer `FUN_000ad7ec` enumerates the **`*.avi`** files (`FUN_000ac934`) and emits one **`<name>;<status>\n`** entry each, defaulting a name absent from the index to `'U'` (0x55; log `Timelapse videos with status: %s`). **Matched locally 2026-09-19:** `timelapse.frame_name`/`save_frame` use the exact timestamped `.jpg` name (collisions bump the millisecond), `build_avi` writes an MJPEG-in-AVI `timelapse_<HH-MM-SS-mmm>.avi` and appends a `<name>:D` (or `:E` on failure) row, and `read_video_index`/`file_list_entries` compose the `<name>;<status>` listing; `FUN_000a1fa8`'s `0x3f701c` list envelope is annotated in `protocol.md` and sent by `signaling.send_file_list`.
 - **Live (artifact naming + interval) 2026-09-19:** redeployed (`5ad9263`) and re-tested. The app set the interval to 15 s then 10 s (`configuration {2: 15}` / `{2: 10}` → `Config: timelapse_interval → 15s/10s`), enabled timelapse via trigger tag 5, and 8 frames recorded as **`timelapse_<HH-MM-SS-mmm>.jpg`** (~15 s apart = 10 s interval + ~5 s capture), then disabled. Running `build_avi` on those 8 real frames produced `timelapse_<HH-MM-SS-mmm>.avi` (2.8 MB) that `file(1)` identifies as *"RIFF ... AVI, 1920 x 1080, 10.00 fps, video: Motion JPEG"*, with a `<name>:D` `.timelapse_videos.csv` row and `file_list_entries` = `<name>;D\n`. Also observed: `configuration` `tag3.10` carries the **active print-job name** (e.g. `Voron_Design_Cube_v8_0_4n_0_2mm_PC_COREONE_54m_b`; `unknown_timelapse` when idle).
 - **Live status:** this Connect app version exposes **no make-video button and no file-list/recordings view**, so `tag 14`/`tag 15` and the `file_list` envelope **cannot be exercised through the app UI**. They are implemented and unit-tested (the make path is verified directly on the Pi via `build_avi`/`file(1)`); the `file_list` sender remains not app-exercised. Progress `client_trigger` remains under `GAP-SIO-01`.
@@ -1158,9 +1223,10 @@ closing the gap.
   `test_pi_device_control.py` (`HardwareAvailabilityTests`). **Limitation:** the nested
   `camera_status` tag-to-field mapping remains `descriptor required`, so the hardcoded IR/speaker
   bytes in [`status.py`](../pi-impersonator/status.py) are left unchanged rather than guessed
-  (pinned by `test_status_hardware_bytes_unchanged_pending_descriptor`); capability removal under
-  GAP-CAP-01 is likewise not done, so Connect can still display these controls even though they now
-  never report success.
+  (pinned by `test_status_hardware_bytes_unchanged_pending_descriptor`). **Correction:** capability
+  removal under GAP-CAP-01 **is** done — `IrMode`/`SpeakerVolume`/`FanControl` were pruned from the
+  advertised features (while `MicroSd` is kept for the emulated SD), so Connect no longer exposes
+  those controls even though the status bytes remain pinned.
 
 ### GAP-DEVICE-03 — Host stability: unexpected reboot + thermal throttling
 
@@ -1240,8 +1306,9 @@ closing the gap.
   **[confirmed]**
 - **Deployment state:** the deployed token is bound to the **static fingerprint in
   `config.ini`**; the source now honors that value (`identity.resolve_fingerprint`) so the
-  registered identity keeps working. **Live-verified 2026-09-18:** `/c/info` → `200`
-  (`origin='OTHER', registered=True`), snapshots → `200`, `camera_authentication` ACK `1`. A
+   registered identity keeps working. **Live-verified 2026-09-18:** `/c/info` → `200`
+   (`origin='OTHER', registered=True`), snapshots → `200`, `camera_authentication` ACK `0`
+   (success; the earlier note recording `1` was a misread — `1` is "not authorized"). A
   deploy that switched to the MAC-derived fingerprint instead caused
   `400 {"detail":"Invalid fingerprint"}` / `403`; the configured value was restored.
 - **Implementation/operation (optional):** to move to the firmware-style MAC-derived fingerprint,
@@ -1294,9 +1361,11 @@ closing the gap.
 - **Still open:** golden capture from a genuine 3.1.6 device (not available offline); non-UTC± (IANA) values pass through unchanged.
 - **Firmware behavior:** detects timezone through its configured/web timezone service and reports
   firmware state. **[confirmed at service level; exact status string format needs fixture]**
-- **Current behavior:** sends `time.tzname[0]`, commonly an abbreviation such as `CET`/`CEST`, plus a
-  fixed status value.
-- **Connect impact:** diagnostic/settings difference; unlikely to affect enrollment.
+- **Current behavior (implemented, live-verified 2026-09-19):** detects the timezone from the web
+  API, converts it, writes `/etc/TZ`, and reports the detected value (`UTC+2` → `UTC-2`).
+- **Connect impact (resolved):** representation matches the service result.
+- **Before (superseded):** sent `time.tzname[0]`, commonly an abbreviation such as `CET`/`CEST`,
+  plus a fixed status value.
 - **Implementation:** confirm whether firmware reports an IANA name, abbreviation, or service result
   before changing the field.
 - **Acceptance:** representation matches a real-camera or assignment-path fixture for the same zone.
@@ -1308,9 +1377,13 @@ closing the gap.
 - **Still open:** a golden live status capture to confirm the exact value against a genuine camera; the empty secondary network submessage stays omitted (fixed earlier).
 - **Firmware behavior:** reports current WLAN identity/address/signal and has descriptor space for
   additional network state. **[confirmed]**
-- **Current behavior:** maps `/proc/net/wireless` quality linearly from 0–70 to 0–100 and emits an
-  empty field-2 network submessage.
-- **Connect impact:** telemetry difference only unless classification inspects exact presence.
+- **Current behavior (implemented):** `network.signal_quality_from_wireless` uses the recovered
+  firmware formula on the RSSI (dBm) level column, and the empty secondary network submessage is
+  omitted.
+- **Connect impact (resolved):** signal telemetry matches the firmware conversion; no spurious empty
+  submessage.
+- **Before (superseded):** mapped `/proc/net/wireless` quality linearly from 0–70 to 0–100 and emitted
+  an empty field-2 network submessage.
 - **Implementation:** trace the firmware signal conversion and the field-2 presence condition; omit
   the empty optional submessage if firmware omits it.
 - **Acceptance:** field presence and signal values match a controlled RSSI/quality fixture.
@@ -1320,9 +1393,13 @@ closing the gap.
 - [~] **P3 · Implemented; live verification pending**
 - **Firmware behavior:** long-running services reuse their HTTP/curl context and maintain service
   state. **[confirmed at architecture level]**
-- **Current behavior:** creates a new `aiohttp.ClientSession` for each info and snapshot request.
-- **Connect impact:** extra TLS handshakes, latency, CPU, and connection churn; wire semantics remain
-  accepted.
+- **Current behavior (implemented):** `upload.make_session()` builds one bounded-timeout
+  `aiohttp.ClientSession` that `main` creates once, passes to every request path, and closes in a
+  `finally`; the request functions never build their own.
+- **Connect impact (resolved):** connections are reused; live reuse/close-recovery still needs the
+  Pi.
+- **Before (superseded):** created a new `aiohttp.ClientSession` for each info and snapshot request,
+  causing extra TLS handshakes and connection churn.
 - **Implementation:** own one session for the application lifetime with bounded timeouts and clean
   shutdown.
 - **Acceptance:** repeated uploads reuse connections and recover after server-side close.

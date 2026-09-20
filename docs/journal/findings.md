@@ -1,5 +1,11 @@
 # Prusa Buddy3D Camera Firmware — Reverse Engineering Findings
 
+> **[historical — 3.1.5-era findings, retained as evidence]** Later 3.1.6 work supersedes parts of
+> this document; corrections are noted inline where they were found (e.g. §9.4's ACK log strings
+> correspond to the numeric codes `0`=OK/`1`=not authorized/`2`=error joining session, and the
+> camera-info event is `status`, not `send_sio_info` — see the note near the bottom). Current
+> protocol/status: [`../protocol.md`](../protocol.md), [`../status.md`](../status.md).
+
 **Firmware version:** 3.1.5  
 **Source:** `oem.img` (UBI image, single volume "oem", 148 PEBs, 131072 byte PEB size)  
 **Main binary:** `oem_extracted/897730261/oem/usr/sbin/lp_app` (ARM ELF 32-bit, dynamically linked, stripped, uClibc)

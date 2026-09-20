@@ -12,10 +12,13 @@ protocol from the ARM firmware and reimplements it so you can:
 - **Proxy** an already-registered camera's cloud WebRTC stream to a local RTSP URL and
   send control commands (reboot, resolution, IR mode). → [`proxy/`](proxy/)
 
-> **Status:** the Pi impersonator is **working for core local use** — it registers, uploads
-> snapshots, streams RTSP, and has partial video-quality tier-switching. Full cloud WebRTC playback
-> in the Prusa app is blocked by a backend gate (the camera isn't in Prusa's camera registry).
-> See [`docs/status.md`](docs/status.md) for the exact confirmed-vs-pending line.
+> **Status:** the Pi impersonator is **working end to end** — it registers, uploads snapshots,
+> streams RTSP, and serves **live cloud WebRTC video in both the Prusa app and the browser**
+> (verified live 2026-09-19/20). Video-quality tier-switching is still partial. Genuinely open:
+> wiring the RTSP `configuration` `tag3.11`/`tag3.12`, the remaining `configuration` `tag3`
+> subfields, the `file_list` envelope (implemented + unit-tested but not app-exercisable), and
+> thermal throttling/cooling on the passively cooled Pi. See
+> [`docs/status.md`](docs/status.md) for the exact confirmed-vs-pending line.
 
 ## Start here
 
