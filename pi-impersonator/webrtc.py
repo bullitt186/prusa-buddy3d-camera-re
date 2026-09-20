@@ -68,11 +68,65 @@ def _strip_sprop(sdp_text):
     return '\r\n'.join(out)
 
 
+def _structure_items(node):
+    """Yield ``(field_name, value)`` for a GstStructure, defensively.
+
+    ``get-stats`` is version-dependent, so a missing/odd member must never raise
+    out of the GLib thread; an unusable node simply yields nothing.
+    """
+    n_fields = getattr(node, 'n_fields', None)
+    if not callable(n_fields):
+        return
+    try:
+        count = node.n_fields()
+    except Exception:
+        return
+    for index in range(count):
+        try:
+            name = node.nth_field_name(index)
+            value = node.get_value(name)
+        except Exception:
+            continue
+        yield name, value
+
+
+def _scan_candidate_types(node, side, found):
+    """Recursively collect one local and one remote candidate ``typ``.
+
+    The side is inferred from field names (``ice-local-candidates`` /
+    ``local-candidate`` vs. the remote equivalents) and propagated into the
+    nested candidate structures. Best-effort: an unrecognized stats shape finds
+    nothing and the caller skips the event.
+    """
+    if len(found) >= 2:
+        return
+    for name, value in _structure_items(node):
+        lowered = name.lower()
+        child_side = side
+        if 'local' in lowered:
+            child_side = 'local'
+        elif 'remote' in lowered:
+            child_side = 'remote'
+        if child_side and isinstance(value, str):
+            typ = webrtc_lifecycle.parse_candidate_type(value)
+            if typ and child_side not in found:
+                found[child_side] = typ
+        _scan_candidate_types(value, child_side, found)
+    if not isinstance(node, (str, bytes)) and hasattr(node, '__iter__'):
+        try:
+            for item in node:
+                _scan_candidate_types(item, side, found)
+        except Exception:
+            pass
+
+
 class PrusaWebRTC:
-    def __init__(self, on_offer, on_ice_candidate, on_stream_ended=None):
+    def __init__(self, on_offer, on_ice_candidate, on_stream_ended=None,
+                 on_connection_info=None):
         self._on_offer = on_offer
         self._on_ice = on_ice_candidate
         self._on_stream_ended = on_stream_ended
+        self._on_connection_info = on_connection_info
         self._pipe = None
         self._webrtc = None
         self._request_id = None
@@ -82,6 +136,7 @@ class PrusaWebRTC:
         self._proc = None
         self._ice_connected = False
         self._ended_notified = False
+        self._connection_info_sent = False
         self._disconnect_timeout_id = None
         self._connect_watchdog_id = None
 
@@ -108,6 +163,7 @@ class PrusaWebRTC:
         self._cancel_timeout('_connect_watchdog_id')
         self._ice_connected = False
         self._ended_notified = False
+        self._connection_info_sent = False
         # Disconnect the old pipeline's ICE-state handler BEFORE NULL so a stale
         # CLOSED signal cannot set _ended_notified and suppress the next session's
         # genuine end notification (GAP-WEBRTC-03 review note).
@@ -188,6 +244,7 @@ class PrusaWebRTC:
         self._offer_started = False
         self._ice_connected = False
         self._ended_notified = False
+        self._connection_info_sent = False
         self._disconnect_timeout_id = None
         self._connect_watchdog_id = GLib.timeout_add_seconds(
             30, self._connect_watchdog
@@ -298,6 +355,8 @@ class PrusaWebRTC:
             self._ice_connected = True
             self._cancel_timeout('_disconnect_timeout_id')
             self._cancel_timeout('_connect_watchdog_id')
+            # GAP-WEBRTC-06: report the selected candidate pair once ICE is up.
+            self._emit_connection_info()
             return
 
         reason = webrtc_lifecycle.end_reason(state_value)
@@ -308,6 +367,90 @@ class PrusaWebRTC:
                 )
         elif reason in ('ice-failed', 'ice-closed'):
             self._notify_stream_ended(reason)
+
+    def _emit_connection_info(self):
+        """Request the selected candidate pair once per session (GLib thread).
+
+        Recovered 3.1.6 ``FUN_000be3f8`` runs after candidate-pair selection and
+        forces both types to 6 when no pair exists. ``get-stats`` resolves its
+        promise on the GLib main loop, so it is requested with a change callback
+        (never ``promise.wait()`` on this thread, which would deadlock); an
+        unusable reply logs and skips rather than guessing.
+        """
+        if self._connection_info_sent or self._webrtc is None:
+            return
+        self._connection_info_sent = True
+        try:
+            promise = Gst.Promise.new_with_change_func(self._on_stats_ready)
+            self._webrtc.emit('get-stats', None, promise)
+        except Exception as e:
+            # Allow a later CONNECTED/COMPLETED notification to retry.
+            self._connection_info_sent = False
+            log.warning(f'WebRTC get-stats request failed: {e}; skipping connection info')
+
+    def _on_stats_ready(self, promise):
+        """Handle the async ``get-stats`` reply (GLib thread)."""
+        try:
+            reply = promise.get_reply()
+        except Exception as e:
+            log.warning(f'WebRTC get-stats reply failed: {e}')
+            return
+        stats = None
+        if reply is not None:
+            try:
+                stats = reply.get_value('stats') if reply.has_field('stats') else reply
+            except Exception:
+                stats = reply
+        if stats is None:
+            log.warning('WebRTC connection info: stats unavailable; skipping event')
+            return
+        types = self._selected_candidate_types_from(stats)
+        if types == 'unparseable':
+            # A selected pair exists but its candidate types could not be read
+            # (version-dependent stats shape) - skip rather than misreport 6/6.
+            log.warning(
+                'WebRTC connection info: selected pair present but candidate '
+                'types unreadable; skipping event'
+            )
+            return
+        if types == 'no-pair':
+            local_code = remote_code = webrtc_lifecycle.CANDIDATE_TYPE_NO_PAIR
+            log.info('WebRTC connection info: no selected candidate pair; using 6/6')
+        else:
+            local_typ, remote_typ = types
+            local_code = webrtc_lifecycle.candidate_type_code(local_typ)
+            remote_code = webrtc_lifecycle.candidate_type_code(remote_typ)
+            log.info(
+                f'WebRTC connection info: local={local_typ}->{local_code} '
+                f'remote={remote_typ}->{remote_code}'
+            )
+        client_id = self._request_id
+        if self._loop and self._on_connection_info:
+            self._loop.call_soon_threadsafe(
+                asyncio.ensure_future,
+                self._on_connection_info(client_id, local_code, remote_code),
+            )
+
+    @staticmethod
+    def _selected_candidate_types_from(stats):
+        """Extract ``(local_typ, remote_typ)``, ``'no-pair'`` or ``'unparseable'``.
+
+        ``'no-pair'`` -> the firmware forces 6/6; ``'unparseable'`` -> a selected
+        pair exists but its candidate types could not be read (version-dependent
+        stats shape), so the caller skips the event rather than misreporting 6/6.
+        """
+        found = {}
+        for name, value in _structure_items(stats):
+            lowered = name.lower()
+            if 'selected' in lowered and 'pair' in lowered:
+                _scan_candidate_types(value, None, found)
+                if 'local' in found and 'remote' in found:
+                    return found['local'], found['remote']
+                return 'unparseable'
+        _scan_candidate_types(stats, None, found)
+        if 'local' in found and 'remote' in found:
+            return found['local'], found['remote']
+        return 'no-pair'
 
     def _check_disconnected(self):
         """Resolve a DISCONNECTED grace period after the timeout (GLib thread)."""

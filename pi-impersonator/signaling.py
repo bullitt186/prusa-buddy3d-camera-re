@@ -322,6 +322,29 @@ class PrusaSignaling:
         suffix = f', request_id={request_id[:16]}...' if request_id else ''
         log.info(f'Sent file_list ({len(file_list_msg)} bytes, {len(fragment)}-char fragment{suffix})')
 
+    async def send_webrtc_connection_info(self, client_id, local_code, remote_code):
+        """Emit the recovered ``webrtc_connection_info`` message (GAP-WEBRTC-06).
+
+        Recovered 3.1.6 sender ``FUN_000be3f8`` -> encoder
+        ``FUN_000be050``/``FUN_000bdd3c`` (descriptor ``0x3f65c8``): field 1 =
+        client id string, field 2 = local candidate type byte, field 3 = remote
+        candidate type byte. Fields 4/5/6 are never populated by that sender and
+        their semantics are ``[assumption]``/unknown, so they are omitted rather
+        than guessed. ``sio_emit`` redacts the summary like every other emit.
+        """
+        fields = {1: client_id if isinstance(client_id, str) else '',
+                  2: local_code, 3: remote_code}
+        info_msg = encode_message(fields)
+        await self.sio_emit(
+            'webrtc_connection_info', info_msg,
+            callback=self._log_ack('webrtc_connection_info'),
+        )
+        suffix = f', client={client_id[:16]}...' if client_id else ''
+        log.info(
+            f'Sent webrtc_connection_info (local={local_code}, '
+            f'remote={remote_code}, {len(info_msg)} bytes{suffix})'
+        )
+
     async def _send_post_auth(self):
         # Firmware parity (FUN_000a05e4): the auth-success callback only logs
         # "Authentication successful" and resets the connection counters — it

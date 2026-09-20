@@ -97,6 +97,31 @@ Also open (smaller):
 Live access: `.agent/pi-ops.md` (git-ignored). Deployment requires the overlay
 maintenance dance (`deploy.sh`); rsync-only edits are lost on reboot.
 
+## Identity migration runbook (GAP-IDENTITY-02/03) — fresh token + MAC-derived fingerprint
+
+The firmware-derived fingerprint is `md5("<UPPERCASE:COLON:MAC>")` of the `wlan0` MAC
+(`FUN_00096cd8` -> `FUN_00097e78` `SIOCGIFHWADDR` -> `FUN_00097a4c` MD5 lowercase hex;
+`[confirmed]`). Connect binds the fingerprint to the token **on first contact**, so it cannot be
+changed under an existing token: a later change returns `400 {"detail":"Invalid fingerprint"}` /
+`403`. Migrate only with a **fresh** token, in this order:
+
+1. Read the Pi's real MAC: `cat /sys/class/net/wlan0/address` (must be the 17-char
+   `AA:BB:CC:DD:EE:FF` uppercase form).
+2. Mint a fresh Connect token through the Buddy3D add-camera flow with `origin: OTHER` (the
+   token is opaque; the firmware has no token-generation algorithm).
+3. Remove the explicit `[identity] fingerprint` line from `config.ini` so
+   `identity.resolve_fingerprint` uses the `wlan0`-MAC derivation, and set the fresh token.
+4. Deploy overlay-aware so the change reaches the lower (real) filesystem:
+   `PI=user@host ./deploy.sh` (a bare rsync/`nano` is lost on the next reboot).
+5. Verify: `PUT /c/info` -> `200` (`origin='OTHER'`, `registered=True`), `PUT /c/snapshot` ->
+   `200`, `camera_authentication` ACK `0`, and the outbound `X-Camera-Fingerprint` header equals
+   `md5("<UPPERCASE:COLON:MAC>")`. Then repeat the viewer registry/auth checks.
+
+**GAP-IDENTITY-03 note:** the firmware does **not** inspect the MAC OUI; it hashes whatever
+`wlan0` reports, so the Pi-vendor OUI is an expected per-device difference, not a defect. The
+`smsc95xx` cmdline MAC is the `eth0` placeholder and is irrelevant. The only untested place the OUI
+could matter is the Connect registry gate — keep this item open pending a genuine-OUI source.
+
 ---
 
 

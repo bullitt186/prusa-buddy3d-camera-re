@@ -580,10 +580,15 @@ async def main():
         else:
             log.debug(f'WebRTC stream ended ({reason}); snapshots already running')
 
+    async def on_connection_info(client_id, local_code, remote_code):
+        # GAP-WEBRTC-06: report the selected ICE candidate pair once connected.
+        await sig.send_webrtc_connection_info(client_id, local_code, remote_code)
+
     webrtc = PrusaWebRTC(
         on_offer=on_webrtc_offer,
         on_ice_candidate=on_ice_candidate,
         on_stream_ended=on_stream_ended,
+        on_connection_info=on_connection_info,
     )
     webrtc.start()
 

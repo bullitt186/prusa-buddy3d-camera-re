@@ -564,14 +564,22 @@ different nested `WebRtcSignal` envelope used by viewers.
 
 ### WebRtcConnectionType (6 fields)
 
+**Corrected 2026-09-20 (direct 3.1.6 decompiler):** fields 2/3 are **numeric bytes**, not
+strings. Sender `FUN_000be3f8` -> encoder `FUN_000be050`/`FUN_000bdd3c` populates field 1
+(client id string) and fields 2/3 with the candidate-type byte; fields 4/5/6 are not populated by
+that sender and their semantics are `[assumption]`/unknown. Candidate-type translator
+`FUN_000b5098`: 1=HOST, 2=SERVER_REFLEXIVE, 3=PEER_REFLEXIVE, 4=RELAYED, 0=UNDEFINED, else=UNKNOWN,
+forced to 6 when no candidate pair is selected.
+
 ```protobuf
 message WebRtcConnectionType {
     string client_id = 1;
-    string local_type = 2;   // "HOST" | "SERVER_REFLEXIVE" | "RELAYED" | etc
-    string remote_type = 3;
-    bytes field4 = 4;
-    bytes field5 = 5;
-    bytes field6 = 6;
+    uint32 local_type = 2;    // 1 HOST | 2 SERVER_REFLEXIVE | 3 PEER_REFLEXIVE
+                              // 4 RELAYED | 5 UNDEFINED | 0 UNKNOWN | 6 no-pair
+    uint32 remote_type = 3;   // same code space
+    bytes field4 = 4;         // never populated by FUN_000be3f8; semantics [assumption]
+    bytes field5 = 5;         // never populated by FUN_000be3f8; semantics [assumption]
+    bytes field6 = 6;         // never populated by FUN_000be3f8; semantics [assumption]
 }
 ```
 
