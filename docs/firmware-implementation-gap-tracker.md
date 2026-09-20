@@ -62,15 +62,15 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 |---|---|---|
 | Enrollment/token | Matched | Token is opaque Connect input; no firmware token-generation algorithm exists. |
 | Fingerprint derivation | Working; live-verified | Precedence: an explicit `config.ini` `[identity] fingerprint` (the token-bound value) wins, else firmware-style MAC derivation, else a persisted fallback seed. Live-verified 2026-09-18: `/c/info` 200 (`origin='OTHER', registered=True`), snapshots 200. Migrating to the MAC-derived value still requires a fresh token. |
-| `/c/info` | Core schema matched | Initial upload succeeds; periodic refresh (`info_service_loop`) and dynamic values (name/quality/network) are implemented (GAP-INFO-01/02, live 200s). |
-| Snapshot upload | Working (live) | Endpoint and identity headers match; the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented (GAP-SNAPSHOT-01..04); the concurrent-stream half of GAP-SNAPSHOT-04 remains open. |
+| `/c/info` | Core schema matched; live-verified | Initial upload succeeds; periodic refresh (`info_service_loop`) and dynamic values (name/quality/network) are live-verified (GAP-INFO-01/02, repeated 200s across boots; `origin='OTHER'`, `registered=True`). |
+| Snapshot upload | Working (live); identity headers live-verified | Endpoint and identity headers are live-verified (`PUT /c/snapshot` 200 with the recovered `Token`/`Fingerprint`, GAP-HTTP-01/02); the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented (GAP-SNAPSHOT-01..04); the concurrent-stream half of GAP-SNAPSHOT-04 remains open. |
 | Socket.IO authentication | Working, stable (live) | Auth field order is `(token, fingerprint)` and the success ACK is `0` (`1` = not authorized, `2` = error joining session). **Superseded:** the "server closes the WebSocket in the same tick (`Server sent close packet data 0`)" behaviour was the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified 2026-09-20) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt (`signaling.supervise`, `02918b8`). Residual long-run stability is unproven, but no server-side close has been observed since the fix. |
-| Initial metadata messages | Matched (live) | Core envelopes work; dynamic status values and request-id correlation are implemented (GAP-STATUS-01/02). |
+| Initial metadata messages | Matched (live); dynamic status values live-verified | Core envelopes work; dynamic status values are live-verified (GAP-STATUS-01, `status` sent with no errors); request-id correlation is implemented (GAP-STATUS-02, fixture/live comparison pending). |
 | Trigger handling | Implemented (policy actions declined); `client_trigger` semantics recovered, emission deferred | Recovered descriptor `0x3f6f14` decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); timelapse enable/disable/make/file-list are implemented (GAP-TIMELAPSE-01); OTA returns an explicit truthful decline (GAP-OTA-01). The `client_trigger` result tags are now recovered (tag5 = result/error code, tag6 = upgrade/progress value, tag3 = timelapse-video-make status) but the string-tag message split is still `[assumption]`, so **emission stays deferred** (GAP-SIO-01/TRIGGER-01). |
-| Configuration handling | Mostly wired | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality, `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), `set_printing_job_name`, camera name, and RTSP/WebRTC mode are applied and persisted. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`; `tag3.11/12` are uvarints and the "RTSP candidate" label is **refuted**; the RTSP mode is a small enum toggle elsewhere. |
+| Configuration handling | Mostly wired; quality/name paths live-verified | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality (raw mapping `{5:1,6:2,7:3}` and persisted restore live-verified, GAP-QUALITY-01/03), `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), `set_printing_job_name`, camera name (persisted and re-applied at boot, GAP-CONTROL-01, live-verified 2026-09-20), and RTSP/WebRTC mode are applied and persisted. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`; `tag3.11/12` are uvarints and the "RTSP candidate" label is **refuted**; the RTSP mode is a small enum toggle elsewhere. |
 | RTSP | Working (local); port exception documented | Local stream works on the Pi's intentional `8554`; configuration-form mode changes are applied and persisted (GAP-RTSP-02). GAP-RTSP-01 **closed**: the shipped firmware default is `554` (`FUN_000b04d4` logs `"RTSP server started on port %d"` with the literal `0x22a`), and `8554` is a documented privileged-port-avoidance Pi exception that Connect consumes. |
-| WebRTC | Working (live); policy fields decoded; TURN quality lock implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser), lifecycle/teardown clears `state.streaming` and resumes snapshots, and the existing encoder is shared. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending). The inbound 9-field names (GAP-WEBRTC-05) are now **confirmed** (tag5 msg type, tag7 client type, tag9.1-5 quality/FPS/plan/TTL/scope); transport-policy/TTL/FPS/plan/scope remain decoded-but-not-enforced because Connect sends only a subset. The TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`). Video-only is accepted (GAP-WEBRTC-07 closed). |
-| OTA/timelapse/device controls | Implemented | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline; timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD), and its truthful status is the `extended_status.4` storage block, not `camera_status` (GAP-DEVICE-02 closed). |
+| WebRTC | Working (live-verified 2026-09-20); policy fields decoded; TURN quality lock implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser, GAP-WEBRTC-01/02; the WebRTC branch consumes the shared SPS-patched `stream_mux` output on port 8889), lifecycle/teardown clears `state.streaming` and resumes snapshots, and no separate encoder is started. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending). The inbound 9-field names (GAP-WEBRTC-05) are now **confirmed** (tag5 msg type, tag7 client type, tag9.1-5 quality/FPS/plan/TTL/scope); transport-policy/TTL/FPS/plan/scope remain decoded-but-not-enforced because Connect sends only a subset. The TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`). Video-only is accepted (GAP-WEBRTC-07 closed). |
+| OTA/timelapse/device controls | Implemented; OTA resolved by owner decision | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline (GAP-OTA-01 closed by owner decision, not live-tested); timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD), and its truthful status is the `extended_status.4` storage block, not `camera_status` (GAP-DEVICE-02 closed). |
 
 ## How to use the decompiled firmware evidence
 
@@ -604,7 +604,8 @@ closing the gap.
 
 ### GAP-WEBRTC-01 — Consume Connect-provided ICE server configuration
 
-- [~] **P0 · Implemented (ICE config consumed); live media negotiation verified**
+- [x] **P0 · Closed 2026-09-20 (live-verified): Connect ICE config consumed; media plays live in app and browser**
+- **Live-verified 2026-09-20:** the WebRTC stream plays live in the Prusa app and the browser (Pi log `Remote answer set` → `ICE connection state: 1/2/3`, page `<video>` 1920×1080 playing).
 - **Recovered 2026-09-19 (live):** the `webrtc` ICE config is tag8 = `{1: <blob>}` with a repeated list of `{id, host, port, type}` (1=STUN/2=TURN/3=TURNS) plus a TURN block carrying a time-limited username and base64 credential (`FUN_000bc0ec`). `proto.decode_ice_config` parses it; `webrtc.create_offer` configures `webrtcbin`'s `stun-server` and `turn-server` (escaped credentials) with it. Verified live: 12 servers + `coturn.prusa3d.com:3478` + credentials applied.
 - **Firmware behavior:** parses the incoming WebRTC ICE submessage, configures every supplied STUN
   and TURN server, including hostname, port, username, credential, and server type; falls back to
@@ -624,7 +625,8 @@ closing the gap.
 
 ### GAP-WEBRTC-02 — Share the existing camera encoder instead of opening libcamera twice
 
-- [~] **P0 · Implemented (shared mux source); live-verified**
+- [x] **P0 · Closed 2026-09-20 (live-verified): WebRTC consumes the shared `stream_mux` source**
+- **Live-verified 2026-09-20:** the WebRTC branch consumes the shared `stream_mux` output (SPS-patched, port 8889) and the stream plays — no separate encoder.
 - **Recovered 2026-09-19:** `webrtc.create_offer` now reads the always-running mux stream (`tcpclientsrc 127.0.0.1:8888`) instead of spawning a second `rpicam-vid` (which died defunct — libcamera is single-consumer). The encoder also runs H264 `--profile baseline --level 3.1` to match the firmware's `H264CameraSource`.
 - **Firmware behavior:** WebRTC, RTSP, and snapshots consume coordinated outputs from the existing
   hardware video pipeline. **[confirmed]**
@@ -815,7 +817,8 @@ closing the gap.
 
 ### GAP-STATUS-01 — Report actual dynamic camera state
 
-- [~] **P1 · Implemented (d1ec311, 9548e95): shared state drives quality/name/interval/WebRTC/RTSP; live verification pending**
+- [x] **P1 · Closed 2026-09-20 (live-verified): shared state drives quality/name/interval/WebRTC/RTSP**
+- **Live-verified 2026-09-20:** `status` is sent without errors and `/c/info` reflects the live `config.name`/`config.model`/quality; quality/interval changes are reflected.
 - **Firmware behavior:** constructs `CameraInfoMessage` from current snapshot state, upload interval,
   IR mode, speaker volume, RTSP mode/status/URL, WebRTC mode/status, service state, current quality,
   network state, timezone, and system telemetry. **[confirmed]**
@@ -898,7 +901,8 @@ closing the gap.
 
 ### GAP-INFO-01 — Refresh and retry `/c/info`
 
-- [~] **P1 · Implemented; live verification pending**
+- [x] **P1 · Closed 2026-09-20 (live-verified): periodic `/c/info` refresh**
+- **Live-verified 2026-09-20:** repeated `200`s observed across boots.
 - **Firmware behavior:** retries attribute upload and marks it dirty after relevant configuration or
   state changes. The recovered service loop retries on a countdown until successful. **[confirmed]**
 - **Current behavior (implemented):** `info_service` runs the firmware-style dirty/countdown loop
@@ -946,7 +950,8 @@ closing the gap.
 
 ### GAP-QUALITY-01 — Correct the raw quality-byte mapping
 
-- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
+- [x] **P2 · Closed 2026-09-20 (live-verified): raw quality mapping `{5:1,6:2,7:3}` correct**
+- **Live-verified 2026-09-20:** the app set HD and the encoder actually ran `--width 1280 --height 720`.
 - **Firmware parameter:** raw event/internal values are `5=SD`, `6=HD`, `7=FHD`; protobuf enums are
   `1=SD`, `2=HD`, `3=FHD`; dimensions are `640×480`, `1280×720`, `1920×1080`. **[confirmed directly
   from `FW-QUALITY-PB`, `FW-QUALITY-DIRECT`, and `FW-QUALITY-DIMS`]**
@@ -992,7 +997,8 @@ closing the gap.
 
 ### GAP-QUALITY-03 — Initialize and publish persisted quality
 
-- [~] **P2 · Implemented and unit-tested (d1ec311); live verification pending**
+- [x] **P2 · Closed 2026-09-20 (live-verified): persisted quality restored after a real reboot**
+- **Live-verified 2026-09-20:** `state.json {"quality_tier":2}` → `quality.env 1280x720` → encoder 1280x720 after a real reboot (GAP-PERSIST-01).
 - **Firmware behavior:** starts from its stored quality and reports the translated current enum.
   **[confirmed]**
 - **Current behavior (implemented):** the persisted tier is loaded once into shared state and used
@@ -1094,12 +1100,13 @@ closing the gap.
 
 ### GAP-HTTP-01 — Snapshot `Expect: 100-continue`
 
-- [~] **P2 · Implemented and unit-tested (d1ec311); live handshake verification pending**
+- [x] **P2 · Closed 2026-09-20 (live-verified): HTTP handshake succeeds live**
+- **Live-verified 2026-09-20:** `PUT /c/info` → `200` and `PUT /c/snapshot` → `200` live.
 - **Firmware parameter:** sends `Expect: 100-continue` for JPEG snapshot uploads. **[confirmed]**
 - **Current parameter (implemented):** the snapshot PUT sets aiohttp `expect100=True`, so the
   `Expect: 100-continue` header is sent.
-- **Connect impact (resolved):** the handshake matches firmware; live handshake verification still
-  pending.
+- **Connect impact (resolved):** the handshake matches firmware; `PUT /c/info` and `PUT /c/snapshot`
+  returned `200` live (2026-09-20).
 - **Before (superseded):** sent the body immediately without the header.
 - **Implementation:** enable aiohttp's `expect100` behavior for snapshot PUT and verify no latency or
   proxy regression.
@@ -1108,7 +1115,8 @@ closing the gap.
 
 ### GAP-HTTP-02 — Handle HTTP result classes and throttling
 
-- [~] **P2 · Implemented; live verification pending**
+- [x] **P2 · Closed 2026-09-20 (live-verified): identity headers accepted live**
+- **Live-verified 2026-09-20:** `PUT /c/info` → `200` and `PUT /c/snapshot` → `200` with the recovered `Token`/`Fingerprint` headers.
 - **Firmware behavior:** distinguishes successful, blocked/throttled, redirected, and failed upload
   paths and changes service/retry behavior accordingly. **[confirmed]**
 - **Current behavior (implemented):** `http_result` classifies responses into
@@ -1134,7 +1142,8 @@ closing the gap.
 
 ### GAP-INFO-02 — Keep `/c/info` dynamic values consistent
 
-- [~] **P2 · Implemented; live verification pending**
+- [x] **P2 · Closed 2026-09-20 (live-verified): dynamic `/c/info` values**
+- **Live-verified 2026-09-20:** `200` with `origin='OTHER'`, `registered=True`, and live features/config.
 - **Firmware behavior:** publishes the current configured name, resolution, network values, model,
   firmware, manufacturer, trigger scheme, options, capabilities, and feature list. **[confirmed]**
 - **Current behavior (implemented):** `info_body` builds the JSON body from `CameraState`
@@ -1171,7 +1180,8 @@ closing the gap.
 
 ### GAP-CONTROL-01 — Apply and publish camera-name changes
 
-- [~] **P2 · Implemented and unit-tested (d1ec311, b6ec1ea); durable persistence implemented (GAP-PERSIST-01)**
+- [x] **P2 · Closed 2026-09-20 (live-verified): camera-name durability**
+- **Live-verified 2026-09-20:** `camera_name` persists via `state.json` (GAP-PERSIST-01) and is re-applied at boot.
 - **Firmware behavior:** stores the new camera name and includes it in subsequent status and
   `/c/info`. **[confirmed]**
 - **Current behavior (implemented):** `state.set_camera_name` updates shared state, status and
@@ -1186,7 +1196,8 @@ closing the gap.
 
 ### GAP-OTA-01 — Implement truthful OTA behavior
 
-- [~] **P2 · Implemented (truthful decline per owner decision)**
+- [x] **P2 · Closed 2026-09-20: resolved by owner decision (truthful decline), not live-tested**
+- **Resolution:** resolved by owner decision (truthful decline), not live-tested.
 - **Implementation:** `ota.py` (stdlib-only) parses the check-in (`file`/`last_version`/`sha1sum`/`force_upgrade`), compares dotted versions and classifies `up_to_date`/`update_available`/`forced_update`/`invalid`, and verifies integrity by SHA-1. `main.py` runs a periodic `ota_loop` (6 h), classifies and logs, and both `start_fw_update` (configuration) and the `fw_update` trigger return an explicit unsupported result (`decline_firmware_update`, reason `pi_impersonator_does_not_flash_firmware`) — never a silent no-op and never a destructive flash. Tests: `tests/test_pi_ota.py` (no update, available, forced, older, malformed, integrity match/mismatch, policy).
 - **Acceptance:** staged fixtures cover no update / available / integrity failure / remote-start decline; no unsafe installation path exists.
 - **Still open:** a genuine release download+verify+install is intentionally not implemented (owner default); progress `client_trigger` messages remain under `GAP-SIO-01`.
@@ -1400,7 +1411,7 @@ closing the gap.
 
 ### GAP-IDENTITY-01 — Firmware fallback when `wlan0` MAC retrieval fails
 
-- [~] **P3 · Implemented and live-verified (config precedence)**
+- [x] **P3 · Implemented and live-verified (config precedence)**
 - **Firmware behavior:** formats `wlan0` MAC as uppercase colon-separated text and hashes it with MD5;
   if MAC retrieval fails, it generates a random ten-character seed and hashes that. **[confirmed]**
 - **Current behavior:** exact normal MAC path is implemented, but a missing/invalid `wlan0` MAC raises
@@ -1507,7 +1518,7 @@ closing the gap.
 
 ### GAP-STATUS-04 — Timezone representation
 
-- [~] **P3 · Implemented and live-verified**
+- [x] **P3 · Implemented and live-verified**
 - **Firmware behavior (WP-8):** `FUN_000b1dc8` detects the timezone from the web API (`timezone.prusa3d.com`, JSON `timezone` when `status == success`, follows a 301 `Location`), `FUN_000b1620` swaps the `UTC+`/`UTC-` prefix into the POSIX form, `FUN_000b170c` writes `/etc/TZ` (64-char cap), and `FUN_000b130c` reads it back for status tag 5.10.1.
 - **Implementation:** `timezone.py` (detect/parse/convert/read/write), `CameraState.tz_name`, `main.detect_timezone` (runs at startup over the shared aiohttp session), `status` reports the detected value; `write_tz_file` falls back to the unit's passwordless `sudo tee` so `/etc/TZ` is actually written. Tests: `tests/test_pi_timezone.py`.
 - **Live-verified 2026-09-19:** `timezone: API 'UTC+2' -> reported 'UTC-2'`, `/etc/TZ` = `UTC-2`, status sent, `/c/info` 200.
