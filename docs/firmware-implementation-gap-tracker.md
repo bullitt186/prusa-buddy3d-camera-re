@@ -1289,7 +1289,12 @@ closing the gap.
 
 ### GAP-DEVICE-01 — Reboot command behavior
 
-- [~] **P2 · Implemented; live reboot unverified**
+- [x] **P2 · Closed 2026-09-20: live-verified — Connect's "Restart Camera" rebooted the Pi**
+- **Live 2026-09-20:** clicking Connect's **"Restart Camera"** control (with its confirm dialog) sent the
+  reboot trigger; the Pi rebooted immediately (SSH dropped, uptime reset to ~1 min), came back, all
+  services `active`, `/c/info` returned `200` (`origin='OTHER', registered=True`), and
+  `/boot/firmware/bootlog.txt` recorded the boot. The 60 s rate limit and the refusal paths remain
+  covered by `test_pi_device_control.py` (`RebootGuardTests`).
 - **Firmware behavior:** remote reboot trigger reboots the device and reports the appropriate result
   before disconnect. **[confirmed]**
 - **Current behavior:** advertises `CameraReboot` but does not dispatch the trigger.
