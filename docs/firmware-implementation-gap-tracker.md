@@ -1061,7 +1061,7 @@ closing the gap.
 
 ### GAP-PERSIST-01 — Persist settings + timelapse storage on /data
 
-- [~] **P2 · Implemented (WP1/WP2); offline partition + live verification pending**
+- [x] **P2 · Live-verified 2026-09-20: settings + timelapse store survive a reboot**
 - **Problem:** the Pi root is a read-only overlay (`overlayroot=tmpfs`), so `/etc/prusa-cam/*`
   (quality/rtsp/identity) and `/mnt/sdcard` (timelapse frames, `.avi`,
   `.timelapse_videos.csv`) live in the tmpfs upper layer and are discarded on every reboot.
@@ -1097,8 +1097,19 @@ closing the gap.
   (AST: `_save_persisted_state` defined and called ≥6× in `handle_event`; startup
   loads/applies), `tests/test_pi_persist_restore.py` (`frames_to_prune` oldest-first,
   `quality_env_values`, import safety).
-- **Remaining:** create `mmcblk0p3` offline (WP3), then deploy and verify AC-1..AC-6 live
-  (`findmnt /data`, settings/frames survive reboot, SMB unchanged).
+- **Live verification 2026-09-20:** the SD was repartitioned offline (p2 → 10.3G, `mmcblk0p3` 4G
+  ext4 LABEL `PERSIST` PARTUUID `46f0d7c3-03`), then a deploy added
+  `PARTUUID=46f0d7c3-03 /data ext4 defaults,noatime 0 2`. Verified after a real reboot:
+  `findmnt /data` = `/dev/mmcblk0p3`; `/mnt/sdcard` = `/dev/mmcblk0p3[/sdcard]` (bind);
+  `pi-persist.service` `Result=success`; `state.json` (`{"quality_tier": 2}`) restored → `quality.env`
+  = `1280x720` → `rpicam-vid … --width 1280 --height 720` (the encoder really starts at the
+  persisted resolution), and the app logged `Loaded persisted settings: quality_tier`; frames +
+  `.avi` + `.timelapse_videos.csv` written under `/mnt/sdcard/timelapse` survived the reboot and
+  `file_list_entries()` still returned the `.avi`; `smbd` active with `[sdcard]` `force user =
+  bullitt`; `quality.live.env` was absent after the reboot (still ephemeral, GAP-QUALITY-02).
+- **Remaining:** none for the persistence scope. Optional follow-ups: an in-app live UI check of
+  the save wiring (only the AST tests cover the mutation call sites today), and a `dosfsck`/fsck
+  note for the new partition (ext4, journaled, fsck order 2 in fstab).
 
 ### GAP-DEVICE-01 — Reboot command behavior
 

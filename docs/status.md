@@ -71,11 +71,12 @@ storage page shows size/used/free, and the interval is configurable. **Live end-
 `/mnt/sdcard/timelapse`; the app's interval change arrives as `configuration {2: <seconds>}`
 (=`set_timelaps_interval`, dispatcher `FUN_000a7940`), and after wiring it the log shows
 `Config: timelapse_interval → 30s` with frames exactly 35 s apart. **Limitation:**
-`/mnt/sdcard` is on the read-only overlay root, so recordings are lost on reboot (retrievable
-over SMB until then). **Persistence layer implemented 2026-09-20 (GAP-PERSIST-01, not yet
-active):** a new ext4 `/data` partition will hold `/data/prusa-cam/state.json` (runtime settings)
-and a `/data/sdcard` store bind-mounted onto `/mnt/sdcard`; until `mmcblk0p3` exists every path
-is a safe no-op (`settings_store.available()` false → nothing written). **Live 2026-09-19 (deployed `5ad9263`):** the app set 15 s then 10 s
+`/mnt/sdcard` is on the read-only overlay root, so recordings were lost on reboot — **fixed
+2026-09-20 (GAP-PERSIST-01, live-verified):** the SD was repartitioned (p2 → 10.3G, new 4G ext4
+`mmcblk0p3` LABEL `PERSIST` mounted at `/data`). `/data/prusa-cam/state.json` now holds the runtime
+settings and `/data/sdcard` is bind-mounted onto `/mnt/sdcard`. After a real reboot: `/data` mounted,
+`quality.env` restored to `1280x720` (encoder `--width 1280 --height 720`), frames/`.avi`/CSV survived,
+the file list still returned the `.avi`, SMB unchanged, and `quality.live.env` stayed ephemeral. **Live 2026-09-19 (deployed `5ad9263`):** the app set 15 s then 10 s
 intervals (`configuration {2: …}`) and 8 frames recorded as `timelapse_<HH-MM-SS-mmm>.jpg` (~15 s
 apart); running `build_avi` on those frames produced an `.avi` that `file(1)` confirms as
 *"AVI, 1920x1080, 10.00 fps, video: Motion JPEG"* with a `<name>:D` `.timelapse_videos.csv` row.
