@@ -371,6 +371,34 @@ class MainTimelapseWiringTests(unittest.TestCase):
             for n in ast.walk(fn)
         ))
 
+    def test_save_persisted_state_defined_and_called_from_event_handler(self):
+        # GAP-PERSIST-01: every successful mutation in handle_event persists.
+        self._function('_save_persisted_state')
+        fn = self._function('handle_event')
+        calls = [
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == '_save_persisted_state'
+        ]
+        self.assertGreaterEqual(len(calls), 6)
+
+    def test_startup_loads_and_applies_persisted_settings(self):
+        fn = self._function('main')
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        self.assertTrue(any(
+            isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'load'
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == 'settings_store'
+            for n in calls
+        ))
+        self.assertTrue(any(
+            isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'apply_persisted'
+            for n in calls
+        ))
+
     def test_config_handler_maps_tag3_5_to_snapshot_interval(self):
         # GAP-CONFIG-01: configuration tag3.5 = set_snapshot_upload_interval
         # (FUN_000a7940, 10..600). Connect's update-interval slider sends it.

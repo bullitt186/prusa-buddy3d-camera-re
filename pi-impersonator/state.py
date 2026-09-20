@@ -133,6 +133,81 @@ class CameraState:
         self.camera_name = stripped
         return True
 
+    def persistable_state(self):
+        """Return the durable settings dict (GAP-PERSIST-01).
+
+        Excludes the store ``version`` (``settings_store.save`` adds it) and any
+        transient runtime field (``rtsp_running``, ``streaming``, ``tz_name``,
+        ``info_dirty``, the live quality override, ...). The key set matches the
+        documented ``state.json`` schema.
+        """
+        return {
+            'quality_tier': self.quality,
+            'camera_name': self.camera_name,
+            'snapshot_interval': self.snapshot_interval,
+            'snapshot_upload_enabled': self.snapshot_upload_enabled,
+            'timelapse_interval': self.timelapse_interval,
+            'timelapse_enabled': self.timelapse_enabled,
+            'timelapse_fps': self.timelapse_fps,
+            'rtsp_mode': self.rtsp_mode,
+            'webrtc_mode': self.webrtc_mode,
+        }
+
+    def apply_persisted(self, data):
+        """Apply recognized persisted keys and return the applied key names.
+
+        Only present, valid values are applied; unknown keys and invalid values
+        are ignored. Reuses the setters where one exists so validation matches the
+        live command path, and mirrors their type/range checks for the fields with
+        no setter. Never raises on bad data.
+        """
+        if not isinstance(data, dict):
+            return []
+        applied = []
+
+        value = data.get('quality_tier')
+        if value is not None and self.set_quality(value):
+            applied.append('quality_tier')
+
+        value = data.get('camera_name')
+        if value is not None and self.set_camera_name(value):
+            applied.append('camera_name')
+
+        value = data.get('snapshot_interval')
+        if value is not None and self.set_snapshot_interval(value):
+            applied.append('snapshot_interval')
+
+        value = data.get('snapshot_upload_enabled')
+        if type(value) is bool:
+            self.snapshot_upload_enabled = value
+            applied.append('snapshot_upload_enabled')
+
+        value = data.get('timelapse_interval')
+        if value is not None and self.set_timelapse_interval(value):
+            applied.append('timelapse_interval')
+
+        value = data.get('timelapse_enabled')
+        if type(value) is bool:
+            self.timelapse_enabled = value
+            applied.append('timelapse_enabled')
+
+        value = data.get('timelapse_fps')
+        if type(value) is int and timelapse.valid_fps(value) is not None:
+            self.timelapse_fps = value
+            applied.append('timelapse_fps')
+
+        value = data.get('rtsp_mode')
+        if type(value) is int and value in (1, 2):
+            self.rtsp_mode = value
+            applied.append('rtsp_mode')
+
+        value = data.get('webrtc_mode')
+        if type(value) is int and value in (0, 1):
+            self.webrtc_mode = value
+            applied.append('webrtc_mode')
+
+        return applied
+
     def mark_info_dirty(self):
         self.info_dirty = True
 

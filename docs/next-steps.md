@@ -51,6 +51,13 @@ Already done for timelapse:
   `build_avi` on real frames yields a `file(1)`-confirmed MJPEG AVI; this app
   version has no make-video button or file-list view, so the `file_list` sender
   is not app-exercisable.
+- **Persistence implemented 2026-09-20 (GAP-PERSIST-01, WP1/WP2; not yet active).**
+  `settings_store.py` atomically stores runtime settings in `/data/prusa-cam/state.json`;
+  `state.persistable_state`/`apply_persisted` round-trip them; `main` saves at every
+  mutation and restores at startup; and `persist_restore.py` (root, `pi-persist.service`)
+  bind-mounts `/data/sdcard` → `/mnt/sdcard`, re-materializes `quality.env`/`rtsp.mode`, and
+  prunes old frames under low free space. Everything is a safe no-op until the offline
+  repartition creates `mmcblk0p3`; `deploy.sh` activates the fstab entry only when it exists.
 
 Also open (smaller):
 - Wire the RTSP `configuration` field (`tag3.11`/`tag3.12`) through `rtsp_control`.

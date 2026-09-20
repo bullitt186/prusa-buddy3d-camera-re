@@ -115,6 +115,35 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
     sudo systemctl enable bootlog.service >/dev/null 2>&1 && \
     sudo systemctl start bootlog.service >/dev/null 2>&1 || true"
 
+  # GAP-PERSIST-01: restore durable settings + bind-mount the timelapse store.
+  # Installed and enabled unconditionally but NOT started here: it is a no-op
+  # until the offline repartition creates /dev/mmcblk0p3 (RequiresMountsFor=/data).
+  log "install pi-persist.service (template SERVICE_USER → $PI_USER)"
+  sed -e "s|/home/pi/|/home/$PI_USER/|g" -e "s/SERVICE_USER=pi/SERVICE_USER=$PI_USER/" \
+    "$SRC/systemd/pi-persist.service" \
+    | "${SSH[@]}" "sudo tee /etc/systemd/system/pi-persist.service >/dev/null && sudo systemctl daemon-reload"
+  "${SSH[@]}" "sudo systemctl enable pi-persist.service >/dev/null 2>&1 || true"
+
+  # Guarded activation: only when the /data partition already exists. The fstab
+  # entry uses the partition's real PARTUUID and is skipped when already present,
+  # so this is idempotent and harmless before the repartition.
+  log "check /data partition (mmcblk0p3)"
+  "${SSH[@]}" "if [ -b /dev/mmcblk0p3 ]; then
+      uuid=\$(sudo blkid -s PARTUUID -o value /dev/mmcblk0p3)
+      if [ -n \"\$uuid\" ] && ! grep -q \"\$uuid\" /etc/fstab; then
+        printf 'PARTUUID=%s /data ext4 defaults,noatime 0 2\n' \"\$uuid\" | sudo tee -a /etc/fstab >/dev/null
+        echo \"added /data fstab entry for \$uuid\"
+      fi
+      sudo install -d /data/sdcard/timelapse /data/prusa-cam
+      sudo chown $PI_USER:$PI_USER /data/sdcard /data/sdcard/timelapse /data/prusa-cam
+      if findmnt -no TARGET /data >/dev/null 2>&1; then
+        sudo install -d /data/sdcard/timelapse /data/prusa-cam
+        sudo chown $PI_USER:$PI_USER /data/sdcard /data/sdcard/timelapse /data/prusa-cam
+      fi
+    else
+      echo 'no /data partition yet; skipping persistence activation'
+    fi"
+
   log "restart services"
   "${SSH[@]}" 'sudo systemctl restart rpicam-source.service prusa-rtsp.service prusa-cam.service'
   sleep 5

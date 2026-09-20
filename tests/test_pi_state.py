@@ -178,6 +178,95 @@ class QualityPersistenceTests(unittest.TestCase):
         self.assertEqual(quality.read_current(), (2, 1280, 720))
 
 
+class PersistedStateTests(unittest.TestCase):
+    """GAP-PERSIST-01: the durable subset of CameraState."""
+
+    def test_persistable_state_contents(self):
+        state = CameraState()
+        state.set_quality(2)
+        state.set_camera_name('  Print Room  ')
+        state.set_snapshot_interval(30)
+        state.snapshot_upload_enabled = False
+        state.set_timelapse_interval(15)
+        state.timelapse_enabled = True
+        state.timelapse_fps = 12
+        state.rtsp_mode = 2
+        state.webrtc_mode = 0
+        self.assertEqual(state.persistable_state(), {
+            'quality_tier': 2,
+            'camera_name': 'Print Room',
+            'snapshot_interval': 30,
+            'snapshot_upload_enabled': False,
+            'timelapse_interval': 15,
+            'timelapse_enabled': True,
+            'timelapse_fps': 12,
+            'rtsp_mode': 2,
+            'webrtc_mode': 0,
+        })
+        # The store version is owned by settings_store.save, not CameraState.
+        self.assertNotIn('version', state.persistable_state())
+
+    def test_apply_persisted_applies_valid_keys(self):
+        state = CameraState()
+        applied = state.apply_persisted({
+            'quality_tier': 1,
+            'camera_name': 'Workshop',
+            'snapshot_interval': 600,
+            'snapshot_upload_enabled': False,
+            'timelapse_interval': 3600,
+            'timelapse_enabled': True,
+            'timelapse_fps': 30,
+            'rtsp_mode': 2,
+            'webrtc_mode': 0,
+        })
+        self.assertEqual(set(applied), {
+            'quality_tier', 'camera_name', 'snapshot_interval',
+            'snapshot_upload_enabled', 'timelapse_interval', 'timelapse_enabled',
+            'timelapse_fps', 'rtsp_mode', 'webrtc_mode',
+        })
+        self.assertEqual(state.quality, 1)
+        self.assertEqual(state.camera_name, 'Workshop')
+        self.assertEqual(state.snapshot_interval, 600)
+        self.assertFalse(state.snapshot_upload_enabled)
+        self.assertEqual(state.timelapse_interval, 3600)
+        self.assertTrue(state.timelapse_enabled)
+        self.assertEqual(state.timelapse_fps, 30)
+        self.assertEqual(state.rtsp_mode, 2)
+        self.assertEqual(state.webrtc_mode, 0)
+
+    def test_apply_persisted_ignores_invalid_and_unknown(self):
+        state = CameraState()
+        applied = state.apply_persisted({
+            'quality_tier': 9,
+            'camera_name': '   ',
+            'snapshot_interval': 5,
+            'snapshot_upload_enabled': 'yes',
+            'timelapse_interval': 0,
+            'timelapse_enabled': 1,
+            'timelapse_fps': 99,
+            'rtsp_mode': 3,
+            'webrtc_mode': 7,
+            'version': 1,
+            'unknown_key': 'ignored',
+        })
+        self.assertEqual(applied, [])
+        self.assertEqual(state.quality, DEFAULT_QUALITY)
+        self.assertEqual(state.camera_name, 'Buddy3D Camera')
+        self.assertEqual(state.snapshot_interval, SNAPSHOT_INTERVAL_MIN)
+        self.assertTrue(state.snapshot_upload_enabled)
+        self.assertEqual(state.timelapse_interval, 10)
+        self.assertFalse(state.timelapse_enabled)
+        self.assertEqual(state.timelapse_fps, 10)
+        self.assertEqual(state.rtsp_mode, 1)
+        self.assertEqual(state.webrtc_mode, 1)
+
+    def test_apply_persisted_never_raises_on_bad_data(self):
+        state = CameraState()
+        for bad in (None, [], 'nope', 42, {'quality_tier': None}):
+            with self.subTest(bad=bad):
+                self.assertEqual(state.apply_persisted(bad), [])
+
+
 class SnapshotUploadPredicateTests(unittest.TestCase):
     def test_periodic_upload_allowed_by_default(self):
         state = CameraState()

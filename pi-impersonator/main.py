@@ -49,6 +49,7 @@ import local_http
 import timezone
 import ota
 import timelapse
+import settings_store
 
 logging.basicConfig(
     # stdout only → journald (Storage=volatile, RAM). No SD-card log writes: the Pi
@@ -95,6 +96,24 @@ def handle_quality(raw_byte, persist):
     without ``gi``/``aiohttp``/systemd.
     """
     return quality_control.handle_quality(raw_byte, persist, apply_live_quality, persist_quality)
+
+
+def _save_persisted_state(state):
+    """Persist the durable subset of ``state`` to /data (GAP-PERSIST-01).
+
+    Inert while /data is not a mountpoint, so this is safe to call before the
+    offline repartition creates the partition. Returns True only on success.
+    """
+    if not settings_store.available():
+        log.debug('settings: /data not mounted; not persisting state')
+        return False
+    data = state.persistable_state()
+    if settings_store.save(data):
+        log.info(f'persisted settings: {",".join(sorted(data))}')
+        return True
+    log.warning('settings: could not persist state')
+    return False
+
 
 def rtsp_streaming():
     # ponytail: /proc/net/tcp check — no subprocess, detects active RTSP client
@@ -509,6 +528,14 @@ async def main():
         f'(1=disabled/2=enabled) running={state.rtsp_running}'
     )
 
+    # GAP-PERSIST-01: overlay persisted settings (from /data) on top of the
+    # file-based seeds above. quality_tier/rtsp_mode are also materialized into
+    # /etc/prusa-cam by pi-persist.service, so the existing file reads stay.
+    persisted = settings_store.load()
+    if persisted:
+        applied = state.apply_persisted(persisted)
+        log.info(f'Loaded persisted settings: {", ".join(applied) or "none"}')
+
     mac, ip, ssid, fingerprint = get_network_info(cfg['identity'].get('fingerprint'))
 
     # GAP-HTTP-03: one session for the whole application lifetime, reused by the
@@ -604,6 +631,7 @@ async def main():
         elif action in (trigger.SNAPSHOT_ENABLE, trigger.SNAPSHOT_DISABLE):
             trigger.apply_snapshot_upload(action, state)
             log.info(f'Trigger: snapshot_upload_enabled={state.snapshot_upload_enabled}')
+            _save_persisted_state(state)
         elif action in (trigger.RTSP_START, trigger.RTSP_STOP):
             mode = (rtsp_control.RTSP_ENABLED if action == trigger.RTSP_START
                     else rtsp_control.RTSP_DISABLED)
@@ -615,6 +643,7 @@ async def main():
                 persist=rtsp_control.write_mode,
             )
             log.info(f'Trigger {action}: mode={state.rtsp_mode} running={state.rtsp_running}')
+            _save_persisted_state(state)
         elif action == trigger.REBOOT:
             # GAP-DEVICE-01: the trigger dispatcher is the only path here. The
             # guard rejects a second request inside its window and never fakes
@@ -627,6 +656,7 @@ async def main():
         elif action in (trigger.TIMELAPSE_ENABLE, trigger.TIMELAPSE_DISABLE):
             if timelapse.apply_enable(action, state):
                 log.info(f'Trigger {action}: timelapse_enabled={state.timelapse_enabled}')
+                _save_persisted_state(state)
         elif action == trigger.TIMELAPSE_MAKE:
             width, height = state.resolution()
             path = timelapse.build_avi(
@@ -748,6 +778,7 @@ async def main():
                         f'Config: video_quality → enum {vq[1]} '
                         f'({state.resolution()})'
                     )
+                    _save_persisted_state(state)
             # GAP-CONFIG-01: top-level field 2 = set_timelaps_interval. Recovered
             # from the configuration dispatcher FUN_000a7940 (field 2 at struct
             # offset 0x14 dispatches the name "set_timelaps_interval", logging
@@ -757,6 +788,7 @@ async def main():
             if tl_interval is not None:
                 if state.set_timelapse_interval(tl_interval):
                     log.info(f'Config: timelapse_interval → {state.timelapse_interval}s')
+                    _save_persisted_state(state)
                 else:
                     log.warning(
                         f'Config: timelapse_interval {tl_interval!r} rejected '
@@ -785,6 +817,7 @@ async def main():
                             f'Config: snapshot_upload_interval (tag3.5) → '
                             f'{state.snapshot_interval}s'
                         )
+                        _save_persisted_state(state)
                     else:
                         log.warning(
                             f'Config: snapshot_upload_interval (tag3.5) {up!r} rejected '
@@ -807,12 +840,14 @@ async def main():
                     # /c/info with the new name.
                     state.mark_info_dirty()
                     log.info(f'Config: camera_name → {state.camera_name!r}')
+                    _save_persisted_state(state)
                 else:
                     log.warning(f'Config: camera_name {name!r} rejected (empty)')
             interval_val = msg.get('snapshot_interval')
             if interval_val is not None:
                 if state.set_snapshot_interval(interval_val):
                     log.info(f'Config: snapshot_interval → {interval_val}s (live)')
+                    _save_persisted_state(state)
                 else:
                     log.warning(f'Config: snapshot_interval {interval_val!r} rejected (10..600)')
             vq = msg.get('video_quality')
@@ -828,6 +863,7 @@ async def main():
                     if raw is not None and handle_quality(raw, persist=True):
                         state.mark_info_dirty()
                         log.info(f'Config: video_quality → {vq} (enum {qenum}, {state.resolution()})')
+                        _save_persisted_state(state)
             lc = msg.get('light_control')
             if lc is not None:
                 # GAP-DEVICE-02: no IR illuminator on the Pi; the policy logs the
@@ -853,6 +889,7 @@ async def main():
                         f'Config: rtsp → mode={state.rtsp_mode} '
                         f'running={state.rtsp_running}'
                     )
+                    _save_persisted_state(state)
             wrtc = msg.get('webrtc')
             if wrtc is not None:
                 requested = None
@@ -869,6 +906,7 @@ async def main():
                         f'Config: webrtc → mode={state.webrtc_mode} '
                         f'status={state.webrtc_status}'
                     )
+                    _save_persisted_state(state)
                     # FW-CONFIG:108-140: the paired rule — `webrtc on` also
                     # forces RTSP disabled.
                     if requested == 1 and state.rtsp_mode != 1:
@@ -880,6 +918,7 @@ async def main():
                             persist=rtsp_control.write_mode,
                         )
                         log.info('Config: webrtc on → RTSP forced disabled (paired rule)')
+                        _save_persisted_state(state)
             fw = msg.get('start_fw_update')
             if fw is not None and str(fw).lower() == 'start':
                 decline_firmware_update('start_fw_update')
@@ -899,6 +938,7 @@ async def main():
                     f'set_rtsp_server_mode: mode={state.rtsp_mode} '
                     f'running={state.rtsp_running}'
                 )
+                _save_persisted_state(state)
         elif event == 'set_webrtc_mode':
             requested = webrtc_control.decode_mode(data)
             if requested is None:
@@ -912,6 +952,7 @@ async def main():
                     f'set_webrtc_mode: mode={state.webrtc_mode} '
                     f'status={state.webrtc_status}'
                 )
+                _save_persisted_state(state)
         elif event in ('change_video_size', 'save_video_size'):
             val = data[0] if isinstance(data, (bytes, bytearray)) and data else None
             # GAP-QUALITY-01/02: raw 5/6/7 -> SD/HD/FHD, live apply always, persist
@@ -921,6 +962,8 @@ async def main():
                 # GAP-INFO-01/02: republish the quality-derived resolution.
                 state.mark_info_dirty()
                 log.info(f'{event}: quality → raw {val} (enum {state.quality}, {state.resolution()})')
+                if persist:
+                    _save_persisted_state(state)
             else:
                 log.warning(f'{event}: quality byte {val!r} not fully applied (live or persist failed)')
         elif event == 'timelapse_get_file_list':

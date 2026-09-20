@@ -1059,6 +1059,47 @@ closing the gap.
   or an explicit firmware-shaped unsupported/error response.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L301-L304)
 
+### GAP-PERSIST-01 — Persist settings + timelapse storage on /data
+
+- [~] **P2 · Implemented (WP1/WP2); offline partition + live verification pending**
+- **Problem:** the Pi root is a read-only overlay (`overlayroot=tmpfs`), so `/etc/prusa-cam/*`
+  (quality/rtsp/identity) and `/mnt/sdcard` (timelapse frames, `.avi`,
+  `.timelapse_videos.csv`) live in the tmpfs upper layer and are discarded on every reboot.
+  `CameraState` settings (quality tier, camera name, snapshot/timelapse intervals and enables,
+  RTSP/WebRTC modes) were memory-only.
+- **Design:** a new 4 GB ext4 partition (`mmcblk0p3`, label `PERSIST`, PARTUUID `46f0d7c3-03`)
+  mounted at `/data`; `/data/prusa-cam/state.json` holds the runtime settings and `/data/sdcard`
+  is bind-mounted onto `/mnt/sdcard` (SMB keeps sharing `/mnt/sdcard` unchanged).
+  `quality.live.env` stays ephemeral (GAP-QUALITY-02).
+- **No-op rule (safe pre-deploy):** `settings_store.available()` is true only when `/data` exists
+  and `os.path.ismount('/data')`; otherwise `save()` returns False without writing, `load()`
+  returns `{}` for the missing file, `main._save_persisted_state` logs at debug, and
+  `persist_restore.main` logs and exits 0. Nothing is created under a missing `/data`.
+  `pi-persist.service` also carries `ConditionPathIsMountPoint=/data`, so before the partition
+  exists the unit is *skipped* rather than reported failed.
+- **Settings schema:** `version`, `quality_tier` (1/2/3), `camera_name`, `snapshot_interval`
+  (10..600), `snapshot_upload_enabled`, `timelapse_interval` (1..3600), `timelapse_enabled`,
+  `timelapse_fps` (1..30), `rtsp_mode` (1/2), `webrtc_mode` (0/1). `save` is atomic (same-dir
+  temp + `os.replace`) and corrupt files are quarantined to `<path>.bad`.
+- **Wiring:** `main.py` loads `state.json` at startup and `state.apply_persisted` applies only
+  present/valid keys (reusing the setters where they exist); every successful mutation in
+  `handle_event` (camera name, snapshot/timelapse intervals and enables, quality persist path,
+  RTSP/WebRTC modes) calls `_save_persisted_state`.
+- **Restore:** `persist_restore.py` (root, `pi-persist.service`, `RequiresMountsFor=/data`,
+  `Before=` the three camera units) ensures `/data/{sdcard,prusa-cam}`, chowns to `SERVICE_USER`,
+  bind-mounts the store, re-materializes `quality.env`/`rtsp.mode` from `state.json`, and prunes
+  the oldest `/data/sdcard/timelapse/*.jpg` frames when `/data` free space is below 300 MB
+  (`.avi`/CSV never deleted). `deploy.sh` installs+enables the unit and activates the fstab entry
+  only when `/dev/mmcblk0p3` exists (derives the real PARTUUID, skips when already present).
+- **Tests:** `tests/test_pi_settings_store.py` (round-trip, version, missing/corrupt→`.bad`,
+  unavailable no-op, atomic-on-replace-failure), `tests/test_pi_state.py::PersistedStateTests`
+  (contents + valid/invalid apply), `tests/test_pi_timelapse.py::MainTimelapseWiringTests`
+  (AST: `_save_persisted_state` defined and called ≥6× in `handle_event`; startup
+  loads/applies), `tests/test_pi_persist_restore.py` (`frames_to_prune` oldest-first,
+  `quality_env_values`, import safety).
+- **Remaining:** create `mmcblk0p3` offline (WP3), then deploy and verify AC-1..AC-6 live
+  (`findmnt /data`, settings/frames survive reboot, SMB unchanged).
+
 ### GAP-DEVICE-01 — Reboot command behavior
 
 - [~] **P2 · Implemented; live reboot unverified**

@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore persisted settings and mount the durable timelapse store
+RequiresMountsFor=/data
+# True no-op before the offline repartition creates /data: without this the unit
+# would be "failed (dependency failed)" at every boot pre-partition.
+ConditionPathIsMountPoint=/data
+Before=rpicam-source.service prusa-cam.service prusa-rtsp.service
+[Service]
+Type=oneshot
+Environment=SERVICE_USER=pi
+ExecStart=/home/pi/prusa-cam/venv/bin/python /home/pi/prusa-cam/persist_restore.py
+[Install]
+WantedBy=multi-user.target
