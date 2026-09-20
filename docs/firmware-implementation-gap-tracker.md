@@ -1086,9 +1086,12 @@ closing the gap.
   reflects only the configured snapshot-upload enable flag, and the explicit trigger path has no
   streaming guard. Tests: `test_pi_scheduling.py`, `test_pi_state.py`, and
   `test_pi_onvif.py::MainWiringTests`.
-- **Connect impact:** intended to preserve the normal snapshot cadence while local RTSP or Prusa
-  WebRTC viewers are active. This has source-level regression coverage but is not yet verified on
-  the Pi against live Connect/App sessions.
+- **Connect impact:** normal snapshot cadence during local RTSP is now live-verified; the same path
+  has source-level coverage for WebRTC but still needs a simultaneous live Connect/App session.
+- **Partial live verification (2026-09-20, `312b59b`):** while a GStreamer client held the deployed
+  Home Assistant RTSP endpoint (`:8555/live`) open for 25 seconds, Connect snapshots returned 200 at
+  21:00:31 and 21:00:41 (configured 10-second cadence). The shared-mux RTSP half is therefore live
+  verified; simultaneous Prusa WebRTC plus snapshots is still required before closing the gap.
 - **Before (superseded):** periodic snapshots were skipped while RTSP/WebRTC was active and, with the
   then-current WebRTC lifecycle bug, indefinitely after one offer.
 - **Remaining evidence:** record simultaneous snapshot timestamps plus RTSP and WebRTC playback on

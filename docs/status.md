@@ -409,14 +409,15 @@ account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 | Service | Role |
 |---|---|
 | `prusa-cam.service` | `main.py` — `/c/info`, snapshot loop, Socket.IO signaling, WebRTC answer logic |
-| `rpicam-source.service` | `rpicam-vid --listen` → H.264 over TCP :8888 (single client); resolution from `EnvironmentFile=/etc/prusa-cam/quality.env` (tier-switchable), `--rotation 180 --intra 30 --flush` |
+| `rpicam-source.service` | `rpicam-vid` → `stream_mux.py` H.264 fan-out on TCP :8888; resolution from `EnvironmentFile=/etc/prusa-cam/quality.env` (tier-switchable), `--rotation 180 --intra 30 --flush` |
 | `prusa-rtsp.service` | GStreamer RTSP → `rtsp://<pi>:8554/live`, pulls from rpicam-source |
+| `prusa-ha-rtsp.service` | Always-on Home Assistant RTSP → `rtsp://<pi>:8555/live`, pulls from the same source |
 
-The current local worktree additionally contains an always-on `prusa-ha-rtsp.service`
-(`rtsp://<pi>:8555/live`) and an ONVIF/WS-Discovery facade for Home Assistant. These additions are
-unit-tested but are not included in the live-deployment claims above until explicitly deployed and
-verified. They share the existing encoder/mux and leave Prusa's mode-controlled `:8554` endpoint,
-Socket.IO, and WebRTC signaling paths unchanged.
+The Home Assistant endpoint and ONVIF/WS-Discovery facade were deployed and camera-side verified on
+2026-09-20: discovery, SOAP, JPEG, and H.264 playback work, and Connect snapshots continued at their
+10-second cadence during a sustained port-8555 viewer. They share the existing encoder/mux and leave
+Prusa's mode-controlled `:8554` endpoint, Socket.IO, and WebRTC signaling paths unchanged. Actual
+Home Assistant entity creation and simultaneous Prusa WebRTC/quality-change acceptance remain open.
 
 **What the impersonator currently sends (latest valid state):** corrected `/c/info` and
 `camera_authentication` (`token`, `fingerprint`). After a successful auth the camera sends

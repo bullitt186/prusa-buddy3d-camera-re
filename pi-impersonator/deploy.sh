@@ -165,10 +165,17 @@ verify() {
     echo
     echo -n "Prusa RTSP mode-dependent service: "
     systemctl is-active prusa-rtsp || true
-    sleep 3
-    curl -fsS --max-time 5 -H "Content-Type: application/soap+xml" \
-      --data "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetDeviceInformation xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body></s:Envelope>" \
-      http://127.0.0.1/onvif/device_service | grep -q GetDeviceInformationResponse
+    onvif_ok=
+    for _ in $(seq 1 15); do
+      if curl -fsS --max-time 5 -H "Content-Type: application/soap+xml" \
+        --data "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetDeviceInformation xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body></s:Envelope>" \
+        http://127.0.0.1/onvif/device_service 2>/dev/null | grep -q GetDeviceInformationResponse; then
+        onvif_ok=1
+        break
+      fi
+      sleep 4
+    done
+    [ "$onvif_ok" = 1 ]
     echo "ONVIF: ok"
     journalctl -u prusa-cam -n 20 --no-pager | grep -iE "Snapshot: 200|/c/info response" | tail -1 || echo "  (no snapshot line yet)"'
 }

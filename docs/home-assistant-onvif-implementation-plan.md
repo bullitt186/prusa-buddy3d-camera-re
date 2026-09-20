@@ -1,8 +1,8 @@
 # Home Assistant ONVIF integration plan
 
-Status: implemented and host-validated in the local worktree; a separately authorized Pi/Home
-Assistant acceptance run remains required. This document is the implementation and verification
-handoff for another coding agent. It does not authorize deployment or live-system changes.
+Status: implemented, host-validated, and deployed to the Pi on 2026-09-20. Camera-side live checks
+passed; actual Home Assistant entity setup plus concurrent Prusa WebRTC and quality-change checks
+remain open. This document is the implementation and verification handoff for another coding agent.
 
 Host verification on 2026-09-20: all 339 repository tests, `compileall`, shell syntax checks, and
 `git diff --check` pass. A disposable `onvif-zeep-async` 4.2.1 / Zeep 4.3.3 client also completed
@@ -10,6 +10,16 @@ Host verification on 2026-09-20: all 339 repository tests, `compileall`, shell s
 and `GetSnapshotUri` against the facade. Home Assistant's exact `WSDiscovery` 2.1.2 dependency also
 found the facade with its type/scope filter and parsed the expected XAddr, name, hardware, and MAC
 scopes. This is protocol-client evidence, not Pi or Home Assistant live acceptance.
+
+Partial live evidence on 2026-09-20 (deployment of `312b59b`): the overlay-aware deployment
+completed, required services were active after reboot, Connect `/c/info` and snapshots returned 200,
+and Socket.IO authentication returned ACK 0. The pinned `WSDiscovery` client found exactly one
+camera at `http://192.168.0.162:80/onvif/device_service` with the expected name/hardware/MAC scopes.
+SOAP device information and the JPEG endpoint worked; ports 8554 and 8555 both exposed H.264
+1280×720. During a sustained 25-second connection to port 8555, Connect snapshots continued at
+10-second cadence. The first deploy verifier queried ONVIF before the application's 41-second startup
+completed; `deploy.sh` now polls for up to 60 seconds. No actual HA config entry was created and no
+Prusa WebRTC/quality-change concurrency test was run, so the remaining live criteria stay open.
 
 ## Goal
 
