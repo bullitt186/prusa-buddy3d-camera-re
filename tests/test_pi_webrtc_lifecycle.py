@@ -1,4 +1,4 @@
-"""GAP-WEBRTC-03: WebRTC session lifecycle and resume-snapshot wiring.
+"""GAP-WEBRTC-03: WebRTC session lifecycle and state cleanup wiring.
 
 The pure policy (``webrtc_lifecycle``) is imported directly. ``main.py`` and
 ``webrtc.py`` depend on aiohttp/socketio and PyGObject/GStreamer respectively, so
@@ -64,7 +64,7 @@ class MainWebRtcWiringTests(unittest.TestCase, _AstHelpers):
     def setUpClass(cls):
         cls.tree = ast.parse(MAIN_PY.read_text())
 
-    def test_on_stream_ended_clears_streaming_and_logs_resume(self):
+    def test_on_stream_ended_clears_streaming_without_snapshot_resume_policy(self):
         fn = self._function(self.tree, 'on_stream_ended')
         self.assertIsInstance(fn, ast.AsyncFunctionDef)
         clears = [
@@ -89,7 +89,8 @@ class MainWebRtcWiringTests(unittest.TestCase, _AstHelpers):
                     part.value for part in arg.values
                     if isinstance(part, ast.Constant) and isinstance(part.value, str)
                 ))
-        self.assertTrue(any('Resuming snapshots' in t for t in log_texts))
+        self.assertTrue(any('WebRTC stream ended' in t for t in log_texts))
+        self.assertFalse(any('Resuming snapshots' in t for t in log_texts))
 
     def test_prusa_webrtc_receives_on_stream_ended(self):
         constructor = self._call_named(self.tree, 'PrusaWebRTC')

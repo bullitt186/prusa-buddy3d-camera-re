@@ -63,13 +63,13 @@ Items offering “implement or stop advertising” are owner decisions, not codi
 | Enrollment/token | Matched | Token is opaque Connect input; no firmware token-generation algorithm exists. |
 | Fingerprint derivation | Working; live-verified | Precedence: an explicit `config.ini` `[identity] fingerprint` (the token-bound value) wins, else firmware-style MAC derivation, else a persisted fallback seed. Live-verified 2026-09-18: `/c/info` 200 (`origin='OTHER', registered=True`), snapshots 200. Migrating to the MAC-derived value still requires a fresh token. |
 | `/c/info` | Core schema matched; live-verified | Initial upload succeeds; periodic refresh (`info_service_loop`) and dynamic values (name/quality/network) are live-verified (GAP-INFO-01/02, repeated 200s across boots; `origin='OTHER'`, `registered=True`). |
-| Snapshot upload | Working (live); identity headers live-verified | Endpoint and identity headers are live-verified (`PUT /c/snapshot` 200 with the recovered `Token`/`Fingerprint`, GAP-HTTP-01/02); the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented (GAP-SNAPSHOT-01..04); the concurrent-stream half of GAP-SNAPSHOT-04 remains open. |
+| Snapshot upload | Working (live); identity headers live-verified | Endpoint and identity headers are live-verified (`PUT /c/snapshot` 200 with the recovered `Token`/`Fingerprint`, GAP-HTTP-01/02); the interval is live-applied (tag3.5), enable/disable triggers work, and capture quality + monotonic scheduling are implemented. Concurrent snapshot/stream gating was removed and is unit-tested for GAP-SNAPSHOT-04; live concurrency verification remains open. |
 | Socket.IO authentication | Working, stable (live) | Auth field order is `(token, fingerprint)` and the success ACK is `0` (`1` = not authorized, `2` = error joining session). **Superseded:** the "server closes the WebSocket in the same tick (`Server sent close packet data 0`)" behaviour was the unsolicited post-auth burst (`send_sio_info` + `status` + `protobuf_version` + `features`); removing it (`ba48dc8`, live-verified 2026-09-20) gave a stable session (0 `CameraIsNotSessionMemberError`, one connection). The client still supervises reconnection with a fresh client per attempt (`signaling.supervise`, `02918b8`). Residual long-run stability is unproven, but no server-side close has been observed since the fix. |
 | Initial metadata messages | Matched (live); dynamic status values live-verified | Core envelopes work; dynamic status values are live-verified (GAP-STATUS-01, `status` sent with no errors); request-id correlation is implemented (GAP-STATUS-02, fixture/live comparison pending). |
 | Trigger handling | Implemented (policy actions declined); `client_trigger` semantics recovered, emission deferred | Recovered descriptor `0x3f6f14` decodes each trigger and dispatches only the requested action; reboot is rate-limited and wired (GAP-DEVICE-01); timelapse enable/disable/make/file-list are implemented (GAP-TIMELAPSE-01); OTA returns an explicit truthful decline (GAP-OTA-01). The `client_trigger` result tags are now recovered (tag5 = result/error code, tag6 = upgrade/progress value, tag3 = timelapse-video-make status) but the string-tag message split is still `[assumption]`, so **emission stays deferred** (GAP-SIO-01/TRIGGER-01). |
 | Configuration handling | Mostly wired; quality/name paths live-verified | Nested protobuf `0x3f73a4` via `FUN_000a7940`: video quality (raw mapping `{5:1,6:2,7:3}` and persisted restore live-verified, GAP-QUALITY-01/03), `set_timelaps_interval`, `light_control`, `set_snapshot_upload_interval` (10..600), `set_printing_job_name`, camera name (persisted and re-applied at boot, GAP-CONTROL-01, live-verified 2026-09-20), and RTSP/WebRTC mode are applied and persisted. `tag3.7` is plausibly `set_volume` (5..100) `[assumption]`; `tag3.11/12` are uvarints and the "RTSP candidate" label is **refuted**; the RTSP mode is a small enum toggle elsewhere. |
 | RTSP | Working (local); port exception documented | Local stream works on the Pi's intentional `8554`; configuration-form mode changes are applied and persisted (GAP-RTSP-02). GAP-RTSP-01 **closed**: the shipped firmware default is `554` (`FUN_000b04d4` logs `"RTSP server started on port %d"` with the literal `0x22a`), and `8554` is a documented privileged-port-avoidance Pi exception that Connect consumes. |
-| WebRTC | Working (live-verified 2026-09-20); policy fields decoded; TURN quality lock implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser, GAP-WEBRTC-01/02; the WebRTC branch consumes the shared SPS-patched `stream_mux` output on port 8889), lifecycle/teardown clears `state.streaming` and resumes snapshots, and no separate encoder is started. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending). The inbound 9-field names (GAP-WEBRTC-05) are now **confirmed** (tag5 msg type, tag7 client type, tag9.1-5 quality/FPS/plan/TTL/scope); transport-policy/TTL/FPS/plan/scope remain decoded-but-not-enforced because Connect sends only a subset. The TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`). Video-only is accepted (GAP-WEBRTC-07 closed). |
+| WebRTC | Working (live-verified 2026-09-20); policy fields decoded; TURN quality lock implemented | Connect ICE/TURN settings are consumed, camera offer/answer + trickle candidates work live (app and browser, GAP-WEBRTC-01/02; the WebRTC branch consumes the shared SPS-patched `stream_mux` output on port 8889), lifecycle/teardown clears `state.streaming`, and no separate encoder is started. `webrtc_connection_info` (GAP-WEBRTC-06) is implemented from the confirmed sender/encoder/candidate mapping (live verification pending). The inbound 9-field names (GAP-WEBRTC-05) are now **confirmed** (tag5 msg type, tag7 client type, tag9.1-5 quality/FPS/plan/TTL/scope); transport-policy/TTL/FPS/plan/scope remain decoded-but-not-enforced because Connect sends only a subset. The TURN/scoped-quality lock is implemented (`state.turn_online` + `quality_change_allowed`). Video-only is accepted (GAP-WEBRTC-07 closed). |
 | OTA/timelapse/device controls | Implemented; OTA resolved by owner decision | Reboot wired behind a 60 s rate limit; OTA returns an explicit truthful decline (GAP-OTA-01 closed by owner decision, not live-tested); timelapse enable/disable/make/file-list implemented with a persistent `/mnt/sdcard` store (GAP-PERSIST-01). IR/speaker/fan were removed from the advertised features (no hardware) and controls never fake success; `MicroSd` **is** advertised (emulated SD), and its truthful status is the `extended_status.4` storage block, not `camera_status` (GAP-DEVICE-02 closed). |
 
 ## How to use the decompiled firmware evidence
@@ -1073,27 +1073,26 @@ closing the gap.
 
 ### GAP-SNAPSHOT-04 — Match snapshot scheduling and concurrent-stream behavior
 
-- [~] **P2 · Scheduling half implemented; concurrent-stream half open**
+- [~] **P2 · Implemented and unit-tested; live concurrent-stream verification open**
 - **Firmware behavior:** coordinated hardware channels allow snapshot service state to be controlled
   independently from RTSP/WebRTC. **[confirmed at service/state level]**
-- **Current behavior (scheduling half implemented):** the monotonic start-to-start deadline is
-  implemented; the RTSP/WebRTC pause is intentionally retained (the mux source is shared, but JPEG
-  capture still opens its own consumer), so snapshots are still skipped while an RTSP connection or
-  the WebRTC streaming flag is active. WebRTC teardown now clears the flag, so the pause no longer
-  persists indefinitely after one offer.
-- **Implementation (staged, commit pending):** the scheduling half uses a monotonic start-to-start
-  deadline ([`scheduling.py`](../pi-impersonator/scheduling.py) `next_deadline`) so capture/upload
-  duration no longer inflates the cadence and an interval change catches up immediately; the
-  RTSP/WebRTC pause is intentionally retained until one shared camera source exists. Tests:
-  `test_pi_scheduling.py`.
-- **Connect impact (partly resolved):** snapshots pause during local/WebRTC viewing as before, but
-  the earlier "indefinitely after one offer" symptom is fixed by the WebRTC teardown
-  (GAP-WEBRTC-03), which resumes snapshots on stream end.
+- **Current behavior:** the monotonic start-to-start deadline is implemented. Periodic and explicit
+  snapshots no longer consult RTSP/WebRTC activity: JPEG capture, RTSP, and WebRTC all consume the
+  shared `stream_mux.py` source, so starting a stream does not intentionally pause Connect uploads.
+  WebRTC teardown still clears lifecycle state, but snapshot scheduling is independent of it.
+- **Implementation (local, live verification pending):** `scheduling.py` uses a monotonic
+  start-to-start deadline (`next_deadline`), so capture/upload duration no longer inflates cadence
+  and an interval change catches up immediately. `CameraState.periodic_snapshot_allowed()` now
+  reflects only the configured snapshot-upload enable flag, and the explicit trigger path has no
+  streaming guard. Tests: `test_pi_scheduling.py`, `test_pi_state.py`, and
+  `test_pi_onvif.py::MainWiringTests`.
+- **Connect impact:** intended to preserve the normal snapshot cadence while local RTSP or Prusa
+  WebRTC viewers are active. This has source-level regression coverage but is not yet verified on
+  the Pi against live Connect/App sessions.
 - **Before (superseded):** periodic snapshots were skipped while RTSP/WebRTC was active and, with the
   then-current WebRTC lifecycle bug, indefinitely after one offer.
-- **Implementation:** once all outputs share one source, capture JPEG frames without pausing for
-  RTSP/WebRTC; schedule against a monotonic deadline if firmware cadence requires start-to-start
-  intervals.
+- **Remaining evidence:** record simultaneous snapshot timestamps plus RTSP and WebRTC playback on
+  the Pi, including a quality change, before changing this item to closed.
 - **Acceptance:** snapshots continue at configured cadence during RTSP and WebRTC without camera
   contention.
 - **Code:** [`main.py`](../pi-impersonator/main.py#L129-L148)

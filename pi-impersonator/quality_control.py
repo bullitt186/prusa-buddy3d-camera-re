@@ -27,12 +27,22 @@ TURN_QUALITY_LOCK_LOG = (
 
 
 def restart_services():
-    """Restart the encoder/RTSP units. Returns the process return code (0 = ok)."""
-    result = subprocess.run(
-        ['sudo', 'systemctl', 'restart', 'rpicam-source.service', 'prusa-rtsp.service'],
+    """Restart shared source/local RTSP and refresh Prusa RTSP if active.
+
+    ``try-restart`` is deliberate: a quality change must not enable the
+    Prusa-controlled RTSP service when its configured mode is disabled. The HA
+    endpoint is independent and always restarted with the encoder.
+    """
+    shared = subprocess.run(
+        ['sudo', 'systemctl', 'restart',
+         'rpicam-source.service', 'prusa-ha-rtsp.service'],
         capture_output=True,
     )
-    return result.returncode
+    prusa = subprocess.run(
+        ['sudo', 'systemctl', 'try-restart', 'prusa-rtsp.service'],
+        capture_output=True,
+    )
+    return shared.returncode or prusa.returncode
 
 
 def _restore_live(previous):

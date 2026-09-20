@@ -412,6 +412,12 @@ account; its config is backed up on the Pi as `config.ini.bak.<timestamp>`.
 | `rpicam-source.service` | `rpicam-vid --listen` → H.264 over TCP :8888 (single client); resolution from `EnvironmentFile=/etc/prusa-cam/quality.env` (tier-switchable), `--rotation 180 --intra 30 --flush` |
 | `prusa-rtsp.service` | GStreamer RTSP → `rtsp://<pi>:8554/live`, pulls from rpicam-source |
 
+The current local worktree additionally contains an always-on `prusa-ha-rtsp.service`
+(`rtsp://<pi>:8555/live`) and an ONVIF/WS-Discovery facade for Home Assistant. These additions are
+unit-tested but are not included in the live-deployment claims above until explicitly deployed and
+verified. They share the existing encoder/mux and leave Prusa's mode-controlled `:8554` endpoint,
+Socket.IO, and WebRTC signaling paths unchanged.
+
 **What the impersonator currently sends (latest valid state):** corrected `/c/info` and
 `camera_authentication` (`token`, `fingerprint`). After a successful auth the camera sends
 **nothing** (firmware parity, `FUN_000a05e4`); there is **no `send_sio_info` Socket.IO event**.

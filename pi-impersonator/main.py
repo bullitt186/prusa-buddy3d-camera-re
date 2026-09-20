@@ -12,6 +12,9 @@ from signaling import PrusaSignaling
 from local_http import start_local_http
 from webrtc import PrusaWebRTC
 from identity import resolve_fingerprint
+from features import FIRMWARE_VERSION
+from onvif_facade import OnvifContext
+from onvif_discovery import start_ws_discovery
 from state import (
     CameraState,
     ENUM_TO_RAW,
@@ -120,20 +123,6 @@ def _save_persisted_state(state):
     log.warning('settings: could not persist state')
     return False
 
-
-def rtsp_streaming():
-    # ponytail: /proc/net/tcp check — no subprocess, detects active RTSP client
-    # port 8888 = 0x22B8; look for ESTABLISHED (01) connections in hex
-    try:
-        with open('/proc/net/tcp') as f:
-            for line in f.readlines()[1:]:
-                fields = line.split()
-                # local_address field is hex IP:PORT; port is after the colon
-                if fields[1].split(':')[1] == '22B8' and fields[3] == '01':
-                    return True
-    except Exception:
-        pass
-    return False
 
 def redact_secrets(value, token, fingerprint):
     if isinstance(value, str):
@@ -278,7 +267,7 @@ async def snapshot_loop(token, fingerprint, server, session):
         deadline = next_deadline(last_start, state.snapshot_interval)
         await wait_for_deadline_or_change(deadline)
         last_start = time.monotonic()
-        if state.periodic_snapshot_allowed(rtsp_streaming()):
+        if state.periodic_snapshot_allowed():
             width, height = state.resolution()
             try:
                 jpeg = capture_jpeg(width, height)
@@ -543,6 +532,12 @@ async def main():
         log.info(f'Loaded persisted settings: {", ".join(applied) or "none"}')
 
     mac, ip, ssid, fingerprint = get_network_info(cfg['identity'].get('fingerprint'))
+    # Pi-only local extension: Home Assistant consumes an independent RTSP
+    # endpoint through this small ONVIF facade. The stable seed is used only to
+    # derive a UUID when wlan0 has no MAC; it is never exposed on the wire.
+    onvif_context = OnvifContext.create(
+        state, ip, mac, FIRMWARE_VERSION, stable_seed=fingerprint
+    )
 
     # GAP-HTTP-03: one session for the whole application lifetime, reused by the
     # info service loop, snapshots and the OTA check-in; closed on shutdown.
@@ -579,16 +574,16 @@ async def main():
         await sig.sio_emit('webrtc', msg)
 
     async def on_stream_ended(reason):
-        # GAP-WEBRTC-03: a failed/closed/disconnected peer must resume snapshots.
+        # GAP-WEBRTC-03/05: clear peer lifecycle and TURN quality-lock state.
         if state.turn_online:
             # GAP-WEBRTC-05: no viewer peer -> no TURN client, unlock quality.
             state.turn_online = False
             log.info(f'TURN client offline after WebRTC stream ended ({reason})')
         if state.streaming:
             state.streaming = False
-            log.info(f'Resuming snapshots after WebRTC stream ended ({reason})')
+            log.info(f'WebRTC stream ended ({reason})')
         else:
-            log.debug(f'WebRTC stream ended ({reason}); snapshots already running')
+            log.debug(f'WebRTC stream ended ({reason}); peer already inactive')
 
     def on_teardown():
         # GAP-WEBRTC-05: peer teardown (stop or a new offer) clears the TURN
@@ -639,11 +634,8 @@ async def main():
             await sig.send_protobuf_version(request_id=request_id)
         elif action == trigger.SNAPSHOT:
             # Immediate get-snapshot is independent of the periodic
-            # snapshot_upload_enabled switch (GAP-SNAPSHOT-02); it keeps the
-            # existing WebRTC pause only.
-            if state.streaming:
-                log.info('Trigger snapshot skipped: WebRTC stream active')
-                return
+            # snapshot_upload_enabled switch and all streams consume the shared
+            # mux independently (GAP-SNAPSHOT-02/04).
             try:
                 jpeg = capture_jpeg(*state.resolution())
                 await upload_snapshot(session, jpeg, token, fingerprint, server)
@@ -1007,7 +999,21 @@ async def main():
     asyncio.create_task(info_service_loop(token, fingerprint, server, session, mac, ip, ssid))
     asyncio.create_task(ota_loop(token, fingerprint, session))
     asyncio.create_task(timelapse_loop())
-    asyncio.create_task(start_local_http())
+    http_runner = None
+    try:
+        http_runner = await start_local_http(onvif_context)
+    except OSError as e:
+        # The local facade is an optional LAN feature. A port conflict or
+        # permission problem must not interrupt Prusa Connect/App operation.
+        log.warning(f'Local HTTP/ONVIF server unavailable: {e}')
+    discovery_transport = None
+    if http_runner is not None:
+        try:
+            discovery_transport = await start_ws_discovery(onvif_context)
+        except OSError as e:
+            # Local discovery must never take the cloud camera offline. Manual
+            # ONVIF host entry remains available through the HTTP facade.
+            log.warning(f'ONVIF WS-Discovery unavailable: {e}')
     try:
         await sig.connect()
         # WP-1: own the reconnect loop so a server-closed session is replaced
@@ -1015,6 +1021,10 @@ async def main():
         asyncio.create_task(sig.supervise())
         await asyncio.Event().wait()
     finally:
+        if discovery_transport is not None:
+            discovery_transport.close()
+        if http_runner is not None:
+            await http_runner.cleanup()
         # GAP-HTTP-03: release the single long-lived session on shutdown.
         await session.close()
 

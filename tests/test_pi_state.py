@@ -279,11 +279,11 @@ class SnapshotUploadPredicateTests(unittest.TestCase):
         state.snapshot_upload_enabled = True
         self.assertTrue(state.periodic_snapshot_allowed())
 
-    def test_active_streams_pause_periodic_loop(self):
+    def test_active_streams_do_not_pause_shared_mux_capture(self):
         state = CameraState()
-        self.assertFalse(state.periodic_snapshot_allowed(rtsp_active=True))
+        self.assertTrue(state.periodic_snapshot_allowed(rtsp_active=True))
         state.streaming = True
-        self.assertFalse(state.periodic_snapshot_allowed())
+        self.assertTrue(state.periodic_snapshot_allowed())
 
 
 if __name__ == '__main__':

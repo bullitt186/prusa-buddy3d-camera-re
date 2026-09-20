@@ -105,6 +105,12 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
   sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" "$SRC/systemd/rpicam-source.service" \
     | "${SSH[@]}" "sudo tee /etc/systemd/system/rpicam-source.service >/dev/null && sudo systemctl daemon-reload"
 
+  log "install always-on Home Assistant RTSP service"
+  sed -e "s/^User=pi\$/User=$PI_USER/" -e "s|/home/pi/|/home/$PI_USER/|g" \
+    "$SRC/systemd/prusa-ha-rtsp.service" \
+    | "${SSH[@]}" "sudo tee /etc/systemd/system/prusa-ha-rtsp.service >/dev/null && sudo systemctl daemon-reload"
+  "${SSH[@]}" 'sudo systemctl enable prusa-ha-rtsp.service >/dev/null 2>&1'
+
   # Persist a boot-reason/throttle snapshot to the real vfat boot partition: the
   # root overlay + volatile journal otherwise erase all evidence of an unexpected
   # reboot (see the reboot/throttling investigation in the gap tracker).
@@ -145,14 +151,26 @@ push_and_restart() {  # the actual deploy — assumes root is writable (dev mode
     fi"
 
   log "restart services"
-  "${SSH[@]}" 'sudo systemctl restart rpicam-source.service prusa-rtsp.service prusa-cam.service'
+  "${SSH[@]}" 'sudo systemctl restart rpicam-source.service prusa-ha-rtsp.service && \
+    sudo systemctl try-restart prusa-rtsp.service && \
+    sudo systemctl restart prusa-cam.service'
   sleep 5
 }
 
 verify() {
   log "verify"
-  "${SSH[@]}" 'echo -n "services: "; systemctl is-active rpicam-source prusa-rtsp prusa-cam | tr "\n" " "; echo; \
-    sleep 3; journalctl -u prusa-cam -n 20 --no-pager | grep -iE "Snapshot: 200|/c/info response" | tail -1 || echo "  (no snapshot line yet)"'
+  "${SSH[@]}" 'set -e
+    echo -n "required services: "
+    systemctl is-active rpicam-source prusa-ha-rtsp prusa-cam | tr "\n" " "
+    echo
+    echo -n "Prusa RTSP mode-dependent service: "
+    systemctl is-active prusa-rtsp || true
+    sleep 3
+    curl -fsS --max-time 5 -H "Content-Type: application/soap+xml" \
+      --data "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetDeviceInformation xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body></s:Envelope>" \
+      http://127.0.0.1/onvif/device_service | grep -q GetDeviceInformationResponse
+    echo "ONVIF: ok"
+    journalctl -u prusa-cam -n 20 --no-pager | grep -iE "Snapshot: 200|/c/info response" | tail -1 || echo "  (no snapshot line yet)"'
 }
 
 enable_overlay() {

@@ -219,9 +219,8 @@ class CameraState:
     def periodic_snapshot_allowed(self, rtsp_active=False):
         """GAP-SNAPSHOT-02 loop predicate for periodic uploads.
 
-        Disabling upload or an active stream (RTSP/WebRTC) pauses the periodic
-        loop; immediate get-snapshot requests do not consult this predicate.
+        The explicit upload switch is the only gate. ``rtsp_active`` remains as
+        a compatibility argument for older callers, but the shared mux makes
+        RTSP/WebRTC independent consumers (GAP-SNAPSHOT-04).
         """
-        return (self.snapshot_upload_enabled
-                and not self.streaming
-                and not rtsp_active)
+        return self.snapshot_upload_enabled

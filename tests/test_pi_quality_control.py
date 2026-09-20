@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -173,6 +174,41 @@ class HandleQualityTests(QualityControlTestCase):
         self.assertEqual(live_calls, [])
         self.assertEqual(persist_calls, [])
         self.assertEqual(state.quality, 3)
+
+
+class RestartServicesTests(unittest.TestCase):
+    @patch('quality_control.subprocess.run')
+    def test_restarts_shared_source_and_ha_then_try_restarts_prusa(self, run):
+        run.side_effect = [
+            type('Result', (), {'returncode': 0})(),
+            type('Result', (), {'returncode': 0})(),
+        ]
+
+        self.assertEqual(quality_control.restart_services(), 0)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], [
+            'sudo', 'systemctl', 'restart',
+            'rpicam-source.service', 'prusa-ha-rtsp.service',
+        ])
+        self.assertEqual(run.call_args_list[1].args[0], [
+            'sudo', 'systemctl', 'try-restart', 'prusa-rtsp.service',
+        ])
+
+    @patch('quality_control.subprocess.run')
+    def test_any_restart_failure_is_returned(self, run):
+        run.side_effect = [
+            type('Result', (), {'returncode': 3})(),
+            type('Result', (), {'returncode': 0})(),
+        ]
+        self.assertEqual(quality_control.restart_services(), 3)
+
+        run.reset_mock()
+        run.side_effect = [
+            type('Result', (), {'returncode': 0})(),
+            type('Result', (), {'returncode': 4})(),
+        ]
+        self.assertEqual(quality_control.restart_services(), 4)
 
 
 if __name__ == '__main__':

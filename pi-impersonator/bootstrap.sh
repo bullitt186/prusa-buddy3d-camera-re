@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command fresh-Pi provisioning for the impersonator — use after a reflash or SD recovery.
-# Installs apt deps, builds the venv, installs+enables the 3 systemd units, and deploys the code.
+# Installs apt deps, builds the venv, installs/enables the runtime units, and deploys the code.
 # After it finishes: drop config.ini (the token) and the camera registers. Then optionally lock
 # the SD read-only with:  ./deploy.sh $PI --enable-overlay
 #
@@ -27,18 +27,18 @@ log "apt: gstreamer + libcamera/rpicam + python-gi + venv tooling"
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-rtsp rpicam-apps \
   gir1.2-gst-rtsp-server-1.0 gir1.2-gst-plugins-bad-1.0 \
   samba \
-  python3-venv python3-pip rsync'
+  python3-venv python3-pip rsync curl'
 
 log "python venv (--system-site-packages so gi/Gst are visible) + pip deps"
 "${SSH[@]}" 'mkdir -p ~/prusa-cam && python3 -m venv --system-site-packages ~/prusa-cam/venv && \
   ~/prusa-cam/venv/bin/pip install -q --upgrade pip aiohttp python-socketio'
 
 log "install + enable systemd units (template User=pi/home/pi → $PI_USER)"
-for u in rpicam-source prusa-rtsp prusa-cam; do
+for u in rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam; do
   sed -e "s/^User=pi\$/User=$PI_USER/" -e "s#/home/pi/#/home/$PI_USER/#g" "$SRC/systemd/$u.service" \
     | "${SSH[@]}" "sudo tee /etc/systemd/system/$u.service >/dev/null"
 done
-"${SSH[@]}" 'sudo systemctl daemon-reload && sudo systemctl enable rpicam-source prusa-rtsp prusa-cam'
+"${SSH[@]}" 'sudo systemctl daemon-reload && sudo systemctl enable rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam'
 
 log "deploy code + provision /etc/prusa-cam + quality.env (reuses deploy.sh)"
 "$SRC/deploy.sh" "$PI" || true   # prusa-cam will crash-loop until config.ini exists — that's fine

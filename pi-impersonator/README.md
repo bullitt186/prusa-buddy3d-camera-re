@@ -2,8 +2,8 @@
 
 Runs on a Raspberry Pi and registers to Prusa Connect **as a genuine Buddy3D camera**.
 It authenticates with a camera registration token, uploads camera-info and snapshots,
-speaks the Socket.IO signaling protocol, streams H.264 via local RTSP, and negotiates
-WebRTC. The root filesystem is locked read-only with overlayfs so abrupt power cuts
+speaks the Socket.IO signaling protocol, streams H.264 via local RTSP, negotiates
+WebRTC, and exposes an ONVIF-compatible LAN facade for Home Assistant. The root filesystem is locked read-only with overlayfs so abrupt power cuts
 (the Pi powers on/off with the printer) can't corrupt the SD card.
 
 Protocol spec: [`../docs/protocol.md`](../docs/protocol.md) —
@@ -26,7 +26,7 @@ username `pi`). Then from this repo on your machine:
 PI=pi@<PI_IP> pi-impersonator/bootstrap.sh
 ```
 
-`bootstrap.sh` installs all apt deps, builds the venv, installs and enables the three
+`bootstrap.sh` installs all apt deps, builds the venv, installs and enables the four
 systemd units, and deploys the code. When it finishes, drop in your `config.ini`:
 
 ```bash
@@ -63,7 +63,7 @@ fingerprint requires a fresh token.
 
 ## Architecture
 
-Three systemd services, one concern each:
+Four systemd services split cloud control from LAN availability:
 
 ```
 rpicam-source.service   rpicam-vid -o - | stream_mux.py → H.264 TCP :8888 (multi-client)
@@ -72,11 +72,17 @@ rpicam-source.service   rpicam-vid -o - | stream_mux.py → H.264 TCP :8888 (mul
         ↓
 prusa-rtsp.service      rtsp_server.py (GStreamer) → rtsp://<pi>:8554/live
         │
+prusa-ha-rtsp.service   rtsp_server.py (GStreamer) → rtsp://<pi>:8555/live (always on)
+        │
 prusa-cam.service       main.py
                           /c/info upload · snapshot loop · Socket.IO signaling · WebRTC
+                          HTTP snapshot · ONVIF SOAP · WS-Discovery
 ```
 
-`main.py` starts/stops `prusa-rtsp` on command from Prusa and reconfigures the encoder
+`main.py` starts/stops `prusa-rtsp` on command from Prusa. The independent
+`prusa-ha-rtsp` endpoint remains available to Home Assistant, so Prusa's RTSP mode
+cannot remove Home Assistant's stream. Both servers and JPEG capture consume the
+existing H.264 fan-out and do not open a second camera pipeline. `main.py` reconfigures the encoder
 resolution live on video-quality commands (SD 640×480 / HD 1280×720 / FHD 1920×1080) by
 writing the ephemeral `/etc/prusa-cam/quality.live.env` and restarting `rpicam-source`;
 a persistence flag (whose event wiring is still being recovered, see `GAP-QUALITY-02`) also
@@ -93,8 +99,11 @@ writes `/etc/prusa-cam/quality.env` for the next boot.
 | `identity.py` | Firmware-faithful MAC normalization and fingerprint derivation |
 | `proto.py` | Minimal protobuf encode/decode (nanopb wire format) |
 | `camera.py` | JPEG snapshot via `gst-launch-1.0` reading from `stream_mux.py` on port 8888 (avoids fighting `rpicam-vid` for the sensor — libcamera is single-consumer) |
-| `rtsp_server.py` | GStreamer `GstRtspServer` → `rtsp://0.0.0.0:8554/live` |
-| `local_http.py` | Local HTTP on port 80 |
+| `rtsp_server.py` | Configurable GStreamer `GstRtspServer`; Prusa uses `:8554/live`, Home Assistant uses `:8555/live` |
+| `rtsp_config.py` | Validated environment configuration for independent RTSP instances |
+| `local_http.py` | Local HTTP snapshot and ONVIF SOAP endpoints on port 80 |
+| `onvif_facade.py` | Host-testable ONVIF Device/Media and WS-Discovery XML implementation |
+| `onvif_discovery.py` | UDP multicast adapter for WS-Discovery on `239.255.255.250:3702` |
 | `features.py` | Camera feature/capability advertisement |
 | `quality.py` | Video-quality tier state (SD/HD/FHD) — atomic writes, crash-safe |
 | `stream_mux.py` | TCP broadcast mux: fans the H264 stream from `rpicam-vid` out to multiple clients (RTSP server, snapshot code) on port 8888. libcamera is single-consumer; this replaces the old `--listen` single-client model. |
@@ -157,7 +166,7 @@ sudo apt update && sudo apt install -y \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad gstreamer1.0-rtsp \
     gir1.2-gst-rtsp-server-1.0 gir1.2-gst-plugins-bad-1.0 \
-    rpicam-apps python3-venv python3-pip rsync
+    rpicam-apps python3-venv python3-pip rsync curl
 # Note: gir1.2-gst-rtsp-server-1.0 and gir1.2-gst-plugins-bad-1.0 are required for
 # GstRtspServer and openh264dec Python bindings — not pulled by gstreamer1.0-plugins-bad alone.
 
@@ -174,17 +183,17 @@ cp ~/prusa-cam/config.ini.example ~/prusa-cam/config.ini
 sed "s/^User=pi$/User=$USER/; s|/home/pi/|/home/$USER/|g" \
     pi-impersonator/systemd/rpicam-source.service \
     | sudo tee /etc/systemd/system/rpicam-source.service
-# repeat for prusa-rtsp.service and prusa-cam.service
+# repeat for prusa-rtsp.service, prusa-ha-rtsp.service and prusa-cam.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now rpicam-source prusa-rtsp prusa-cam
+sudo systemctl enable --now rpicam-source prusa-rtsp prusa-ha-rtsp prusa-cam
 
 # 5. /etc/prusa-cam for quality tier state
 sudo install -d -o $USER -g $USER /etc/prusa-cam
 printf "CAM_WIDTH=1920\nCAM_HEIGHT=1080\n" > /etc/prusa-cam/quality.env
 
-# 6. Sudoers for quality tier-switching (main.py restarts rpicam-source + prusa-rtsp)
+# 6. Sudoers for quality tier-switching (main.py restarts the source and active RTSP services)
 #    bootstrap.sh uses NOPASSWD: ALL; for a tighter rule use this instead:
-echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart rpicam-source.service prusa-rtsp.service, /bin/systemctl start prusa-rtsp.service, /bin/systemctl stop prusa-rtsp.service" \
+echo "$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart rpicam-source.service prusa-ha-rtsp.service, /bin/systemctl try-restart prusa-rtsp.service, /bin/systemctl start prusa-rtsp.service, /bin/systemctl stop prusa-rtsp.service" \
     | sudo tee /etc/sudoers.d/prusa-cam
 ```
 
@@ -198,7 +207,33 @@ ssh pi@<PI_IP> 'journalctl -u prusa-cam -n 30 --no-pager'
 #   Snapshot: 200 (… bytes, …ms)
 ```
 
-Local RTSP: `vlc rtsp://<PI_IP>:8554/live`
+Prusa-controlled RTSP: `vlc rtsp://<PI_IP>:8554/live`
+
+Always-on Home Assistant RTSP: `vlc rtsp://<PI_IP>:8555/live`
+
+## Home Assistant
+
+The camera is advertised on the local network using ONVIF WS-Discovery. In Home Assistant,
+open **Settings → Devices & services**. The discovered ONVIF device should appear under
+the camera's configured name; select it and leave username/password empty. Home Assistant receives:
+
+- H.264 stream: `rtsp://<PI_IP>:8555/live`
+- JPEG still image: `http://<PI_IP>/snapshot.jpg`
+- one ONVIF media profile whose name and resolution follow the shared camera state
+
+If multicast discovery is filtered between VLANs, add the built-in **ONVIF** integration
+manually and enter the Pi's IP address, port `80`, with no credentials. UDP multicast
+`239.255.255.250:3702`, TCP `80`, and TCP `8555` must be reachable from Home Assistant.
+
+This facade is deliberately unauthenticated and intended only for a trusted LAN. It does
+not expose the Prusa token or fingerprint. Do not forward ports 80 or 8555 to the Internet.
+It implements the ONVIF calls Home Assistant needs; it is not claimed as ONVIF Profile S
+certified.
+
+Discovery/HTTP failures are isolated from Prusa Connect and the Prusa app. The HA RTSP
+consumer is independent of the Prusa-controlled `:8554` service, while all outputs share
+the same encoder through `stream_mux.py`. Resolution changes restart the shared source and
+the always-on HA endpoint, and only restart Prusa RTSP when it is already active.
 
 ## Latency notes
 
