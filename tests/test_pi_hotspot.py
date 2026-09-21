@@ -1,0 +1,218 @@
+"""WP-3c AC-17: first-boot setup hotspot control (hotspot).
+
+Host-only: every case injects a fake ``runner``; the import-safety test patches
+``subprocess.run`` so no real ``nmcli`` command can run. No interface is touched.
+"""
+import importlib
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+PI_DIR = Path(__file__).resolve().parents[1] / 'pi-impersonator'
+sys.path.insert(0, str(PI_DIR))
+
+import hotspot  # noqa: E402
+import provisioning  # noqa: E402
+
+
+class FakeResult:
+    def __init__(self, returncode=0, stdout='', stderr=''):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def make_runner(handlers=(), default=None, timeout_match=None, unavailable_match=None):
+    """A fake runner keyed on the command line; records every call."""
+    calls = []
+
+    def runner(args, timeout):
+        calls.append((list(args), timeout))
+        joined = ' '.join(args)
+        if unavailable_match and unavailable_match in joined:
+            raise FileNotFoundError(2, 'No such file or directory')
+        if timeout_match and timeout_match in joined:
+            raise subprocess.TimeoutExpired(args, timeout)
+        for needle, result in handlers:
+            if needle in joined:
+                return result
+        return default if default is not None else FakeResult(0, '')
+
+    runner.calls = calls
+    return runner
+
+
+ACTIVE_AP = (
+    ('GENERAL.CONNECTION', FakeResult(0, 'GENERAL.CONNECTION:Hotspot\n')),
+    ('802-11-wireless.mode', FakeResult(0, '802-11-wireless.mode:ap\n')),
+    ('802-11-wireless.ssid', FakeResult(0, '802-11-wireless.ssid:Buddy3D-Setup-ddeeff\n')),
+)
+NO_CONNECTION = (('GENERAL.CONNECTION', FakeResult(0, 'GENERAL.CONNECTION:--\n')),)
+STATION_MODE = (
+    ('GENERAL.CONNECTION', FakeResult(0, 'GENERAL.CONNECTION:HomeNet\n')),
+    ('802-11-wireless.mode', FakeResult(0, '802-11-wireless.mode:infrastructure\n')),
+)
+
+
+class ImportSafetyTests(unittest.TestCase):
+    def test_import_does_not_execute_subprocess(self):
+        with patch.object(
+            subprocess, 'run', side_effect=AssertionError('subprocess on import')
+        ):
+            importlib.reload(hotspot)
+        self.assertTrue(callable(hotspot.start))
+        self.assertTrue(callable(hotspot.stop))
+        self.assertTrue(callable(hotspot.is_active))
+        self.assertTrue(callable(hotspot.status))
+
+
+class ConstantTests(unittest.TestCase):
+    def test_captive_portal_address_is_documented(self):
+        self.assertEqual(hotspot.captive_portal_address(), '192.168.4.1')
+        self.assertEqual(hotspot.CAPTIVE_PORTAL_IP, '192.168.4.1')
+        self.assertEqual(hotspot.CAPTIVE_PORTAL_URL, 'http://192.168.4.1')
+
+    def test_setup_ssid_delegates_to_provisioning(self):
+        device_id = 'AA:BB:CC:DD:EE:FF'
+        self.assertEqual(
+            hotspot.setup_ssid(device_id),
+            provisioning.setup_ssid(device_id),
+        )
+        self.assertEqual(hotspot.setup_ssid(device_id), 'Buddy3D-Setup-ddeeff')
+        self.assertEqual(hotspot.setup_ssid(''), '')
+
+
+class StartTests(unittest.TestCase):
+    def test_start_open_hotspot_success(self):
+        runner = make_runner(default=FakeResult(0, ''))
+        result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.active)
+        self.assertEqual(result.ssid, 'Buddy3D-Setup-ddeeff')
+        args = runner.calls[0][0]
+        self.assertEqual(args[:5], ['nmcli', 'device', 'wifi', 'hotspot', 'ifname'])
+        self.assertIn('ssid', args)
+        self.assertNotIn('password', args)
+
+    def test_start_with_password_passes_it(self):
+        runner = make_runner(default=FakeResult(0, ''))
+        result = hotspot.start('Buddy3D-Setup-ddeeff', password='longenough', runner=runner)
+        self.assertTrue(result.ok)
+        args = runner.calls[0][0]
+        self.assertIn('password', args)
+        self.assertEqual(args[args.index('password') + 1], 'longenough')
+
+    def test_start_rejects_empty_ssid_without_running(self):
+        runner = make_runner()
+        for ssid in ('', '   ', None, 123):
+            with self.subTest(ssid=ssid):
+                result = hotspot.start(ssid, runner=runner)
+                self.assertFalse(result.ok)
+        self.assertEqual(runner.calls, [])
+
+    def test_start_rejects_bad_password_length_without_running(self):
+        runner = make_runner()
+        for password in ('short', 'x' * 64):
+            with self.subTest(password=password):
+                result = hotspot.start('Buddy3D-Setup-ddeeff', password=password, runner=runner)
+                self.assertFalse(result.ok)
+                self.assertNotIn(password, result.reason)
+        self.assertEqual(runner.calls, [])
+
+    def test_start_command_failure_is_reported(self):
+        runner = make_runner(default=FakeResult(1, ''))
+        result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('exit 1', result.reason)
+
+    def test_start_timeout_is_reported(self):
+        runner = make_runner(timeout_match='hotspot')
+        result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('timed out', result.reason)
+
+    def test_start_missing_tool_is_reported(self):
+        runner = make_runner(unavailable_match='hotspot')
+        result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('unavailable', result.reason)
+
+
+class StopTests(unittest.TestCase):
+    def test_stop_success_uses_disconnect(self):
+        runner = make_runner(default=FakeResult(0, ''))
+        result = hotspot.stop(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.active)
+        self.assertEqual(
+            runner.calls[0][0],
+            ['nmcli', 'device', 'disconnect', 'wlan0'],
+        )
+
+    def test_stop_failure_is_reported(self):
+        runner = make_runner(default=FakeResult(1, ''))
+        result = hotspot.stop(runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('exit 1', result.reason)
+
+    def test_stop_timeout_is_reported(self):
+        runner = make_runner(timeout_match='disconnect')
+        result = hotspot.stop(runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('timed out', result.reason)
+
+
+class IsActiveTests(unittest.TestCase):
+    def test_active_when_connection_mode_is_ap(self):
+        runner = make_runner(handlers=ACTIVE_AP)
+        result = hotspot.is_active(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.active)
+
+    def test_inactive_when_no_connection(self):
+        runner = make_runner(handlers=NO_CONNECTION)
+        result = hotspot.is_active(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.active)
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_inactive_when_station_mode(self):
+        runner = make_runner(handlers=STATION_MODE)
+        result = hotspot.is_active(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.active)
+
+    def test_command_failure_is_reported(self):
+        runner = make_runner(default=FakeResult(1, ''))
+        result = hotspot.is_active(runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('exit 1', result.reason)
+
+
+class StatusTests(unittest.TestCase):
+    def test_status_active_reports_ssid(self):
+        runner = make_runner(handlers=ACTIVE_AP)
+        result = hotspot.status(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.active)
+        self.assertEqual(result.ssid, 'Buddy3D-Setup-ddeeff')
+        self.assertEqual(result.address, '192.168.4.1')
+
+    def test_status_inactive_is_ok_without_ssid(self):
+        runner = make_runner(handlers=NO_CONNECTION)
+        result = hotspot.status(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.active)
+        self.assertEqual(result.ssid, '')
+
+    def test_status_timeout_is_reported(self):
+        runner = make_runner(timeout_match='GENERAL.CONNECTION')
+        result = hotspot.status(runner=runner)
+        self.assertFalse(result.ok)
+        self.assertIn('timed out', result.reason)
+
+
+if __name__ == '__main__':
+    unittest.main()
