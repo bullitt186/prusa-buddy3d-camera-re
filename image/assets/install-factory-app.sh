@@ -61,6 +61,13 @@ install -D -m 0644 "$assets/systemd/data-ready.target.d/10-data-grow.conf" \
 install -D -m 0644 "$assets/systemd/NetworkManager.service.d/10-data-ready.conf" \
    "$SYSTEMD_DST/NetworkManager.service.d/10-data-ready.conf"
 
+# --- volatile, size-limited journald (AC-13) --------------------------------
+install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
+   "$root/etc/systemd/journald.conf.d/99-buddy3d-volatile.conf"
+
+# --- factory fallback launcher (AC-13; units wired through it in WP-6) ------
+install -D -m 0755 "$assets/launcher.sh" "$root$APP_ROOT/launcher.sh"
+
 # --- enable the runtime graph (source §3.2) ---------------------------------
 chroot "$root" systemctl enable \
    data-ready.target prusa-data-ready.service prusa-data-grow.service \

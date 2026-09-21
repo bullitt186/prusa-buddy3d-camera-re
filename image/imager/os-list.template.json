@@ -1,0 +1,20 @@
+{
+  "_comment": "TEMPLATE ONLY — not a valid Raspberry Pi Imager OS list until rendered. image/scripts/make-release.sh substitutes every {{TOKEN}}, drops top-level keys beginning with an underscore, and validates the result. Device identifier pi3-64bit is the official Imager tag for Raspberry Pi Zero 2 W (64-bit), verified against https://downloads.raspberrypi.com/os_list_imagingutility_v4.json.",
+  "os_list": [
+    {
+      "name": "Buddy3D Raspberry Pi Camera {{VERSION}}",
+      "description": "Community-built Raspberry Pi Zero 2 W camera appliance (not affiliated with or endorsed by Prusa Research).",
+      "url": "{{IMAGE_URL}}",
+      "icon": "{{ICON_URL}}",
+      "website": "{{WEBSITE}}",
+      "release_date": "{{RELEASE_DATE}}",
+      "extract_size": {{EXTRACT_SIZE}},
+      "extract_sha256": "{{EXTRACT_SHA256}}",
+      "image_download_size": {{DOWNLOAD_SIZE}},
+      "image_download_sha256": "{{DOWNLOAD_SHA256}}",
+      "devices": {{DEVICES}},
+      "init_format": "{{INIT_FORMAT}}",
+      "architecture": "{{ARCH}}"
+    }
+  ]
+}
