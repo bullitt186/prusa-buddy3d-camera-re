@@ -3,8 +3,9 @@
 Hermetic: no root, no mount, no loop device, no network. Partition-table tests
 build a synthetic 3-partition MBR file with ``truncate`` + ``sfdisk`` in a temp
 directory (and are skipped where ``sfdisk`` is absent). Rootfs tests build a
-synthetic directory tree that represents the mounted image (ROOT at the top,
-BOOT under ``boot/firmware``, PERSIST under ``data/``) so no mount is needed.
+synthetic directory tree that represents the mounted ROOT filesystem so no mount
+is needed. BOOT/PERSIST tests build real FAT/ext4 images with ``mkfs.fat`` +
+``mcopy`` and ``mke2fs -d`` (skipped when those tools are absent).
 
 All fixtures use synthetic placeholders only: no personal usernames, no real
 MACs/SSIDs, no secret material.
@@ -24,6 +25,16 @@ REPO_SYSTEMD = REPO_ROOT / "pi-impersonator" / "systemd"
 ASSET_SYSTEMD = REPO_ROOT / "image" / "assets" / "systemd"
 
 HAS_SFDISK = shutil.which("sfdisk") is not None
+
+MKFS_FAT = shutil.which("mkfs.fat") or shutil.which("mkfs.vfat")
+HAS_BOOT_TOOLS = all(
+    tool is not None for tool in (MKFS_FAT, shutil.which("mcopy"), shutil.which("mtype"))
+)
+
+MKE2FS = shutil.which("mke2fs")
+HAS_PERSIST_TOOLS = (
+    MKE2FS is not None and shutil.which("debugfs") is not None
+)
 
 DISKSIG = "0xb33dcafe"
 ALIGN_SECTORS = 16384  # 8 MiB, matching genimage `align = 8M`
@@ -205,6 +216,46 @@ def make_rootfs(base):
     return root
 
 
+def make_boot_image(path, cmdline):
+    """Build a FAT BOOT image containing ``cmdline.txt`` (requires mtools)."""
+    path = Path(path)
+    with open(path, "wb") as handle:
+        handle.truncate(16 * 1024 * 1024)
+    subprocess.run(
+        [MKFS_FAT, "-F", "32", str(path)], check=True, capture_output=True
+    )
+    source = path.with_name(path.name + ".cmdline.txt")
+    source.write_text(cmdline, encoding="utf-8")
+    subprocess.run(
+        ["mcopy", "-i", str(path), str(source), "::/cmdline.txt"],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def make_persist_image(path, tree):
+    """Build an ext4 PERSIST image from ``tree`` (requires e2fsprogs)."""
+    path = Path(path)
+    with open(path, "wb") as handle:
+        handle.truncate(64 * 1024 * 1024)
+    subprocess.run(
+        [MKE2FS, "-q", "-t", "ext4", "-d", str(tree), str(path)],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def make_persist_tree(base, dirs):
+    """Create ``dirs`` under ``base``; mke2fs -d preserves their uid/gid."""
+    base = Path(base)
+    base.mkdir(parents=True, exist_ok=True)
+    for relative in dirs:
+        (base / relative).mkdir(parents=True, exist_ok=True)
+    return base
+
+
 class ValidateImageScriptSyntaxTests(unittest.TestCase):
     def test_script_exists_and_passes_bash_n(self):
         self.assertTrue(SCRIPT.is_file(), f"missing {SCRIPT}")
@@ -220,6 +271,8 @@ class ValidateImageScriptSyntaxTests(unittest.TestCase):
             "--image",
             "--mount-root",
             "--root-image",
+            "--boot-image",
+            "--persist-image",
             "--manifest",
             "--strict",
             "--disksig",
@@ -418,6 +471,170 @@ class RootfsValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--strict", result.stdout)
         self.assertIn("RESULT: FAIL", result.stdout)
+
+    @unittest.skipUnless(HAS_SFDISK, "sfdisk not available")
+    def test_strict_ignores_absent_optional_inputs(self):
+        # --strict must not fail just because --manifest/--boot-image/
+        # --persist-image were not supplied. With a complete rootfs, a disk
+        # signature, and no other runnable skip, strict passes.
+        root = self._root()
+        result = run_validator(
+            "--image", self.image, "--mount-root", root,
+            "--disksig", DISKSIG, "--strict",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("RESULT: PASS", result.stdout)
+        self.assertIn("optional-input check(s) skipped", result.stdout)
+
+
+@unittest.skipUnless(HAS_BOOT_TOOLS, "mkfs.fat/mcopy/mtype not available")
+class BootPartitionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.image = make_image(Path(self.tmp) / "image.img")
+
+    def test_cmdline_with_overlayroot_passes(self):
+        boot = make_boot_image(
+            Path(self.tmp) / "boot.vfat",
+            "console=serial0,115200 root=PARTUUID=b33dcafe-02 "
+            "rootfstype=ext4 rootwait overlayroot=tmpfs\n",
+        )
+        result = run_validator("--image", self.image, "--boot-image", boot)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("BOOT cmdline sets overlayroot=", result.stdout)
+
+    def test_cmdline_without_overlayroot_fails(self):
+        boot = make_boot_image(
+            Path(self.tmp) / "boot.vfat",
+            "console=serial0,115200 root=PARTUUID=b33dcafe-02 "
+            "rootfstype=ext4 rootwait\n",
+        )
+        result = run_validator("--image", self.image, "--boot-image", boot)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("BOOT cmdline does not set overlayroot=", result.stdout)
+
+    def test_missing_boot_image_skips_and_passes(self):
+        result = run_validator("--image", self.image)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no --boot-image", result.stdout)
+
+
+@unittest.skipUnless(HAS_PERSIST_TOOLS, "mke2fs/debugfs not available")
+class PersistPartitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def test_seeded_layout_passes(self):
+        tree = make_persist_tree(
+            Path(self.tmp) / "seeded", REQUIRED_DATA_DIRS
+        )
+        persist = make_persist_image(Path(self.tmp) / "seeded.ext4", tree)
+        root = self._root()
+        result = run_validator(
+            "--image", self.image, "--persist-image", persist,
+            "--mount-root", root,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PERSIST has the seeded /data layout", result.stdout)
+        self.assertIn("owned by prusa-cam", result.stdout)
+
+    def test_missing_seeded_layout_fails(self):
+        tree = make_persist_tree(Path(self.tmp) / "empty", [])
+        persist = make_persist_image(Path(self.tmp) / "empty.ext4", tree)
+        result = run_validator(
+            "--image", self.image, "--persist-image", persist
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PERSIST missing seeded directories", result.stdout)
+
+    def test_missing_persist_image_skips_and_passes(self):
+        result = run_validator("--image", self.image)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no --persist-image", result.stdout)
+
+
+class PrivateKeyScanTests(unittest.TestCase):
+    """The key scan must ignore library fixtures and public certs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def test_selftest_fixture_is_not_flagged(self):
+        root = self._root()
+        fixture = (
+            root / "usr" / "lib" / "python3" / "dist-packages" / "Cryptodome"
+            / "SelfTest" / "Cipher" / "test_vectors.py"
+        )
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text(
+            "KEY = '-----BEGIN PRIVATE KEY-----\\nsynthetic\\n"
+            "-----END PRIVATE KEY-----\\n'\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no private key material", result.stdout)
+
+    def test_public_cacert_is_not_flagged(self):
+        root = self._root()
+        cacert = (
+            root / "usr" / "lib" / "python3" / "dist-packages" / "pip"
+            / "_vendor" / "certifi" / "cacert.pem"
+        )
+        cacert.parent.mkdir(parents=True, exist_ok=True)
+        cacert.write_text(
+            "-----BEGIN CERTIFICATE-----\nsynthetic-public-ca\n"
+            "-----END CERTIFICATE-----\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no private key material", result.stdout)
+
+    def test_openssh_private_key_content_is_flagged(self):
+        root = self._root()
+        (root / "opt" / "prusa-cam" / "server.key").write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
+            "-----END OPENSSH PRIVATE KEY-----\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("private key material", result.stdout)
+
+    def test_id_rsa_filename_is_flagged(self):
+        root = self._root()
+        (root / "opt" / "prusa-cam" / "id_rsa").write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
+            "-----END OPENSSH PRIVATE KEY-----\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("private key", result.stdout)
 
 
 if __name__ == "__main__":

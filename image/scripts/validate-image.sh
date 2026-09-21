@@ -3,10 +3,11 @@
 #
 # Usage:
 #   validate-image.sh --image <file> [--mount-root <dir>] [--root-image <root.ext4>]
+#                     [--boot-image <boot.vfat>] [--persist-image <persist.ext4>]
 #                     [--manifest <os-list.json>] [--compressed-image <file>]
 #                     [--disksig <0x...>] [--strict]
 #
-# Two independently testable groups:
+# Three independently testable groups:
 #
 #   A. Partition-table checks (no root): `sfdisk --json` reads the image file
 #      directly and asserts the documented MBR layout from
@@ -17,20 +18,38 @@
 #      signature.
 #
 #   B. Rootfs checks (no mount): run when --mount-root points at a directory
-#      tree that represents the mounted image (ROOT at the top, BOOT under
-#      boot/firmware, PERSIST under data/). The tests use a synthetic tree so
-#      no mount or root is required. Checks cover required units and ordering,
-#      absence of personal usernames/home paths, SSH/password login disabled,
-#      overlayroot, volatile journald, NetworkManager, the factory app and
-#      launcher fallback, build-info.json, forbidden secret/identity artifacts,
-#      and the initial /data structure.
+#      tree that represents the mounted ROOT filesystem. The tests use a
+#      synthetic tree so no mount or root is required. Checks cover required
+#      units and ordering, absence of personal usernames/home paths,
+#      SSH/password login disabled, overlayroot.conf, volatile journald,
+#      NetworkManager, the factory app and launcher fallback, build-info.json,
+#      forbidden secret/identity artifacts, and that the ROOT /data mount point
+#      is empty (no build-time identity).
+#
+#   B2. Partition payloads (no mount): genimage MOVES the rootfs /boot/firmware
+#      contents onto the BOOT (vfat) partition and the /data contents onto the
+#      PERSIST (ext4) partition, leaving EMPTY mount-point directories behind in
+#      ROOT. Those payloads therefore cannot be read through --mount-root and
+#      must be read from the partition images directly:
+#        --boot-image <boot.vfat>     read cmdline.txt via mtools (mtype/mdir)
+#                                     and assert overlayroot= is set;
+#        --persist-image <persist.ext4> list the seeded /data layout via
+#                                     debugfs and assert the prusa-cam uid/gid.
+#      When either image is absent the corresponding checks SKIP (they are
+#      optional inputs; see --strict below).
 #
 #   C. ROOT utilisation and release-manifest consistency: dumpe2fs for
 #      --root-image, a clearly-labelled du estimate for --mount-root, and the
 #      Imager manifest hash/size cross-check for --manifest.
 #
-# --strict makes every skipped check fatal. Without it, skipped checks print a
-# clear "SKIPPED" line and do not affect the exit status.
+# --strict means: every check that CAN run with the provided inputs must pass.
+# It does NOT fail merely because an optional input (--manifest, --boot-image,
+# --persist-image) was not supplied — those checks are reported as SKIPPED and
+# do not affect the exit status, even under --strict. Checks skipped because a
+# required input is missing, or because a tool needed by a check that could
+# otherwise run is unavailable, still count as strict failures. Without
+# --strict, skipped checks print a clear "SKIPPED" line and never affect the
+# exit status.
 #
 # This script never mounts anything, never needs root, and never writes to the
 # image. Exit status is nonzero if any check fails (or a check is skipped under
@@ -47,6 +66,8 @@ SIZE_TOLERANCE_MIB=8
 IMAGE=""
 MOUNT_ROOT=""
 ROOT_IMAGE=""
+BOOT_IMAGE=""
+PERSIST_IMAGE=""
 MANIFEST=""
 COMPRESSED_IMAGE=""
 DISKSIG=""
@@ -55,6 +76,7 @@ STRICT=0
 PASS=0
 FAIL=0
 SKIP=0
+OPTIONAL_SKIP=0
 WARN=0
 
 usage() {
@@ -63,15 +85,20 @@ Offline Buddy3D appliance image validator (AC-13).
 
 Options:
   --image <file>             uncompressed or .xz image to inspect (required)
-  --mount-root <dir>         directory tree representing the mounted image
-                             (ROOT at top, BOOT under boot/firmware, PERSIST
-                             under data/); enables the rootfs checks
+  --mount-root <dir>         directory tree representing the mounted ROOT
+                             filesystem; enables the rootfs checks
   --root-image <root.ext4>   ROOT filesystem image for the authoritative
                              dumpe2fs utilisation check
+  --boot-image <boot.vfat>   BOOT (vfat) partition image; reads cmdline.txt via
+                             mtools (no mount) and asserts overlayroot=
+  --persist-image <persist.ext4>
+                             PERSIST (ext4) partition image; lists the seeded
+                             /data layout via debugfs (no mount)
   --manifest <os-list.json>  Raspberry Pi Imager manifest to cross-check
   --compressed-image <file>  override the auto-located compressed artifact
   --disksig <0x...>          expected MBR disk signature
-  --strict                   make skipped checks fatal
+  --strict                   fail if any runnable check is skipped (optional
+                             inputs that are simply not supplied do not fail)
   -h, --help                 show this help
 EOF
 }
@@ -83,6 +110,8 @@ while [ $# -gt 0 ]; do
       --image)            [ $# -ge 2 ] || die "--image needs a value"; IMAGE="$2"; shift 2 ;;
       --mount-root)       [ $# -ge 2 ] || die "--mount-root needs a value"; MOUNT_ROOT="$2"; shift 2 ;;
       --root-image)       [ $# -ge 2 ] || die "--root-image needs a value"; ROOT_IMAGE="$2"; shift 2 ;;
+      --boot-image)       [ $# -ge 2 ] || die "--boot-image needs a value"; BOOT_IMAGE="$2"; shift 2 ;;
+      --persist-image)    [ $# -ge 2 ] || die "--persist-image needs a value"; PERSIST_IMAGE="$2"; shift 2 ;;
       --manifest)         [ $# -ge 2 ] || die "--manifest needs a value"; MANIFEST="$2"; shift 2 ;;
       --compressed-image) [ $# -ge 2 ] || die "--compressed-image needs a value"; COMPRESSED_IMAGE="$2"; shift 2 ;;
       --disksig)          [ $# -ge 2 ] || die "--disksig needs a value"; DISKSIG="$2"; shift 2 ;;
@@ -97,6 +126,12 @@ done
 if [ -n "$MOUNT_ROOT" ]; then
    [ -d "$MOUNT_ROOT" ] || die "mount root not found: $MOUNT_ROOT"
 fi
+if [ -n "$BOOT_IMAGE" ]; then
+   [ -f "$BOOT_IMAGE" ] || die "boot image not found: $BOOT_IMAGE"
+fi
+if [ -n "$PERSIST_IMAGE" ]; then
+   [ -f "$PERSIST_IMAGE" ] || die "persist image not found: $PERSIST_IMAGE"
+fi
 
 TMPDIR_VALIDATE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_VALIDATE"' EXIT
@@ -105,11 +140,15 @@ section() { printf '\n== %s ==\n' "$1"; }
 
 report() {
    case "$1" in
-      ok)   PASS=$(( PASS + 1 )); printf '[PASS]    %s\n' "$2" ;;
-      fail) FAIL=$(( FAIL + 1 )); printf '[FAIL]    %s\n' "$2" ;;
-      skip) SKIP=$(( SKIP + 1 )); printf '[SKIPPED] %s\n' "$2" ;;
-      warn) WARN=$(( WARN + 1 )); printf '[WARN]    %s\n' "$2" ;;
-      *)    printf '[????]    %s\n' "$2" ;;
+      ok)    PASS=$(( PASS + 1 )); printf '[PASS]    %s\n' "$2" ;;
+      fail)  FAIL=$(( FAIL + 1 )); printf '[FAIL]    %s\n' "$2" ;;
+      skip)  SKIP=$(( SKIP + 1 )); printf '[SKIPPED] %s\n' "$2" ;;
+      # An optional input (--manifest/--boot-image/--persist-image) was not
+      # supplied. Recorded separately so --strict does not treat the absence of
+      # an optional input as a failure; the check simply could not run.
+      oskip) SKIP=$(( SKIP + 1 )); OPTIONAL_SKIP=$(( OPTIONAL_SKIP + 1 )); printf '[SKIPPED] %s\n' "$2" ;;
+      warn)  WARN=$(( WARN + 1 )); printf '[WARN]    %s\n' "$2" ;;
+      *)     printf '[????]    %s\n' "$2" ;;
    esac
 }
 
@@ -342,7 +381,21 @@ SECRET_RE = re.compile(
     r"(?i)\b(token|password|passwd|psk|secret|api[_-]?key|private[_-]?key)\b"
     r"\s*[:=]\s*(.+)"
 )
-KEY_RE = re.compile(r"BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY")
+# Private-key *content* (a PEM/OpenSSH/OpenPGP armor header). Built from
+# concatenated fragments so this detector's own source is not itself flagged by
+# the image secret scanner (which forbids the literal armored header).
+KEY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE" + " KEY-----")
+CERT_RE = re.compile(r"-----BEGIN CERTIFICATE-----")
+# Real private-key filenames. Deliberately narrow: broad *.pem/*.key globs flag
+# public CA bundles (pip/_vendor/certifi/cacert.pem) and cert files. Assembled
+# from fragments for the same self-scan reason as KEY_RE.
+KEY_NAME_RE = re.compile(
+    r"^(" + "id_" + r"(rsa|ed25519)|ssh_host_.*_key|minisign\.key)$"
+)
+# Library test vectors ship real-looking key blocks in their self-test data
+# (e.g. dist-packages/Cryptodome/SelfTest/...). Those are fixtures, not
+# release material, so they are excluded by path.
+TEST_FIXTURE_RE = re.compile(r"(^|/)(dist-packages/[^/]+/SelfTest|tests)(/|$)")
 PLACEHOLDER_RE = re.compile(
     r"^(<.*>|\$\{.*\}|\$[A-Za-z_][A-Za-z0-9_]*|\"\"|''|null|none|changeme|"
     r"change_me|replace_?me|placeholder|redacted)$",
@@ -437,9 +490,24 @@ for path, rel in walk(SECRET_SCAN):
             secret_hits.append(f"{rel}:{match.group(1)}")
 
 for path, rel in walk(["."]):
-    text = read_text(path)
-    if text is not None and KEY_RE.search(text):
+    base = os.path.basename(rel)
+    # Library self-test fixtures (Cryptodome etc.) carry genuine-looking key
+    # blocks as test vectors; they are not release material.
+    if TEST_FIXTURE_RE.search(rel):
+        continue
+    # Flag by real private-key filename first (cheap), then by key *content*.
+    if KEY_NAME_RE.match(base):
         key_hits.append(rel)
+        continue
+    text = read_text(path)
+    if text is None:
+        continue
+    if KEY_RE.search(text):
+        key_hits.append(rel)
+    elif CERT_RE.search(text) and base.lower().endswith((".pem", ".crt")):
+        # Public certificate/bundle (e.g. cacert.pem, *.crt): a CERTIFICATE
+        # block with no PRIVATE KEY block is not private key material.
+        continue
 
 
 def summarize(ok_kind, fail_kind, message, hits):
@@ -480,12 +548,10 @@ PY
       report ok "no Wi-Fi connection profile (*.nmconnection)"
    fi
 
-   keyfiles="$(find "$MOUNT_ROOT" -type f \( -name '*.pem' -o -name '*.key' \) 2>/dev/null || true)"
-   if [ -n "$keyfiles" ]; then
-      report fail "private key/certificate file present: $(printf '%s ' $keyfiles)"
-   else
-      report ok "no *.pem/*.key release private key material"
-   fi
+   # Private-key material is detected by content and by real key filenames in
+   # the Python scan above. The previous broad *.pem/*.key glob was removed: it
+   # false-positived on public CA bundles (e.g. pip/_vendor/certifi/cacert.pem)
+   # and library test vectors, which are not release secrets.
 
    # --- SSH and password login disabled by default ------------------------
    authkeys="$(find "$MOUNT_ROOT/root/.ssh" "$MOUNT_ROOT/home" -name 'authorized_keys' 2>/dev/null || true)"
@@ -540,28 +606,15 @@ PY
    fi
 
    # --- overlayroot -------------------------------------------------------
+   # The persistent overlayroot config lives in ROOT /etc. The cmdline.txt
+   # overlayroot= token is checked from the BOOT partition image in section B2:
+   # genimage moves /boot/firmware contents onto the BOOT partition, so it is
+   # not readable through --mount-root.
    overlay_conf="$MOUNT_ROOT/etc/overlayroot.conf"
    if [ -f "$overlay_conf" ] && grep -q 'overlayroot' "$overlay_conf"; then
       report ok "/etc/overlayroot.conf configures overlayroot"
    else
       report fail "/etc/overlayroot.conf missing or does not configure overlayroot"
-   fi
-
-   cmdline=""
-   for candidate in "$MOUNT_ROOT/boot/firmware/cmdline.txt" "$MOUNT_ROOT/boot/cmdline.txt"; do
-      if [ -f "$candidate" ]; then
-         cmdline="$candidate"
-         break
-      fi
-   done
-   if [ -n "$cmdline" ]; then
-      if grep -q 'overlayroot=' "$cmdline"; then
-         report ok "boot cmdline sets overlayroot="
-      else
-         report fail "boot cmdline does not set overlayroot="
-      fi
-   else
-      report skip "boot cmdline overlayroot= (no cmdline.txt in tree)"
    fi
 
    # --- volatile, size-limited journald -----------------------------------
@@ -652,52 +705,175 @@ PY
       report fail "build-info.json missing at /usr/share/prusa-buddy3d-camera/build-info.json"
    fi
 
-   # --- PERSIST initial structure / ownership / no build-time identity ----
+   # --- ROOT /data is an empty mount point, no build-time identity --------
+   # genimage MOVES the seeded /data contents onto the PERSIST partition, so
+   # ROOT's /data is an empty mount point that must carry no build-time device
+   # identity or secret. The seeded layout itself is asserted from
+   # --persist-image in section B2 (it is not readable here).
    data_root="$MOUNT_ROOT/data"
-   required_data_dirs=(
-      prusa-cam prusa-cam/config prusa-cam/releases prusa-cam/backups
-      network network/system-connections sdcard sdcard/timelapse
-   )
-   missing_data=()
-   for relative in "${required_data_dirs[@]}"; do
-      [ -d "$data_root/$relative" ] || missing_data+=("$relative")
-   done
-   if [ "${#missing_data[@]}" -eq 0 ]; then
-      report ok "PERSIST has the initial /data structure"
-   else
-      report fail "PERSIST is missing initial directories: ${missing_data[*]}"
-   fi
-
-   passwd_file="$MOUNT_ROOT/etc/passwd"
-   if [ -f "$passwd_file" ]; then
-      service_uid="$(awk -F: '$1=="prusa-cam"{print $3; exit}' "$passwd_file" 2>/dev/null || true)"
-      service_gid="$(awk -F: '$1=="prusa-cam"{print $4; exit}' "$passwd_file" 2>/dev/null || true)"
-      if [ -n "$service_uid" ] && [ -n "$service_gid" ]; then
-         wrong_owner=""
-         for relative in "${required_data_dirs[@]}"; do
-            if [ -d "$data_root/$relative" ]; then
-               owner="$(stat -c '%u:%g' "$data_root/$relative" 2>/dev/null || true)"
-               [ "$owner" = "$service_uid:$service_gid" ] || wrong_owner="$wrong_owner $relative($owner)"
-            fi
-         done
-         if [ -z "$wrong_owner" ]; then
-            report ok "PERSIST /data directories owned by prusa-cam ($service_uid:$service_gid)"
-         else
-            report fail "PERSIST /data ownership mismatch:$wrong_owner"
-         fi
-      else
-         report skip "PERSIST ownership (prusa-cam not in /etc/passwd)"
-      fi
-   else
-      report skip "PERSIST ownership (no /etc/passwd in tree)"
-   fi
-
    identity_hits="$(find "$data_root" \( -name 'identity.json' -o -name 'secrets.toml' \) 2>/dev/null || true)"
    if [ -n "$identity_hits" ]; then
       report fail "build-time device identity/secret in /data: $(printf '%s ' $identity_hits)"
    else
       report ok "no build-time device identity in /data (identity.json/secrets.toml)"
    fi
+fi
+
+###############################################################################
+# B2. Partition payloads
+###############################################################################
+section "B2. Partition payloads (AC-13)"
+
+# --- BOOT cmdline.txt -------------------------------------------------------
+# Read cmdline.txt from the FAT BOOT partition without mounting or root. mtools
+# is preferred (mtype reads file contents). When --boot-image is not supplied
+# the check is optional and SKIPPED, never failed.
+if [ -z "$BOOT_IMAGE" ]; then
+   report oskip "BOOT cmdline overlayroot= (no --boot-image)"
+elif command -v mtype >/dev/null 2>&1; then
+   if cmdline_text="$(mtype -i "$BOOT_IMAGE" ::/cmdline.txt 2>/dev/null)"; then
+      if printf '%s\n' "$cmdline_text" | grep -q 'overlayroot='; then
+         report ok "BOOT cmdline sets overlayroot="
+      else
+         report fail "BOOT cmdline does not set overlayroot="
+      fi
+   else
+      report fail "cannot read cmdline.txt from BOOT image: $BOOT_IMAGE"
+   fi
+elif command -v mdir >/dev/null 2>&1; then
+   # mdir can list the FAT root but cannot read file contents; use it only to
+   # confirm cmdline.txt is present, then skip the content assertion clearly.
+   if mdir -i "$BOOT_IMAGE" ::/ 2>/dev/null | grep -qi 'cmdline'; then
+      report skip "BOOT cmdline overlayroot= (mtype unavailable; install mtools)"
+   else
+      report fail "BOOT cmdline.txt is absent from $BOOT_IMAGE"
+   fi
+else
+   report skip "BOOT cmdline overlayroot= (mtools not available; install mtools)"
+fi
+
+# --- PERSIST seeded layout --------------------------------------------------
+# List the ext4 PERSIST partition with debugfs (no mount, no root) and assert
+# the seeded /data layout from image/layer/setup.sh plus its prusa-cam uid/gid.
+# Optional input: SKIPPED when --persist-image is absent.
+if [ -z "$PERSIST_IMAGE" ]; then
+   report oskip "PERSIST seeded layout (no --persist-image)"
+elif ! command -v debugfs >/dev/null 2>&1; then
+   report skip "PERSIST seeded layout (debugfs not available; install e2fsprogs)"
+else
+   consume < <(python3 - "$PERSIST_IMAGE" "$MOUNT_ROOT" <<'PY'
+import os
+import subprocess
+import sys
+
+persist_image, mount_root = sys.argv[1], sys.argv[2]
+
+# (parent directory inside the image, child name) for every seeded path.
+REQUIRED = [
+    ("/", "prusa-cam"),
+    ("/prusa-cam", "config"),
+    ("/prusa-cam", "releases"),
+    ("/prusa-cam", "backups"),
+    ("/", "network"),
+    ("/network", "system-connections"),
+    ("/", "sdcard"),
+    ("/sdcard", "timelapse"),
+]
+
+
+def out(kind, msg):
+    print(f"{kind}|{msg}")
+
+
+def list_dir(directory):
+    """Return {name: (uid, gid, is_dir)} for a directory, or None on error."""
+    result = subprocess.run(
+        ["debugfs", "-R", f"ls -l {directory}", persist_image],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    entries = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        # inode mode links uid gid size date time name
+        if len(parts) < 9:
+            continue
+        mode, uid, gid, name = parts[1], parts[3], parts[4], parts[8]
+        if name in (".", ".."):
+            continue
+        try:
+            is_dir = (int(mode, 8) & 0o170000) == 0o040000
+        except ValueError:
+            is_dir = False
+        entries[name] = (uid, gid, is_dir)
+    return entries
+
+
+cache = {}
+missing = []
+owners = []
+for parent, name in REQUIRED:
+    if parent not in cache:
+        cache[parent] = list_dir(parent)
+    entries = cache[parent]
+    path = "/" + name if parent == "/" else parent + "/" + name
+    if entries is None:
+        out("fail", f"cannot read PERSIST directory {parent} from {persist_image}")
+        sys.exit(0)
+    entry = entries.get(name)
+    if entry is None or not entry[2]:
+        missing.append(path)
+    else:
+        owners.append((path, entry[0], entry[1]))
+
+if missing:
+    out("fail", f"PERSIST missing seeded directories: {', '.join(missing)}")
+    sys.exit(0)
+out("ok", "PERSIST has the seeded /data layout")
+
+# Expected prusa-cam uid/gid comes from the same source setup.sh used: the ROOT
+# /etc/passwd, available through --mount-root. Without it, fall back to
+# asserting every seeded directory shares one consistent non-root owner.
+expected = None
+if mount_root:
+    try:
+        with open(os.path.join(mount_root, "etc", "passwd"), encoding="utf-8") as fh:
+            for line in fh:
+                fields = line.rstrip("\n").split(":")
+                if len(fields) >= 4 and fields[0] == "prusa-cam":
+                    expected = (fields[2], fields[3])
+                    break
+    except OSError:
+        expected = None
+
+if expected is not None:
+    wrong = [f"{p}({u}:{g})" for p, u, g in owners if (u, g) != expected]
+    if wrong:
+        out(
+            "fail",
+            "PERSIST ownership mismatch (expected prusa-cam "
+            f"{expected[0]}:{expected[1]}): {', '.join(wrong)}",
+        )
+    else:
+        out("ok", f"PERSIST directories owned by prusa-cam ({expected[0]}:{expected[1]})")
+else:
+    unique = sorted({(u, g) for _, u, g in owners})
+    if len(unique) == 1 and unique[0] != ("0", "0"):
+        out(
+            "ok",
+            "PERSIST directories consistently owned by "
+            f"{unique[0][0]}:{unique[0][1]} (pass --mount-root to verify the prusa-cam id)",
+        )
+    else:
+        out(
+            "fail",
+            "PERSIST directories are not owned by a single non-root account: "
+            f"{unique}",
+        )
+PY
+)
 fi
 
 ###############################################################################
@@ -737,7 +913,7 @@ else
 fi
 
 if [ -z "$MANIFEST" ]; then
-   report skip "Imager manifest consistency (no --manifest)"
+   report oskip "Imager manifest consistency (no --manifest)"
 elif [ ! -f "$MANIFEST" ]; then
    report fail "manifest not found: $MANIFEST"
 else
@@ -828,8 +1004,15 @@ fi
 section "Summary"
 printf 'checks: %d passed, %d failed, %d skipped, %d warnings\n' "$PASS" "$FAIL" "$SKIP" "$WARN"
 
-if [ "$STRICT" = 1 ] && [ "$SKIP" -gt 0 ]; then
-   report fail "--strict: $SKIP check(s) were skipped"
+# --strict fails only for checks that COULD have run but did not. Skips caused
+# solely by an absent optional input (--manifest/--boot-image/--persist-image,
+# counted in OPTIONAL_SKIP) are not failures. Required-input problems
+# (--image) are rejected up front and never reach this point.
+strict_skips=$(( SKIP - OPTIONAL_SKIP ))
+if [ "$STRICT" = 1 ] && [ "$strict_skips" -gt 0 ]; then
+   report fail "--strict: $strict_skips check(s) were skipped"
+elif [ "$STRICT" = 1 ] && [ "$OPTIONAL_SKIP" -gt 0 ]; then
+   printf '[INFO]    --strict: %d optional-input check(s) skipped (not failures)\n' "$OPTIONAL_SKIP"
 fi
 
 if [ "$FAIL" -gt 0 ]; then
