@@ -1,0 +1,87 @@
+# Buddy3D camera appliance image composition — Raspberry Pi Zero 2 W.
+#
+# Target: Raspberry Pi Zero 2 W, arm64, Raspberry Pi OS / Debian Trixie.
+# Layout: MBR with BOOT (vfat) + ROOT (ext4, immutable overlay lower) +
+# PERSIST (ext4, /data, last partition, grown on first boot). See
+# ../layer/buddy3d-image.yaml and ../README.md.
+#
+# Build with the pinned builder (never a moving checkout):
+#   RPI_IMAGE_GEN_DIR=/path/to/rpi-image-gen image/scripts/build-image.sh
+#
+# rpi-image-gen v2.8.0 config format: docs/config/index.adoc. `device.layer`
+# and `image.layer` select the device and image layers by X-Env-Layer-Name;
+# `layer:` names the extra suite layer. Keys map to IGconf_<section>_<key>.
+
+target:
+  context: buddy3d-camera
+
+artefact:
+  target_name: buddy3d-camera-pi-zero2w
+  # Overridden by image/scripts/build-image.sh with the source git describe.
+  version: 0.0.0+local
+
+device:
+  layer: rpizero2w
+  hostname: buddy3d-camera
+  sector_size: 512
+  # Dedicated non-login service identity (AC-1). device-user-admin creates
+  # the account; image/assets/install-factory-app.sh forces nologin, moves
+  # the home to /opt/prusa-cam, and removes /home/prusa-cam.
+  user1: prusa-cam
+  user1sudo: none
+  user1groups: video,render,audio,plugdev,gpio,i2c,spi
+
+image:
+  layer: buddy3d-image
+  name: buddy3d-camera-pi-zero2w
+  boot_part_size: 512M
+  root_part_size: 4G
+  persist_part_size: 512M
+  rootfs_type: ext4
+  # Fixed MBR disk signature (offset 440). The kernel derives PARTUUIDs as
+  # <signature>-NN, so cmdline.txt/fstab are static and the first-boot grow
+  # can validate the expected PARTUUID relationship. It is a build constant,
+  # not device identity. See layer/genimage.cfg.in.ext4 and layer/setup.sh.
+  # Quoted so YAML does not parse it as a hex integer.
+  disksig: "0xb33dcafe"
+
+layer:
+  # Buddy3D suite: rpios minbase composition with NetworkManager as the
+  # single network activator (source §3.2), instead of systemd-networkd/iwd.
+  base: buddy3d-suite
+
+packages:
+  # Camera + media stack (mirrors pi-impersonator/bootstrap.sh).
+  - rpicam-apps
+  - python3
+  - python3-venv
+  - python3-pip
+  - python3-gi
+  - python3-gst-1.0
+  - gstreamer1.0-tools
+  - gstreamer1.0-plugins-base
+  - gstreamer1.0-plugins-good
+  - gstreamer1.0-plugins-bad
+  - gstreamer1.0-nice
+  - gstreamer1.0-rtsp
+  - gir1.2-gst-rtsp-server-1.0
+  - gir1.2-gst-plugins-bad-1.0
+  # Read-only overlay root + initramfs (AC-10). overlayroot is the mechanism
+  # already proven on the development Pi (pi-impersonator/deploy.sh).
+  - overlayroot
+  - initramfs-tools
+  # growpart(8) for the first-boot PERSIST growth (AC-11).
+  - cloud-guest-utils
+  - rsync
+  - curl
+  - samba
+  - wpasupplicant
+  - ca-certificates
+
+env:
+  # Overridden by image/scripts/build-image.sh. The defaults keep a bare
+  # `rpi-image-gen config` parse working without a git context.
+  PRUSA_SOURCE_COMMIT: unknown
+  RPI_IMAGE_GEN_REVISION: 262d4df5a9f9d4133370465399a7958a7c22cdc7
+  PRUSA_OS_SUITE: trixie
+  PRUSA_KERNEL_PACKAGE: linux-image-rpi-v8

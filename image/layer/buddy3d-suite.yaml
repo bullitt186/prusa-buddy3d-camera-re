@@ -1,0 +1,25 @@
+# METABEGIN
+# X-Env-Layer-Name: buddy3d-suite
+# X-Env-Layer-Category: suite
+# X-Env-Layer-Desc: Buddy3D camera appliance suite. Mirrors the documented
+#  trixie-minbase composition (layer/suite/debian/trixie-minbase.yaml,
+#  rpi-image-gen v2.8.0) but selects NetworkManager as the single network
+#  activator required by source §3.2 instead of systemd-networkd/iwd.
+#  A layer may only provide one network-activator (X-Env-Layer-Provides
+#  uniqueness), so this suite deliberately does not require systemd-net-min.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: debian-trixie-arm64-multi,
+#  rpi-debian-trixie,
+#  rpi-misc-utils,
+#  rpi-essential-base,
+#  rpi-misc-skel,
+#  systemd-min,
+#  network-manager,
+#  openssh-server,
+#  systemd-timesyncd,
+#  wireless-regulatory
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - wpasupplicant

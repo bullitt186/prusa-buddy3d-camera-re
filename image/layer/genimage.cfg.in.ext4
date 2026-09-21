@@ -1,0 +1,97 @@
+# genimage template for the Buddy3D appliance layout.
+#
+# Modelled on rpi-image-gen v2.8.0 image/mbr/simple_dual/genimage.cfg.in.ext4,
+# extended with the third (PERSIST) primary partition. Placeholders are
+# substituted by ../pre-image.sh; <SETUP> is invoked by genimage as
+# `setup.sh <LABEL>` with IMAGEMOUNTPATH pointing at each partition image.
+#
+# MBR disk-signature is fixed in image/config/buddy3d-pi-zero2w.yaml so the
+# kernel-derived PARTUUIDs are <signature>-01 (BOOT), -02 (ROOT), -03 (PERSIST).
+
+image <IMAGE_DIR>/<IMAGE_NAME>.<IMAGE_SUFFIX>.sparse {
+   android-sparse {
+      image = <IMAGE_DIR>/<IMAGE_NAME>.<IMAGE_SUFFIX>
+   }
+}
+
+image boot.vfat.sparse {
+   android-sparse {
+      image = boot.vfat
+   }
+}
+
+image root.ext4.sparse {
+   android-sparse {
+      image = root.ext4
+   }
+}
+
+image persist.ext4.sparse {
+   android-sparse {
+      image = persist.ext4
+   }
+}
+
+image <IMAGE_DIR>/<IMAGE_NAME>.<IMAGE_SUFFIX> {
+   hdimage {
+      align = 8M
+      partition-table-type = "mbr"
+      # fill = true matches upstream image/mbr/simple_dual: the image file is
+      # sized to the end of the last (PERSIST) partition so the on-disk layout
+      # is complete before first-boot grow.
+      fill = true
+      disk-signature = "<DISK_SIGNATURE>"
+   }
+
+   partition boot {
+      in-partition-table = true
+      partition-type = 0xC
+      image = boot.vfat
+      bootable = true
+   }
+
+   partition root {
+      in-partition-table = true
+      partition-type = 0x83
+      image = root.ext4
+   }
+
+   partition persist {
+      in-partition-table = true
+      partition-type = 0x83
+      image = persist.ext4
+   }
+}
+
+image boot.vfat {
+   vfat {
+      label = "BOOT"
+      # -F 32 forces FAT32 for the 512 MiB BOOT partition.
+      extraargs = "-F 32 -S <SECTOR_SIZE>"
+   }
+   size = <BOOT_SIZE>
+   mountpoint = "/boot/firmware"
+   exec-pre = "<SETUP> BOOT"
+}
+
+image root.ext4 {
+   ext4 {
+      label = "ROOT"
+      use-mke2fs = true
+      mke2fs-conf = <MKE2FS_CONF>
+   }
+   size = <ROOT_SIZE>
+   mountpoint = "/"
+   exec-pre = "<SETUP> ROOT"
+}
+
+image persist.ext4 {
+   ext4 {
+      label = "PERSIST"
+      use-mke2fs = true
+      mke2fs-conf = <MKE2FS_CONF>
+   }
+   size = <PERSIST_SIZE>
+   mountpoint = "/data"
+   exec-pre = "<SETUP> PERSIST"
+}

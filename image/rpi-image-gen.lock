@@ -1,0 +1,10 @@
+# Pinned upstream image builder.
+#
+# Consumed by image/scripts/build-image.sh, which refuses to build unless the
+# checkout at $RPI_IMAGE_GEN_DIR has exactly the commit below. Simple
+# `key=value` format so the build script (awk) and host tests can parse it
+# without a YAML dependency.
+name=rpi-image-gen
+url=https://github.com/raspberrypi/rpi-image-gen
+tag=v2.8.0
+commit=262d4df5a9f9d4133370465399a7958a7c22cdc7

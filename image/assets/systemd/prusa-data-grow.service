@@ -1,0 +1,22 @@
+# Image-only first-boot grow unit (AC-11). Installed by
+# image/assets/install-factory-app.sh; the script lives at /usr/libexec/prusa-data-grow.
+# Ordering (source §3.2): local-fs.target -> prusa-data-grow.service ->
+# data-ready.target. The drop-in
+# assets/systemd/data-ready.target.d/10-data-grow.conf attaches it to
+# data-ready.target without modifying the reused target file.
+[Unit]
+Description=Grow the durable PERSIST partition and filesystem to end of device
+DefaultDependencies=no
+RequiresMountsFor=/data
+After=local-fs.target
+Before=prusa-data-ready.service data-ready.target
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/prusa-data-grow
+TimeoutStartSec=300
+
+[Install]
+WantedBy=data-ready.target

@@ -1,0 +1,26 @@
+# Image-only runtime target (AC-12). Groups and orders the reused
+# pi-impersonator/systemd units per source §3.2:
+#
+#   data-ready.target -> prusa-camera.target
+#     -> pi-persist -> rpicam-source -> prusa-rtsp -> prusa-ha-rtsp -> prusa-cam
+#
+# Intra-service ordering is already encoded in the reused unit files
+# (pi-persist Before the camera units; prusa-rtsp/prusa-ha-rtsp After
+# rpicam-source). This target adds the explicit data-ready gate and the
+# grouping so later WPs (MQTT/admin/updater) attach here.
+[Unit]
+Description=Buddy3D camera runtime target (source, signaling, RTSP, admin)
+Requires=data-ready.target
+After=data-ready.target
+
+# Reused units, activated and awaited by this target.
+Wants=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service
+After=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service
+
+# Optional units (prusa-mqtt, prusa-admin, prusa-updater.timer; added by later
+# WPs) must be Wants=, never Requires=, so a WS-Discovery/MQTT/admin/update
+# failure never stops the source, Prusa registration/signaling, snapshots,
+# RTSP, or WebRTC.
+
+[Install]
+WantedBy=multi-user.target

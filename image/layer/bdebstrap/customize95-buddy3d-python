@@ -1,0 +1,28 @@
+#!/bin/bash
+# WP-2b extension point — NOT implemented in WP-2.
+#
+# This bundle hook (IMAGE_ASSET/bdebstrap/customize95-buddy3d-python, where
+# IMAGE_ASSET is image/layer) is the documented insertion point for the WP-2b
+# deliverables:
+#
+#   1. A hash-locked Python dependency file at /opt/prusa-cam/requirements.lock
+#      (aiohttp, python-socketio, the MQTT client, and transitive deps) with
+#      --hash entries for every wheel.
+#   2. The runtime venv at /opt/prusa-cam/venv, created with
+#      `python3 -m venv --system-site-packages` (so PyGObject/GStreamer from
+#      Debian packages are visible) and populated from requirements.lock with
+#      `pip install --require-hashes`.
+#   3. SBOM (SPDX or CycloneDX) and the installed-package manifest, plus the
+#      package-manifest field consumed by image/assets/build-info.py.
+#
+# WP-2 intentionally stops here: it installs the factory application code and
+# the systemd unit graph but leaves the Python dependency closure and SBOM to
+# WP-2b so the hash policy is reviewed in one place.
+set -eu
+
+root="$1"
+
+echo "buddy3d-image: WP-2b pending — install /opt/prusa-cam/venv from a" >&2
+echo "buddy3d-image: hash-locked requirements.lock and generate the SBOM/package" >&2
+echo "buddy3d-image: manifest here (root=$root)." >&2
+exit 0
