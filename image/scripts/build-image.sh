@@ -55,7 +55,9 @@ for path in \
    [ -e "$RPI_IMAGE_GEN_DIR/$path" ] || \
       die "pinned rpi-image-gen is missing $path; refusing to build"
 done
-if ! "$RPI_IMAGE_GEN_DIR/rpi-image-gen" --help 2>&1 | grep -q -- '-S'; then
+# -S is a `build` subcommand option, so query that help level (the top-level
+# help does not list it).
+if ! "$RPI_IMAGE_GEN_DIR/rpi-image-gen" build --help 2>&1 | grep -q -- '-S'; then
    die "pinned rpi-image-gen does not advertise the -S source-directory capability"
 fi
 
@@ -75,8 +77,8 @@ echo "workroot:  $WORKROOT"
 "$RPI_IMAGE_GEN_DIR/rpi-image-gen" build \
    -S "$IMAGE_DIR" \
    -c "$CONFIG" \
-   -- "IGconf_sys_workroot=$WORKROOT" \
-      "IGconf_artefact_version=$VERSION" \
+   -B "$WORKROOT" \
+   -- "IGconf_artefact_version=$VERSION" \
       "PRUSA_SOURCE_COMMIT=$SOURCE_COMMIT" \
       "RPI_IMAGE_GEN_REVISION=$LOCK_COMMIT"
 
