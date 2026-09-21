@@ -78,3 +78,9 @@ mmdebstrap:
     # Factory app + image layout. See image/assets/install-factory-app.sh.
     - >-
       "${IGconf_image_assetsdir}/install-factory-app.sh" "$1" "${IGconf_image_reporoot}"
+    # genimage populates the PERSIST partition from the rootfs mountpoint /data
+    # and leaves an empty /data mount point in ROOT. The directory must exist in
+    # the rootfs for genimage's mountpoint move to succeed (otherwise it fails
+    # with "cannot stat .../root/data"). persist_restore.py recreates the
+    # durable layout at runtime, so an empty mount point is correct (AC-10).
+    - install -d -m 0755 "$1/data"
