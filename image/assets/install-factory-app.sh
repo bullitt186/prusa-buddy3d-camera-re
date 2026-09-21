@@ -45,8 +45,8 @@ rsync -a --delete \
 # --- reused runtime units (never divergent copies) --------------------------
 unit_src="$repo/pi-impersonator/systemd"
 for u in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
-         prusa-cam.service pi-persist.service prusa-data-ready.service \
-         data-ready.target bootlog.service; do
+         prusa-cam.service prusa-admin.service pi-persist.service \
+         prusa-data-ready.service data-ready.target bootlog.service; do
    install -D -m 0644 "$unit_src/$u" "$SYSTEMD_DST/$u"
 done
 
@@ -72,8 +72,8 @@ install -D -m 0755 "$assets/launcher.sh" "$root$APP_ROOT/launcher.sh"
 chroot "$root" systemctl enable \
    data-ready.target prusa-data-ready.service prusa-data-grow.service \
    pi-persist.service rpicam-source.service prusa-rtsp.service \
-   prusa-ha-rtsp.service prusa-cam.service bootlog.service \
-   prusa-camera.target >/dev/null 2>&1 || true
+   prusa-ha-rtsp.service prusa-cam.service prusa-admin.service \
+   bootlog.service prusa-camera.target >/dev/null 2>&1 || true
 
 # SSH is installed but disabled by default (AC-13/AC-20). Raspberry Pi Imager
 # may enable it (and create the operator account) during first-run setup.

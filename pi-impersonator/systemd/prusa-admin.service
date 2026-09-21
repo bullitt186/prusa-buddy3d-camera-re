@@ -1,0 +1,32 @@
+# Admin / provisioning HTTP UI (admin_app.py), the thin aiohttp transport over
+# the stdlib admin_http core. Binds :443 over HTTPS in admin mode (the
+# post-claim UI at https://buddy3d-<device-id>.local) and :80 in setup mode
+# (the unclaimed captive portal at http://192.168.4.1). Both ports are below
+# 1024, so CAP_NET_BIND_SERVICE is required.
+#
+# ADMIN_MODE selects the surface: admin (default, :443) or setup (:80). When it
+# is unset the entry point resolves the mode from the persisted provisioning
+# state. TLS is optional: ADMIN_TLS_CERT/ADMIN_TLS_KEY in /etc/prusa-cam/admin.env
+# enable it; without them the selected port serves plain HTTP.
+# data-ready.target gates this unit on a real, writable PERSIST /data mount (AC-7).
+[Unit]
+Description=Buddy3D camera admin / provisioning UI
+After=network-online.target data-ready.target
+Wants=network-online.target
+Requires=data-ready.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=prusa-cam
+WorkingDirectory=/opt/prusa-cam
+Environment=ADMIN_MODE=admin
+EnvironmentFile=-/etc/prusa-cam/admin.env
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/admin_app.py
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

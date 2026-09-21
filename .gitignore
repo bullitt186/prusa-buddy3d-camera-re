@@ -5,6 +5,10 @@ config.ini
 !*.env.example
 tokens.json
 
+# ── Local tooling artifacts (not part of the project) ─────────────────────
+.opencode/
+.playwright-mcp/
+
 # ── Personal agent runbooks (real host/network details) ───────────────────
 # Keep the redacted *.example.md templates; ignore the filled-in local copies.
 .agent/*
