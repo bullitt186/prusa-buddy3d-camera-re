@@ -7,8 +7,10 @@ structural and ordering invariants the build relies on.
 """
 
 import ast
+import json
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -359,6 +361,78 @@ class ImageScaffoldingTests(unittest.TestCase):
                 ["bash", "-n", str(path)], capture_output=True, text=True
             )
             self.assertEqual(result.returncode, 0, f"{path}: {result.stderr}")
+
+    def test_factory_installer_disables_ssh_offline_and_verifies(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+
+        # Offline disable: a plain `chroot ... systemctl disable` cannot reach
+        # the systemd bus in a never-booted chroot and silently no-ops, so the
+        # offline --root form is required.
+        self.assertIn('systemctl --root="$root" disable', text)
+        ssh_block = text[
+            text.index('SSH_UNITS="ssh.service ssh.socket ssh-hostkeys-generate.service"') : text.index(
+                "# --- build-info.json"
+            )
+        ]
+        for unit in (
+            "ssh.service",
+            "ssh.socket",
+            "ssh-hostkeys-generate.service",
+            "sshd.service",
+        ):
+            self.assertIn(unit, ssh_block, f"{unit} not handled in SSH disable block")
+
+        # Explicit removal of any remaining enablement symlink.
+        self.assertRegex(
+            ssh_block, r'rm -f "\$root/etc/systemd/system/"\*\.wants/"\$unit"'
+        )
+
+        # Post-check must fail the build loudly, not silently ship SSH enabled.
+        self.assertIn("multi-user.target.wants/ssh.service", ssh_block)
+        self.assertIn("exit 1", ssh_block)
+
+    def test_factory_installer_records_package_manifest(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+
+        # The manifest is generated from dpkg inside the target root.
+        self.assertIn("dpkg-query -W -f='${Package} ${Version}\\n'", text)
+        self.assertIn("/usr/share/prusa-buddy3d-camera/packages.txt", text)
+
+        # The in-image path is handed to the generator, so package_manifest is
+        # a non-empty string rather than null.
+        self.assertRegex(text, r'--package-manifest\s+"\$manifest_arg"')
+        self.assertRegex(text, r'MANIFEST_IMAGE_PATH=/usr/share/prusa-buddy3d-camera/packages\.txt')
+
+    def test_build_info_generator_records_nonempty_package_manifest(self):
+        # Functional guard for AC-14: the generator records the supplied path.
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(ASSETS / "build-info.py"),
+                    "--source-commit",
+                    "0" * 40,
+                    "--builder-revision",
+                    "unknown",
+                    "--os-suite",
+                    "trixie",
+                    "--kernel-package",
+                    "linux-image-rpi-v8",
+                    "--package-manifest",
+                    "/usr/share/prusa-buddy3d-camera/packages.txt",
+                    "--output",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                doc["package_manifest"],
+                "/usr/share/prusa-buddy3d-camera/packages.txt",
+            )
 
     def test_build_info_generator_is_stdlib_only(self):
         source = read_text(ASSETS / "build-info.py")

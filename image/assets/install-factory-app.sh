@@ -77,16 +77,66 @@ chroot "$root" systemctl enable \
 
 # SSH is installed but disabled by default (AC-13/AC-20). Raspberry Pi Imager
 # may enable it (and create the operator account) during first-run setup.
-chroot "$root" systemctl disable ssh.service >/dev/null 2>&1 || true
+#
+# A plain `chroot ... systemctl disable` cannot reach the systemd bus in a
+# chroot that was never booted, so it silently no-ops. Use systemctl's offline
+# --root mode instead, which edits the unit symlinks directly.
+SSH_UNITS="ssh.service ssh.socket ssh-hostkeys-generate.service"
+systemctl --root="$root" disable $SSH_UNITS >/dev/null 2>&1 || true
 
-# --- build-info.json (AC-14); package manifest is a WP-2b extension point ---
+# Belt and braces: drop any enablement symlink the offline call missed (for
+# example the sshd.service alias). `disable` (not `mask`) keeps Raspberry Pi
+# Imager able to re-enable SSH later.
+for unit in $SSH_UNITS sshd.service; do
+   rm -f "$root/etc/systemd/system/"*.wants/"$unit"
+done
+
+# Never ship an image with SSH enabled: fail the build loudly if anything
+# survived rather than silently ignoring it.
+if [ -e "$root/etc/systemd/system/multi-user.target.wants/ssh.service" ] \
+   || [ -L "$root/etc/systemd/system/multi-user.target.wants/ssh.service" ] \
+   || [ -e "$root/etc/systemd/system/multi-user.target.wants/sshd.service" ] \
+   || [ -L "$root/etc/systemd/system/multi-user.target.wants/sshd.service" ] \
+   || [ -e "$root/etc/systemd/system/sysinit.target.wants/ssh.service" ] \
+   || [ -L "$root/etc/systemd/system/sysinit.target.wants/ssh.service" ]; then
+   log "ERROR: ssh.service is still enabled by default; refusing to build" >&2
+   exit 1
+fi
+for unit in $SSH_UNITS sshd.service; do
+   for link in "$root/etc/systemd/system/"*.wants/"$unit"; do
+      if [ -e "$link" ] || [ -L "$link" ]; then
+         log "ERROR: SSH enablement symlink survived: $link" >&2
+         exit 1
+      fi
+   done
+done
+
+# --- build-info.json (AC-14) ------------------------------------------------
 install -d -m 0755 "$root/usr/share/prusa-buddy3d-camera"
+
+# Record the installed-package manifest (AC-14). The manifest is generated
+# inside the target root; build-info.json records the in-image path so the
+# image never embeds a host build path. If the chroot has no dpkg the file is
+# left absent and build-info records package_manifest as null.
+MANIFEST_IMAGE_PATH=/usr/share/prusa-buddy3d-camera/packages.txt
+manifest="$root$MANIFEST_IMAGE_PATH"
+if chroot "$root" dpkg-query -W -f='${Package} ${Version}\n' > "$manifest" 2>/dev/null; then
+   log "recorded installed-package manifest ($(wc -l < "$manifest") packages)"
+else
+   rm -f "$manifest"
+   log "dpkg-query unavailable in chroot; package manifest not recorded"
+fi
+manifest_arg=""
+if [ -s "$manifest" ]; then
+   manifest_arg="$MANIFEST_IMAGE_PATH"
+fi
+
 python3 "$assets/build-info.py" \
    --source-commit "${PRUSA_SOURCE_COMMIT:-unknown}" \
    --builder-revision "${RPI_IMAGE_GEN_REVISION:-unknown}" \
    --os-suite "${PRUSA_OS_SUITE:-trixie}" \
    --kernel-package "${PRUSA_KERNEL_PACKAGE:-linux-image-rpi-v8}" \
-   --package-manifest "${PRUSA_PACKAGE_MANIFEST:-}" \
+   --package-manifest "$manifest_arg" \
    --output "$root/usr/share/prusa-buddy3d-camera/build-info.json"
 
 # --- durable configuration directory + ownership ----------------------------
