@@ -362,18 +362,16 @@ class ImageScaffoldingTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, f"{path}: {result.stderr}")
 
-    def test_factory_installer_disables_ssh_offline_and_verifies(self):
-        text = read_text(ASSETS / "install-factory-app.sh")
+    def test_ssh_is_disabled_after_all_layers(self):
+        # The reused openssh-server layer runs `enable-units ssh ...` AFTER our
+        # image-layer customize hook, so the disable must live in post-build.sh,
+        # which runs after every layer — not in install-factory-app.sh.
+        installer = read_text(ASSETS / "install-factory-app.sh")
+        self.assertNotIn('systemctl --root="$root" disable', installer)
+        self.assertIn("post-build.sh", installer)
 
-        # Offline disable: a plain `chroot ... systemctl disable` cannot reach
-        # the systemd bus in a never-booted chroot and silently no-ops, so the
-        # offline --root form is required.
-        self.assertIn('systemctl --root="$root" disable', text)
-        ssh_block = text[
-            text.index('SSH_UNITS="ssh.service ssh.socket ssh-hostkeys-generate.service"') : text.index(
-                "# --- build-info.json"
-            )
-        ]
+        text = read_text(LAYER_DIR / "post-build.sh")
+        ssh_block = text[text.index('SSH_UNITS="ssh.service'):]
         for unit in (
             "ssh.service",
             "ssh.socket",
@@ -384,12 +382,12 @@ class ImageScaffoldingTests(unittest.TestCase):
 
         # Explicit removal of any remaining enablement symlink.
         self.assertRegex(
-            ssh_block, r'rm -f "\$root/etc/systemd/system/"\*\.wants/"\$unit"'
+            ssh_block, r'rm -f "\$fs/etc/systemd/system/"\*\.wants/"\$unit"'
         )
 
         # Post-check must fail the build loudly, not silently ship SSH enabled.
-        self.assertIn("multi-user.target.wants/ssh.service", ssh_block)
         self.assertIn("exit 1", ssh_block)
+        self.assertIn("SSH enablement symlink survived", ssh_block)
 
     def test_factory_installer_records_package_manifest(self):
         text = read_text(ASSETS / "install-factory-app.sh")

@@ -75,41 +75,10 @@ chroot "$root" systemctl enable \
    prusa-ha-rtsp.service prusa-cam.service prusa-admin.service \
    bootlog.service prusa-camera.target >/dev/null 2>&1 || true
 
-# SSH is installed but disabled by default (AC-13/AC-20). Raspberry Pi Imager
-# may enable it (and create the operator account) during first-run setup.
-#
-# A plain `chroot ... systemctl disable` cannot reach the systemd bus in a
-# chroot that was never booted, so it silently no-ops. Use systemctl's offline
-# --root mode instead, which edits the unit symlinks directly.
-SSH_UNITS="ssh.service ssh.socket ssh-hostkeys-generate.service"
-systemctl --root="$root" disable $SSH_UNITS >/dev/null 2>&1 || true
-
-# Belt and braces: drop any enablement symlink the offline call missed (for
-# example the sshd.service alias). `disable` (not `mask`) keeps Raspberry Pi
-# Imager able to re-enable SSH later.
-for unit in $SSH_UNITS sshd.service; do
-   rm -f "$root/etc/systemd/system/"*.wants/"$unit"
-done
-
-# Never ship an image with SSH enabled: fail the build loudly if anything
-# survived rather than silently ignoring it.
-if [ -e "$root/etc/systemd/system/multi-user.target.wants/ssh.service" ] \
-   || [ -L "$root/etc/systemd/system/multi-user.target.wants/ssh.service" ] \
-   || [ -e "$root/etc/systemd/system/multi-user.target.wants/sshd.service" ] \
-   || [ -L "$root/etc/systemd/system/multi-user.target.wants/sshd.service" ] \
-   || [ -e "$root/etc/systemd/system/sysinit.target.wants/ssh.service" ] \
-   || [ -L "$root/etc/systemd/system/sysinit.target.wants/ssh.service" ]; then
-   log "ERROR: ssh.service is still enabled by default; refusing to build" >&2
-   exit 1
-fi
-for unit in $SSH_UNITS sshd.service; do
-   for link in "$root/etc/systemd/system/"*.wants/"$unit"; do
-      if [ -e "$link" ] || [ -L "$link" ]; then
-         log "ERROR: SSH enablement symlink survived: $link" >&2
-         exit 1
-      fi
-   done
-done
+# SSH is installed but disabled by default (AC-13/AC-20). The disable runs in
+# image/layer/post-build.sh, which executes after every layer — the reused
+# openssh-server layer re-enables ssh.service after this customize hook, so
+# disabling here would be undone. Raspberry Pi Imager may enable SSH later.
 
 # --- build-info.json (AC-14) ------------------------------------------------
 install -d -m 0755 "$root/usr/share/prusa-buddy3d-camera"
