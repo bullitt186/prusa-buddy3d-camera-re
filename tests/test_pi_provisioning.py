@@ -19,6 +19,7 @@ PI_DIR = Path(__file__).resolve().parents[1] / 'pi-impersonator'
 sys.path.insert(0, str(PI_DIR))
 
 import config_schema  # noqa: E402
+import identity  # noqa: E402
 import provisioning  # noqa: E402
 import settings_store  # noqa: E402
 
@@ -120,6 +121,143 @@ class DeviceIdentityTests(ProvisioningTestBase):
         hostname = provisioning.admin_hostname('AA:BB:CC:DD:EE:FF')
         self.assertLessEqual(len(hostname), 63)
         self.assertRegex(hostname, re.compile(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'))
+
+
+class ResolveDeviceIdTests(ProvisioningTestBase):
+    """WP-R1: pre-claim device id resolution (configured > MAC > seed)."""
+
+    MAC = 'AA:BB:CC:DD:EE:FF'
+    SEED = 'AbCdEf0123'
+
+    def _mac_path(self, value=None):
+        path = os.path.join(self.root, 'wlan0-address')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(self.MAC if value is None else value)
+        return path
+
+    def _device_path(self, fingerprint):
+        device = config_schema.default_device()
+        device['fingerprint'] = fingerprint
+        path = os.path.join(self.root, 'device.toml')
+        self.assertTrue(config_schema.save_device(device, path=path))
+        return path
+
+    def _seed_path(self):
+        path = os.path.join(self.root, 'identity.fallback')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(self.SEED)
+        return path
+
+    def _expected_from_mac(self):
+        normalized = identity.normalize_wifi_mac(self.MAC)
+        return provisioning.derive_device_id(identity.fingerprint_from_mac(normalized))
+
+    def test_configured_fingerprint_wins_over_mac(self):
+        device_path = self._device_path('configured-fingerprint')
+        mac_path = self._mac_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(device_path=device_path, mac_path=mac_path),
+            provisioning.derive_device_id('configured-fingerprint'),
+        )
+
+    def test_mac_used_when_no_configured_fingerprint(self):
+        # default_device has an empty fingerprint.
+        device_path = self._device_path('')
+        mac_path = self._mac_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(device_path=device_path, mac_path=mac_path),
+            self._expected_from_mac(),
+        )
+
+    def test_missing_device_file_uses_mac(self):
+        missing = os.path.join(self.root, 'absent.toml')
+        mac_path = self._mac_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(device_path=missing, mac_path=mac_path),
+            self._expected_from_mac(),
+        )
+
+    def test_unreadable_mac_falls_back_to_seed(self):
+        device_path = self._device_path('')
+        missing_mac = os.path.join(self.root, 'no-such-iface')
+        seed_path = self._seed_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(
+                device_path=device_path, mac_path=missing_mac, fallback_path=seed_path
+            ),
+            provisioning.derive_device_id(identity.fingerprint_from_seed(self.SEED)),
+        )
+
+    def test_corrupt_device_file_does_not_raise(self):
+        device_path = os.path.join(self.root, 'corrupt.toml')
+        with open(device_path, 'w', encoding='utf-8') as handle:
+            handle.write('this is not = valid toml [[[')
+        mac_path = self._mac_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(device_path=device_path, mac_path=mac_path),
+            self._expected_from_mac(),
+        )
+
+    def test_invalid_mac_falls_back_to_seed(self):
+        device_path = self._device_path('')
+        mac_path = self._mac_path('not-a-mac')
+        seed_path = self._seed_path()
+        self.assertEqual(
+            provisioning.resolve_device_id(
+                device_path=device_path, mac_path=mac_path, fallback_path=seed_path
+            ),
+            provisioning.derive_device_id(identity.fingerprint_from_seed(self.SEED)),
+        )
+
+    def test_identity_failure_returns_empty(self):
+        with patch.object(
+            identity, 'resolve_fingerprint', side_effect=RuntimeError('boom')
+        ):
+            self.assertEqual(
+                provisioning.resolve_device_id(
+                    device_path=os.path.join(self.root, 'absent.toml'),
+                    mac_path=self._mac_path(),
+                ),
+                '',
+            )
+
+    def test_default_fallback_is_durable_under_data(self):
+        # H2: /etc is volatile on the read-only-root appliance, so the random
+        # fallback seed must default under the durable PERSIST partition.
+        self.assertEqual(
+            provisioning.IDENTITY_FALLBACK_PATH,
+            '/data/prusa-cam/identity.fallback',
+        )
+        captured = {}
+
+        def fake_resolve(configured, raw_mac, fallback_path=None):
+            captured['fallback'] = fallback_path
+            return '', 'deadbeef'
+
+        with patch.object(identity, 'resolve_fingerprint', side_effect=fake_resolve):
+            result = provisioning.resolve_device_id(
+                device_path=os.path.join(self.root, 'absent.toml'),
+                mac_path=os.path.join(self.root, 'no-such-iface'),
+            )
+        self.assertEqual(captured['fallback'], '/data/prusa-cam/identity.fallback')
+        self.assertEqual(result, provisioning.derive_device_id('deadbeef'))
+
+    def test_explicit_fallback_path_still_overrides_the_default(self):
+        captured = {}
+
+        def fake_resolve(configured, raw_mac, fallback_path=None):
+            captured['fallback'] = fallback_path
+            return '', 'deadbeef'
+
+        with patch.object(identity, 'resolve_fingerprint', side_effect=fake_resolve):
+            provisioning.resolve_device_id(
+                device_path=os.path.join(self.root, 'absent.toml'),
+                mac_path=os.path.join(self.root, 'no-such-iface'),
+                fallback_path=os.path.join(self.root, 'custom.fallback'),
+            )
+        self.assertEqual(
+            captured['fallback'], os.path.join(self.root, 'custom.fallback')
+        )
 
 
 def expected_uuid():

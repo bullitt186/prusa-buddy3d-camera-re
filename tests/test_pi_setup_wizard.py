@@ -20,6 +20,7 @@ sys.path.insert(0, str(PI_DIR))
 import admin_auth  # noqa: E402
 import config_schema  # noqa: E402
 import hotspot  # noqa: E402
+import privileged  # noqa: E402
 import provisioning  # noqa: E402
 import settings_store  # noqa: E402
 import setup_wizard  # noqa: E402
@@ -540,6 +541,67 @@ class FinishTests(WizardTestBase):
         self.assertIn('stayed in setup', result.reason)
         self.assertIn('hotspot restart failed', result.reason)
         self.assertEqual(self.events, ['hotspot_stop', 'hotspot_start'])
+
+    def test_finish_activates_station_before_camera(self):
+        seen = []
+
+        def activate(ssid, psk):
+            seen.append((ssid, psk))
+            self.events.append('station_activate')
+            return True
+
+        session = self.finish_ready(activate_station=activate)
+        result = session.finish()
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(
+            self.events, ['hotspot_stop', 'station_activate', 'camera_start']
+        )
+        self.assertEqual(seen, [(SSID, PSK)])
+        self.assertTrue(session.finished)
+
+    def test_station_activation_failure_restarts_hotspot(self):
+        def activate(ssid, psk):
+            self.events.append('station_activate')
+            return False
+
+        session = self.finish_ready(activate_station=activate)
+        result = session.finish()
+        self.assertFalse(result.ok)
+        self.assertIn('station activation failed', result.reason)
+        self.assertIn('stayed in setup', result.reason)
+        self.assertEqual(
+            self.events, ['hotspot_stop', 'station_activate', 'hotspot_start']
+        )
+        self.assertFalse(session.finished)
+
+    def test_station_activation_result_reason_is_surfaced(self):
+        def activate(ssid, psk):
+            self.events.append('station_activate')
+            return privileged.PrivilegedResult(
+                False, 'wifi-station-apply failed (exit 1)'
+            )
+
+        session = self.finish_ready(activate_station=activate)
+        result = session.finish()
+        self.assertFalse(result.ok)
+        self.assertIn('wifi-station-apply failed', result.reason)
+        self.assertNotIn(PSK, result.reason)
+        self.assertFalse(session.finished)
+
+    def test_station_activation_exception_does_not_leak(self):
+        def activate(ssid, psk):
+            self.events.append('station_activate')
+            raise RuntimeError('argv=nmcli password ' + PSK)
+
+        session = self.finish_ready(activate_station=activate)
+        result = session.finish()
+        self.assertFalse(result.ok)
+        self.assertIn('stayed in setup', result.reason)
+        self.assertNotIn(PSK, result.reason)
+        self.assertEqual(
+            self.events, ['hotspot_stop', 'station_activate', 'hotspot_start']
+        )
+        self.assertFalse(session.finished)
 
 
 if __name__ == '__main__':

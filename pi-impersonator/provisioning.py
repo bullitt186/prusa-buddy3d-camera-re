@@ -39,12 +39,18 @@ import uuid
 from datetime import datetime, timezone
 
 import config_schema
+import identity
 import settings_store
 
 log = logging.getLogger('prusa-cam.provisioning')
 
 PROVISIONING_SCHEMA_VERSION = 1
 PROVISIONING_PATH = '/data/prusa-cam/provisioning.json'
+
+#: Durable fallback seed location. The appliance root is a read-only overlay, so
+#: /etc is volatile across reboots; the random identity seed must live under the
+#: durable PERSIST partition to keep the setup SSID stable (H2).
+IDENTITY_FALLBACK_PATH = '/data/prusa-cam/identity.fallback'
 
 #: The documented forward-only chain. ``recovery`` is deliberately kept out of
 #: this tuple (it is not a forward milestone) and exposed as :data:`RECOVERY`.
@@ -142,6 +148,58 @@ def admin_hostname(device_id):
     if not suffix:
         return ''
     return f'buddy3d-{suffix}'
+
+
+def resolve_device_id(device_path=None, mac_path='/sys/class/net/wlan0/address',
+                      fallback_path=None):
+    """Derive the stable device id before ``device.toml`` exists (WP-R1).
+
+    Precedence mirrors the firmware identity path (:func:`identity.resolve_fingerprint`):
+
+    1. an explicitly configured ``device.toml`` ``fingerprint`` (the value a
+       registration token was bound to) wins;
+    2. otherwise the raw ``wlan0`` MAC is hashed;
+    3. otherwise the persisted random fallback seed, read from
+       :data:`IDENTITY_FALLBACK_PATH` on the durable PERSIST partition (``/etc``
+       is volatile on the read-only-root appliance, so a seed there would
+       regenerate every reboot and change the setup SSID — H2).
+
+    The chosen fingerprint is projected through :func:`derive_device_id`, so the
+    setup SSID, the admin hostname and the ONVIF endpoint all share one identity
+    even on an unclaimed device. Returns ``''`` when nothing can be derived and
+    never raises; every path is injectable for host testing.
+    """
+    if fallback_path is None:
+        fallback_path = IDENTITY_FALLBACK_PATH
+    fingerprint = ''
+    try:
+        device = (config_schema.load_device(device_path)
+                  if device_path is not None else config_schema.load_device())
+    except Exception:  # noqa: BLE001 - a corrupt document must not stop the UI
+        device = None
+    if isinstance(device, dict):
+        configured = device.get('fingerprint')
+        if isinstance(configured, str) and configured.strip():
+            fingerprint = configured.strip()
+
+    raw_mac = ''
+    try:
+        with open(mac_path, encoding='utf-8') as f:
+            raw_mac = f.read().strip()
+    except (OSError, TypeError, ValueError):
+        raw_mac = ''
+
+    try:
+        _mac, fingerprint = identity.resolve_fingerprint(
+            fingerprint, raw_mac, fallback_path)
+    except Exception:  # noqa: BLE001 - identity resolution must never raise
+        return ''
+    if not fingerprint:
+        return ''
+    try:
+        return derive_device_id(fingerprint)
+    except ValueError:
+        return ''
 
 
 # --------------------------------------------------------------------------- #

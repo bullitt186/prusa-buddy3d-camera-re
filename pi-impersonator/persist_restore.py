@@ -5,7 +5,10 @@ Runs as root from ``pi-persist.service`` before the camera/RTSP units. It:
 1. bails out (exit 0) unless ``/data`` is a real mountpoint, so it is harmless
    before the offline repartition creates ``mmcblk0p3``;
 2. creates the durable directories and bind-mounts ``/data/sdcard`` onto the
-   firmware path ``/mnt/sdcard`` (SMB keeps sharing ``/mnt/sdcard`` unchanged);
+   firmware path ``/mnt/sdcard`` (SMB keeps sharing ``/mnt/sdcard`` unchanged),
+   and ``/data/network/system-connections`` onto
+   ``/etc/NetworkManager/system-connections`` so the station profile created at
+   claim survives the read-only-root reboot (B4);
 3. restores ``quality.env`` and ``rtsp.mode`` from ``state.json``;
 4. prunes the oldest timelapse JPEG frames when ``/data`` free space is low
    (``.avi`` and the CSV index are never deleted).
@@ -36,6 +39,9 @@ DATA_BACKUPS_DIR = DATA_PRUSA_CAM + '/backups'
 DATA_NETWORK_DIR = '/data/network'
 DATA_NETWORK_CONNECTIONS = DATA_NETWORK_DIR + '/system-connections'
 SD_MOUNT = '/mnt/sdcard'
+#: NetworkManager keyfile store. Bind-mounted from DATA_NETWORK_CONNECTIONS so
+#: the station profile created at claim survives the read-only-root reboot (B4).
+NM_CONNECTIONS = '/etc/NetworkManager/system-connections'
 TIMELAPSE_DIR = DATA_SDCARD + '/timelapse'
 FRAME_SUFFIX = '.jpg'
 
@@ -58,9 +64,18 @@ DATA_LAYOUT = (
     (DATA_CONFIG_DIR, 0o750),
     (DATA_RELEASES_DIR, 0o750),
     (DATA_BACKUPS_DIR, 0o750),
-    (DATA_NETWORK_DIR, 0o750),
-    (DATA_NETWORK_CONNECTIONS, 0o750),
+    (DATA_NETWORK_DIR, 0o700),
+    (DATA_NETWORK_CONNECTIONS, 0o700),
 )
+
+#: Layout entries that must stay root-owned. The NetworkManager keyfile store is
+#: bind-mounted onto ``/etc/NetworkManager/system-connections`` (see
+#: :data:`NM_CONNECTIONS`), which root consumes and inotify-reloads; giving the
+#: unprivileged service account write access there would both weaken the
+#: privilege boundary and let NM reject the profiles. These entries are created
+#: (as root, since ``pi-persist.service`` runs as root) but never chowned to the
+#: service user.
+ROOT_ONLY_DIRS = frozenset({DATA_NETWORK_DIR, DATA_NETWORK_CONNECTIONS})
 
 
 def quality_env_values(tier):
@@ -146,7 +161,11 @@ def ensure_durable_layout(service_user):
         except OSError as e:
             log.warning(f'persist: could not create {directory}: {e}')
             continue
-        _chown(directory, service_user)
+        # The NetworkManager keyfile store stays root-owned (see ROOT_ONLY_DIRS);
+        # pi-persist.service runs as root, so a freshly created directory is
+        # already owned correctly and must not be handed to the service account.
+        if directory not in ROOT_ONLY_DIRS:
+            _chown(directory, service_user)
         created.append(directory)
     return created
 
@@ -238,6 +257,11 @@ def main():
     ensure_durable_layout(service_user)
 
     _bind_mount(DATA_SDCARD, SD_MOUNT)
+    # B4: the station profile lives under /etc, which is volatile on the
+    # read-only-root appliance. Bind the durable copy in before NetworkManager
+    # starts (pi-persist runs Before=data-ready.target; NM is After it), so the
+    # profile created at claim survives reboot.
+    _bind_mount(DATA_NETWORK_CONNECTIONS, NM_CONNECTIONS)
     _restore_settings()
     _prune_timelapse()
     return 0

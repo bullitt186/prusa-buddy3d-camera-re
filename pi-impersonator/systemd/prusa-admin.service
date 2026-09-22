@@ -1,13 +1,15 @@
-# Admin / provisioning HTTP UI (admin_app.py), the thin aiohttp transport over
-# the stdlib admin_http core. Binds :443 over HTTPS in admin mode (the
-# post-claim UI at https://buddy3d-<device-id>.local) and :80 in setup mode
-# (the unclaimed captive portal at http://192.168.4.1). Both ports are below
-# 1024, so CAP_NET_BIND_SERVICE is required.
+# Post-claim admin HTTP UI (admin_app.py), the thin aiohttp transport over the
+# stdlib admin_http core. Binds :443 over HTTPS at
+# https://buddy3d-<device-id>.local. The port is below 1024, so
+# CAP_NET_BIND_SERVICE is required.
 #
-# ADMIN_MODE selects the surface: admin (default, :443) or setup (:80). When it
-# is unset the entry point resolves the mode from the persisted provisioning
-# state. TLS is optional: ADMIN_TLS_CERT/ADMIN_TLS_KEY in /etc/prusa-cam/admin.env
-# enable it; without them the selected port serves plain HTTP.
+# This unit is pulled by prusa-camera.target (its [Install]
+# WantedBy=prusa-camera.target), so the admin UI is only reachable after claim.
+# The pre-claim captive portal is served by prusa-provisioning.service instead,
+# bound to the setup hotspot at http://192.168.4.1.
+#
+# TLS is optional: ADMIN_TLS_CERT/ADMIN_TLS_KEY in /etc/prusa-cam/admin.env
+# enable it; without them the port serves plain HTTP.
 # data-ready.target gates this unit on a real, writable PERSIST /data mount (AC-7).
 [Unit]
 Description=Buddy3D camera admin / provisioning UI
@@ -29,4 +31,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=prusa-camera.target

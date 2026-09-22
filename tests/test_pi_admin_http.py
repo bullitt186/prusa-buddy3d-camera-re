@@ -787,6 +787,17 @@ class WizardTests(AdminHttpTestBase):
             app.handle(self.req('POST', '/setup/step/abc', body={})).status, 400
         )
 
+    def test_activate_station_is_passed_to_the_wizard(self):
+        def activate(ssid, psk):
+            return True
+
+        app = self._build_app(activate_station=activate)
+        self.assertIs(app._get_wizard().activate_station, activate)
+
+    def test_activate_station_defaults_to_none(self):
+        app = self._build_app()
+        self.assertIsNone(app._get_wizard().activate_station)
+
 
 # --------------------------------------------------------------------------- #
 # Expert configuration

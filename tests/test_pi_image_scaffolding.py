@@ -8,7 +8,9 @@ structural and ordering invariants the build relies on.
 
 import ast
 import json
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +28,8 @@ CONFIG = IMAGE / "config" / "buddy3d-pi-zero2w.yaml"
 LAYER_DIR = IMAGE / "layer"
 ASSETS = IMAGE / "assets"
 ASSET_SYSTEMD = ASSETS / "systemd"
+PRUSA_PRIV = ASSETS / "prusa-priv"
+SUDOERS = ASSETS / "sudoers" / "prusa-cam"
 REPO_SYSTEMD = REPO_ROOT / "pi-impersonator" / "systemd"
 
 PINNED_COMMIT = "262d4df5a9f9d4133370465399a7958a7c22cdc7"
@@ -36,6 +40,8 @@ REUSED_UNITS = [
     "prusa-rtsp.service",
     "prusa-ha-rtsp.service",
     "prusa-cam.service",
+    "prusa-admin.service",
+    "prusa-provisioning.service",
     "pi-persist.service",
     "prusa-data-ready.service",
     "data-ready.target",
@@ -45,6 +51,7 @@ REUSED_UNITS = [
 IMAGE_ONLY_UNITS = [
     "prusa-data-grow.service",
     "prusa-camera.target",
+    "prusa-boot-mode.service",
 ]
 
 
@@ -112,6 +119,8 @@ class ImageScaffoldingTests(unittest.TestCase):
             ASSETS / "prusa-data-grow.sh",
             ASSETS / "install-factory-app.sh",
             ASSETS / "build-info.py",
+            PRUSA_PRIV,
+            SUDOERS,
             ASSETS / "icon" / "buddy3d-camera.png",
             IMAGE / "scripts" / "build-image.sh",
         ]
@@ -285,12 +294,128 @@ class ImageScaffoldingTests(unittest.TestCase):
             "prusa-rtsp.service",
             "prusa-ha-rtsp.service",
             "prusa-cam.service",
+            "prusa-admin.service",
         ):
             self.assertIn(name, wants)
             self.assertIn(name, after)
+        # The setup runtime is mutually exclusive with the camera runtime.
+        self.assertIn("prusa-provisioning.service", section["Conflicts"].split())
+        # AC-18: the camera target is ordered after the provisioning process so
+        # it cannot start while QR capture/probe may still hold the sensor.
+        self.assertIn("prusa-provisioning.service", section["After"].split())
         # Optional later units must never be hard requirements.
-        for optional in ("prusa-mqtt.service", "prusa-admin.service", "prusa-updater.timer"):
+        for optional in ("prusa-mqtt.service", "prusa-updater.timer"):
             self.assertNotIn(optional, section.get("Requires", "").split())
+
+    def test_provisioning_unit_is_conflicts_gated_and_never_enabled(self):
+        unit = parse_unit(REPO_SYSTEMD / "prusa-provisioning.service")
+        section = unit["Unit"]
+        self.assertIn("data-ready.target", section["After"].split())
+        self.assertIn("network-online.target", section["Wants"].split())
+        self.assertIn("prusa-camera.target", section["Conflicts"].split())
+        # AC-7: After= only, so the setup path survives a missing DATA partition.
+        self.assertNotIn("Requires", section)
+        # Started by the selector, never enabled.
+        self.assertNotIn("Install", unit)
+
+        service = unit["Service"]
+        self.assertEqual(service["User"], "prusa-cam")
+        self.assertIn("ADMIN_MODE=setup", service["Environment"])
+        self.assertIn("ADMIN_HOST=192.168.4.1", service["Environment"])
+        self.assertIn("hotspot_ctl.py start", service["ExecStartPre"])
+        self.assertIn("/opt/prusa-cam/admin_app.py", service["ExecStart"])
+        self.assertIn("hotspot_ctl.py stop", service["ExecStopPost"])
+
+    def test_boot_mode_unit_selects_at_multi_user(self):
+        unit = parse_unit(ASSET_SYSTEMD / "prusa-boot-mode.service")
+        section = unit["Unit"]
+        self.assertIn("data-ready.target", section["After"].split())
+        self.assertIn("data-ready.target", section["Wants"].split())
+        # AC-7: Wants= (not Requires=) so a missing DATA still reaches setup.
+        self.assertNotIn("Requires", section)
+
+        service = unit["Service"]
+        self.assertEqual(service["Type"], "oneshot")
+        self.assertIn("boot_mode.py", service["ExecStart"])
+        self.assertIn("--apply", service["ExecStart"])
+        self.assertIn("multi-user.target", unit["Install"]["WantedBy"].split())
+
+    def test_installer_enables_only_the_pre_runtime_gate(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        enable_block = text.split("systemctl enable", 1)[1]
+        for enabled in (
+            "data-ready.target",
+            "prusa-data-ready.service",
+            "prusa-data-grow.service",
+            "pi-persist.service",
+            "bootlog.service",
+            "prusa-boot-mode.service",
+        ):
+            self.assertIn(enabled, enable_block)
+        for deferred in (
+            "prusa-camera.target",
+            "prusa-provisioning.service",
+            "prusa-admin.service",
+            "rpicam-source.service",
+            "prusa-rtsp.service",
+            "prusa-ha-rtsp.service",
+            "prusa-cam.service",
+        ):
+            self.assertNotIn(deferred, enable_block)
+
+    def test_installer_keeps_opt_root_owned(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        # B3: /opt/prusa-cam must be root:root so the root helper never executes
+        # service-account-writable code.
+        self.assertIn('chown -R root:root "$root$APP_ROOT"', text)
+        self.assertNotIn('chown -R "$uid:$gid" "$root$APP_ROOT"', text)
+
+    def test_installer_installs_helper_and_sudoers(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn('"$assets/prusa-priv"', text)
+        self.assertIn("/usr/libexec/prusa-cam/prusa-priv", text)
+        self.assertIn('"$assets/sudoers/prusa-cam"', text)
+        self.assertIn("/etc/sudoers.d/prusa-cam", text)
+        self.assertIn("visudo -cf", text)
+
+    def test_prusa_priv_asset_is_executable_and_valid(self):
+        self.assertTrue(PRUSA_PRIV.is_file())
+        self.assertTrue(os.access(PRUSA_PRIV, os.X_OK), "prusa-priv must be executable")
+        result = subprocess.run(
+            ["bash", "-n", str(PRUSA_PRIV)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = read_text(PRUSA_PRIV)
+        for verb in (
+            "start-camera",
+            "stop-provisioning",
+            "hotspot-start",
+            "hotspot-stop",
+            "wifi-station-apply",
+        ):
+            self.assertIn(verb, text)
+        # Unknown verbs must exit 2 before any privileged command.
+        unknown = subprocess.run(
+            ["bash", str(PRUSA_PRIV), "definitely-not-a-verb"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(unknown.returncode, 2, unknown.stderr)
+
+    def test_sudoers_asset_is_narrow_and_valid(self):
+        text = read_text(SUDOERS)
+        self.assertIn(
+            "prusa-cam ALL=(root) NOPASSWD: /usr/libexec/prusa-cam/prusa-priv",
+            text,
+        )
+        # Only the fixed-verb helper is granted; no wildcard command.
+        self.assertNotIn("ALL", text.split("NOPASSWD:", 1)[1])
+        visudo = shutil.which("visudo")
+        if visudo is None:
+            self.skipTest("visudo not available")
+        result = subprocess.run(
+            [visudo, "-cf", str(SUDOERS)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_networkmanager_ordered_after_data_ready(self):
         dropin = parse_unit(
@@ -355,6 +480,7 @@ class ImageScaffoldingTests(unittest.TestCase):
             LAYER_DIR / "bdebstrap" / "customize95-buddy3d-python",
             ASSETS / "prusa-data-grow.sh",
             ASSETS / "install-factory-app.sh",
+            PRUSA_PRIV,
         ]
         for path in shells:
             result = subprocess.run(

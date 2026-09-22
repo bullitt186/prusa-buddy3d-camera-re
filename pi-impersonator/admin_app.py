@@ -31,7 +31,7 @@ Secret hygiene
 This module logs no request body and installs no aiohttp access log (which would
 print query strings); the core redacts every response body and every logged
 header mapping. Configuration is read through the existing modules
-(:mod:`config_schema`, :mod:`provisioning`); no secret value is read here.
+(:mod:`provisioning`, :mod:`privileged`); no secret value is read here.
 
 Stdlib-only tests parse this file with :mod:`ast` and never import it, so the
 top-level ``aiohttp`` import is intentional and expected.
@@ -45,8 +45,7 @@ from aiohttp import web
 
 import admin_http
 import camera_probe
-import config_schema
-import hotspot
+import privileged
 import provisioning
 
 log = logging.getLogger('prusa-cam.admin_app')
@@ -213,35 +212,40 @@ def resolve_mode(requested=None):
 
 
 def _configured_device_id(device_path=None):
-    """Derive the stable device id from the configured fingerprint, or ``''``.
+    """Derive the stable device id for the setup SSID / admin hostname, or ``''``.
 
-    The fingerprint is the durable per-device seed; :func:`provisioning.derive_device_id`
-    turns it into the same id used for the setup SSID and the post-claim
-    ``buddy3d-<id>.local`` hostname. A missing/unreadable document yields ``''``
-    so the wizard degrades gracefully rather than crashing startup.
+    Delegates to :func:`provisioning.resolve_device_id`, which prefers the
+    configured ``device.toml`` fingerprint and otherwise falls back to the raw
+    ``wlan0`` MAC or the persisted random seed. That fallback is what gives an
+    unclaimed device (no ``device.toml`` yet) a stable identity for the setup
+    hotspot. A missing/unreadable document yields ``''`` so the wizard degrades
+    gracefully rather than crashing startup.
     """
-    try:
-        device = config_schema.load_device(device_path) if device_path \
-            else config_schema.load_device()
-    except Exception:  # noqa: BLE001 - a corrupt document must not stop the UI
-        log.warning('admin_app: device configuration unreadable; device id unavailable')
-        return ''
-    fingerprint = device.get('fingerprint') if isinstance(device, dict) else ''
-    if not isinstance(fingerprint, str) or not fingerprint.strip():
-        return ''
-    try:
-        return provisioning.derive_device_id(fingerprint)
-    except ValueError:
-        return ''
+    return provisioning.resolve_device_id(device_path)
 
 
 def build_admin_app(mode, *, device_path=None, secrets_path=None,
-                    provisioning_path=None, hotspot_controller=None, probe=None):
+                    provisioning_path=None, hotspot_controller=None, probe=None,
+                    start_camera=None, activate_station=None):
     """Build the stdlib :class:`admin_http.AdminApp` with real dependencies.
 
     Paths default to the durable ``/data`` locations through the core's own
     defaults; the admin password hash is read lazily by the core from
     ``secrets.toml`` (never here, so no secret is handled in the transport).
+
+    The wizard's finish path needs root-only actions, so the defaults route
+    through the fixed-verb privileged helper (WP-R1/B2):
+
+    * ``start_camera`` defaults to :func:`privileged.start_camera`, which starts
+      ``prusa-camera.target`` through ``prusa-priv start-camera``; the
+      ``Conflicts=`` edges then stop ``prusa-provisioning.service`` and the
+      camera target pulls ``prusa-admin.service`` (AC-12).
+    * ``activate_station`` defaults to :func:`privileged.activate_station`, which
+      creates/activates the Wi-Fi station profile before the camera starts so a
+      claimed device comes up online.
+    * the default hotspot controller is
+      :class:`privileged.PrivilegedHotspot`: its ``start``/``stop`` need root,
+      while ``status``/``is_active`` stay read-only :mod:`hotspot` queries.
     """
     try:
         state = provisioning.ProvisioningState.load(
@@ -252,8 +256,18 @@ def build_admin_app(mode, *, device_path=None, secrets_path=None,
         mode=mode,
         provisioning_state=state,
         device_id=_configured_device_id(device_path),
-        hotspot=hotspot_controller if hotspot_controller is not None else hotspot,
+        hotspot=(
+            hotspot_controller if hotspot_controller is not None
+            else privileged.PrivilegedHotspot()
+        ),
         probe=probe if probe is not None else camera_probe.probe,
+        start_camera=(
+            start_camera if start_camera is not None else privileged.start_camera
+        ),
+        activate_station=(
+            activate_station if activate_station is not None
+            else privileged.activate_station
+        ),
         device_path=device_path,
         secrets_path=secrets_path,
         provisioning_path=provisioning_path,

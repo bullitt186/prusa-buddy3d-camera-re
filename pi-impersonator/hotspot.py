@@ -19,8 +19,18 @@ so the automated tests replace it with a fake and never run ``nmcli``.
 
 Documented ``nmcli`` invocations
 --------------------------------
-* start:      ``nmcli device wifi hotspot ifname <ifname> ssid <ssid>``
-              plus ``password <psk>`` when a WPA2 password is supplied
+* start:      first ``nmcli device disconnect <ifname>`` (best effort) so a
+              Raspberry Pi Imager-prefilled station profile cannot keep the AP
+              from starting; then a deterministic profile
+              (``nmcli connection add … con-name buddy3d-setup … mode ap`` with
+              ``ipv4.method shared``, ``ipv4.addresses 192.168.4.1/24``,
+              ``ipv6.method disabled`` and ``connection.autoconnect no``)
+              followed by ``nmcli connection up buddy3d-setup``.
+              ``nmcli device wifi hotspot`` alone would create the shared
+              connection on NetworkManager's default ``10.42.0.1/24``, so the
+              captive portal at ``192.168.4.1`` could never bind. When the
+              profile already exists the ``add`` is retried as ``connection
+              modify`` (idempotent restart). A WPA2 ``password`` is optional
               (a unique credential cannot be delivered from a headless DIY
               device, so the hotspot is open by default; source §4.3).
 * stop:       ``nmcli device disconnect <ifname>``
@@ -52,6 +62,14 @@ CAPTIVE_PORTAL_URL = 'http://' + CAPTIVE_PORTAL_IP
 
 #: Default wireless interface used by the setup hotspot.
 DEFAULT_IFNAME = 'wlan0'
+
+#: Deterministic NetworkManager connection profile name for the setup AP. A
+#: stable name lets ``start`` update rather than accumulate profiles and lets
+#: the image validator assert the pinned captive-portal address (B1).
+CONNECTION_NAME = 'buddy3d-setup'
+
+#: The pinned prefix length for the captive-portal subnet.
+CAPTIVE_PORTAL_PREFIX = CAPTIVE_PORTAL_IP + '/24'
 
 #: Bounded wall-clock timeout for every NetworkManager command.
 COMMAND_TIMEOUT_SECONDS = 20.0
@@ -168,12 +186,50 @@ def _run(runner, args, timeout):
 # Command shapes
 # --------------------------------------------------------------------------- #
 
-def _start_command(ssid, password, ifname):
-    """``nmcli device wifi hotspot …`` for an open or WPA2 setup AP."""
-    command = ['nmcli', 'device', 'wifi', 'hotspot', 'ifname', ifname, 'ssid', ssid]
+def _add_profile_command(ssid, password, ifname):
+    """``nmcli connection add`` for the deterministic setup AP profile (B1).
+
+    Pins the documented captive-portal address and ``connection.autoconnect no``
+    so the AP never comes up by itself at boot (it is only started by
+    ``hotspot_ctl.py``/``prusa-provisioning.service``).
+    """
+    command = [
+        'nmcli', 'connection', 'add', 'type', 'wifi',
+        'ifname', ifname, 'con-name', CONNECTION_NAME,
+        'autoconnect', 'no', 'ssid', ssid, 'mode', 'ap',
+        '--',
+        'ipv4.method', 'shared',
+        'ipv4.addresses', CAPTIVE_PORTAL_PREFIX,
+        'ipv6.method', 'disabled',
+    ]
     if password:
-        command += ['password', password]
+        command += ['wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password]
     return command
+
+
+def _modify_profile_command(ssid, password, ifname):
+    """``nmcli connection modify`` for an already existing setup AP profile.
+
+    Used when ``connection add`` fails because ``buddy3d-setup`` already exists,
+    so a service restart updates the pinned fields instead of failing.
+    """
+    command = [
+        'nmcli', 'connection', 'modify', CONNECTION_NAME,
+        'connection.autoconnect', 'no',
+        '802-11-wireless.ssid', ssid,
+        '802-11-wireless.mode', 'ap',
+        'ipv4.method', 'shared',
+        'ipv4.addresses', CAPTIVE_PORTAL_PREFIX,
+        'ipv6.method', 'disabled',
+    ]
+    if password:
+        command += ['wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password]
+    return command
+
+
+def _up_command():
+    """``nmcli connection up buddy3d-setup`` activates the setup AP."""
+    return ['nmcli', 'connection', 'up', CONNECTION_NAME]
 
 
 def _disconnect_command(ifname):
@@ -236,11 +292,16 @@ def _connection_name(runner, ifname):
 # --------------------------------------------------------------------------- #
 
 def start(ssid, password=None, ifname=DEFAULT_IFNAME, runner=None):
-    """Start the setup hotspot (``nmcli device wifi hotspot …``).
+    """Start the setup hotspot on the pinned captive-portal address (B1).
 
-    ``password`` is optional; when absent the AP is open, as documented for a
-    headless first-boot device. Returns a :class:`HotspotResult`; an invalid
-    SSID/password or a command failure/timeout is reported, never raised.
+    The sequence is: best-effort disconnect any active connection on ``ifname``
+    (so an Imager-prefilled Wi-Fi profile cannot keep the AP from starting), add
+    or update the deterministic ``buddy3d-setup`` profile with
+    ``ipv4.addresses 192.168.4.1/24`` and ``connection.autoconnect no``, then
+    activate it. ``password`` is optional; when absent the AP is open, as
+    documented for a headless first-boot device. Returns a
+    :class:`HotspotResult`; an invalid SSID/password or a command
+    failure/timeout is reported, never raised.
     """
     runner = runner or _default_runner
     if not isinstance(ssid, str) or not ssid.strip():
@@ -254,8 +315,36 @@ def start(ssid, password=None, ifname=DEFAULT_IFNAME, runner=None):
                 f'hotspot password must be {MIN_PSK_LENGTH}..{MAX_PSK_LENGTH} characters',
                 ifname=ifname,
             )
+
+    # Best effort: drop whatever is active so the unclaimed AP wins the
+    # interface. A station profile prefilled by Raspberry Pi Imager would
+    # otherwise hold wlan0 and `connection up` would fail. The result is
+    # deliberately ignored — `nmcli device disconnect` also errors when nothing
+    # is active.
+    _run(runner, _disconnect_command(ifname), COMMAND_TIMEOUT_SECONDS)
+
     returncode, _stdout_text, failure = _run(
-        runner, _start_command(ssid, password, ifname), COMMAND_TIMEOUT_SECONDS
+        runner, _add_profile_command(ssid, password, ifname), COMMAND_TIMEOUT_SECONDS
+    )
+    if failure is not None:
+        return HotspotResult(False, failure, ifname=ifname)
+    if returncode != 0:
+        # The profile may already exist from a previous run: update it instead.
+        returncode, _stdout_text, failure = _run(
+            runner, _modify_profile_command(ssid, password, ifname),
+            COMMAND_TIMEOUT_SECONDS,
+        )
+        if failure is not None:
+            return HotspotResult(False, failure, ifname=ifname)
+        if returncode != 0:
+            return HotspotResult(
+                False,
+                _sanitize_reason(f'nmcli hotspot profile failed (exit {returncode})'),
+                ifname=ifname,
+            )
+
+    returncode, _stdout_text, failure = _run(
+        runner, _up_command(), COMMAND_TIMEOUT_SECONDS
     )
     if failure is not None:
         return HotspotResult(False, failure, ifname=ifname)

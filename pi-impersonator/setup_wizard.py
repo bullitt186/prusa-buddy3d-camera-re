@@ -137,6 +137,10 @@ class WizardSession:
     * ``hotspot_controller`` performs the real ``nmcli`` stop; tests inject a
       fake that records call order.
     * ``start_camera`` starts ``prusa-camera.target``.
+    * ``activate_station`` creates/activates the Wi-Fi station profile after the
+      hotspot is stopped and before the camera target starts; when it fails the
+      hotspot is restarted and the device stays in setup (B2). It is optional:
+      when ``None`` the finish path is unchanged.
     * ``clock`` supplies timestamps to the provisioning state machine.
     """
 
@@ -155,6 +159,7 @@ class WizardSession:
         wifi_scan=None,
         qr_decoder=None,
         start_camera=None,
+        activate_station=None,
         camera_running=False,
         imager_values=None,
         camera_name='Printer Camera',
@@ -172,6 +177,7 @@ class WizardSession:
         self.wifi_scan = wifi_scan
         self.qr_decoder = qr_decoder
         self.start_camera = start_camera
+        self.activate_station = activate_station
         self.camera_running = bool(camera_running)
         self.camera_name = camera_name
         self.prusa_server = prusa_server
@@ -578,16 +584,21 @@ class WizardSession:
         return admin_auth.redact(raw, literal_secrets)
 
     def finish(self, camera_running=None, now=None):
-        """Stop the hotspot then start the camera target, guarded by AC-18.
+        """Stop the hotspot, activate station networking, then start the camera.
 
         The camera-start callback is checked *before* the AP is taken down, so a
         misconfigured caller can never strand a headless device with neither a
         captive portal nor a running camera. The hotspot is stopped *before*
-        ``start_camera`` runs, so the setup portal and the camera runtime never
-        overlap. Finishing is denied while a live libcamera owner is running.
-        If the camera target fails to start, the hotspot is restarted
-        best-effort so the portal survives, and the failure is reported rather
-        than swallowed.
+        ``activate_station``/``start_camera`` run, so the setup portal and the
+        station runtime never overlap. Finishing is denied while a live
+        libcamera owner is running.
+
+        ``activate_station`` is optional (backward compatible): when configured
+        it runs after the hotspot is stopped and before ``start_camera``; if it
+        returns falsy the hotspot is restarted best-effort and the device stays
+        in setup rather than coming up offline. If the camera target fails to
+        start, the hotspot is restarted best-effort and the failure is reported
+        rather than swallowed.
         """
         if not self.persisted:
             return StepResult(False, 'configuration has not been persisted', 'finish')
@@ -611,6 +622,18 @@ class WizardSession:
                 'finish',
                 state,
             )
+        if self.activate_station is not None:
+            outcome = self._activate_station()
+            if not outcome:
+                restart_note = self._restart_hotspot(controller)
+                detail = getattr(outcome, 'reason', '')
+                reason = 'station activation failed'
+                if isinstance(detail, str) and detail:
+                    reason += f' ({detail})'
+                reason += '; device stayed in setup'
+                if restart_note:
+                    reason += f' ({restart_note})'
+                return StepResult(False, reason, 'finish', state)
         try:
             started = self.start_camera()
         except Exception as e:  # noqa: BLE001 - never leak internals
@@ -626,6 +649,22 @@ class WizardSession:
             return StepResult(False, reason, 'finish', state)
         self.finished = True
         return StepResult(True, '', 'finish', state)
+
+    def _activate_station(self):
+        """Call the injected station activation callable with SSID + PSK.
+
+        Returns the callable's outcome (truthy on success) or ``False`` when the
+        callable raises. Never raises itself.
+        """
+        ssid = self.wifi.get('ssid', '')
+        psk = self.wifi.get('psk', '')
+        try:
+            return self.activate_station(ssid, psk)
+        except Exception as e:  # noqa: BLE001 - activation must never raise
+            log.warning(
+                f'setup_wizard: station activation failed: {type(e).__name__}'
+            )
+            return False
 
     def _restart_hotspot(self, controller):
         """Best-effort restart of the setup AP; returns a non-secret note or ``''``.

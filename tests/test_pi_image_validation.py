@@ -53,6 +53,15 @@ REQUIRED_DATA_DIRS = [
     "sdcard/timelapse",
 ]
 
+# The synthetic tree is created by the (unprivileged) test runner, so every
+# file is owned by the current uid/gid. Map the image's "root" account to that
+# uid/gid and give prusa-cam a distinct sentinel so the validator's ownership
+# assertions are exercised without needing real root (B3).
+SYNTH_ROOT_UID = os.getuid()
+SYNTH_ROOT_GID = os.getgid()
+SYNTH_PRUSA_UID = os.getuid() + 1000
+SYNTH_PRUSA_GID = os.getgid() + 1000
+
 
 def run_validator(*args):
     return subprocess.run(
@@ -131,8 +140,23 @@ def make_rootfs(base):
         REPO_SYSTEMD.glob("*.target")
     ):
         shutil.copy2(src, systemd / src.name)
-    for name in ("prusa-data-grow.service", "prusa-camera.target"):
+    for name in (
+        "prusa-data-grow.service",
+        "prusa-camera.target",
+        "prusa-boot-mode.service",
+    ):
         shutil.copy2(ASSET_SYSTEMD / name, systemd / name)
+
+    # Boot-mode gating (AC-12/AC-17): the selector is enabled at
+    # multi-user.target; the camera target, the provisioning service and the
+    # camera units are deliberately NOT enabled, and prusa-admin.service is
+    # enabled only under prusa-camera.target.wants (post-claim).
+    wants = systemd / "multi-user.target.wants"
+    wants.mkdir(parents=True)
+    os.symlink("../prusa-boot-mode.service", wants / "prusa-boot-mode.service")
+    camera_wants = systemd / "prusa-camera.target.wants"
+    camera_wants.mkdir(parents=True)
+    os.symlink("../prusa-admin.service", camera_wants / "prusa-admin.service")
 
     # Overlay root: config file and boot cmdline.
     (root / "etc" / "overlayroot.conf").write_text(
@@ -163,6 +187,9 @@ def make_rootfs(base):
     # Factory application + launcher fallback.
     app = root / "opt" / "prusa-cam"
     app.mkdir(parents=True)
+    # The image installs the factory app root-owned 0755 (B3); the fixture's
+    # umask would otherwise make it group-writable.
+    app.chmod(0o755)
     (app / "main.py").write_text("# synthetic factory app\n", encoding="utf-8")
     launcher = app / "launcher.sh"
     launcher.write_text(
@@ -170,6 +197,27 @@ def make_rootfs(base):
         encoding="utf-8",
     )
     launcher.chmod(0o755)
+
+    # Privileged helper + narrow sudoers rule (B3). Both are owned by the
+    # synthetic "root" account (the test runner) with the restricted modes the
+    # image installs, so the validator's ownership/mode assertions are exercised.
+    helper = root / "usr" / "libexec" / "prusa-cam" / "prusa-priv"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "#!/bin/bash\n# synthetic fixed-verb helper\nexit 2\n", encoding="utf-8"
+    )
+    helper.chmod(0o755)
+    sudoers_dir = root / "etc" / "sudoers.d"
+    sudoers_dir.mkdir(parents=True)
+    sudoers_file = sudoers_dir / "prusa-cam"
+    sudoers_file.write_text(
+        "Defaults:prusa-cam env_reset\n"
+        'Defaults:prusa-cam secure_path="/usr/local/sbin:/usr/local/bin:'
+        '/usr/sbin:/usr/bin:/sbin:/bin"\n'
+        "prusa-cam ALL=(root) NOPASSWD: /usr/libexec/prusa-cam/prusa-priv\n",
+        encoding="utf-8",
+    )
+    sudoers_file.chmod(0o440)
 
     # build-info.json.
     build_info_dir = root / "usr" / "share" / "prusa-buddy3d-camera"
@@ -199,8 +247,8 @@ def make_rootfs(base):
         "root:!:19000:0:99999:7:::\n", encoding="utf-8"
     )
     (root / "etc" / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/bash\n"
-        f"prusa-cam:x:{os.getuid()}:{os.getgid()}:Prusa Camera:"
+        f"root:x:{SYNTH_ROOT_UID}:{SYNTH_ROOT_GID}:root:/root:/bin/bash\n"
+        f"prusa-cam:x:{SYNTH_PRUSA_UID}:{SYNTH_PRUSA_GID}:Prusa Camera:"
         "/opt/prusa-cam:/usr/sbin/nologin\n",
         encoding="utf-8",
     )
@@ -234,8 +282,14 @@ def make_boot_image(path, cmdline):
     return path
 
 
-def make_persist_image(path, tree):
-    """Build an ext4 PERSIST image from ``tree`` (requires e2fsprogs)."""
+def make_persist_image(path, tree, uid=None, gid=None):
+    """Build an ext4 PERSIST image from ``tree`` (requires e2fsprogs).
+
+    ``mke2fs -d`` preserves the source tree's (test-runner) ownership, so when
+    ``uid``/``gid`` are given every seeded directory is re-owned in the image
+    with ``debugfs sif`` to match the synthetic ``prusa-cam`` account. This lets
+    the ownership assertion run without needing real root.
+    """
     path = Path(path)
     with open(path, "wb") as handle:
         handle.truncate(64 * 1024 * 1024)
@@ -244,6 +298,18 @@ def make_persist_image(path, tree):
         check=True,
         capture_output=True,
     )
+    if uid is not None and gid is not None:
+        for relative in REQUIRED_DATA_DIRS:
+            subprocess.run(
+                ["debugfs", "-w", "-R", f"sif /{relative} uid {uid}", str(path)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["debugfs", "-w", "-R", f"sif /{relative} gid {gid}", str(path)],
+                check=True,
+                capture_output=True,
+            )
     return path
 
 
@@ -487,6 +553,225 @@ class RootfsValidationTests(unittest.TestCase):
         self.assertIn("optional-input check(s) skipped", result.stdout)
 
 
+class BootModeGatingValidationTests(unittest.TestCase):
+    """WP-R1 AC-12/AC-17: offline boot-mode gating assertions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def _systemd(self, root):
+        return Path(root) / "etc" / "systemd" / "system"
+
+    def test_good_rootfs_reports_boot_mode_gating(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "prusa-boot-mode.service is enabled at multi-user.target",
+            result.stdout,
+        )
+        self.assertIn("prusa-provisioning.service is not enabled", result.stdout)
+        self.assertIn("prusa-camera.target is not enabled", result.stdout)
+        self.assertIn(
+            "prusa-admin.service is enabled under prusa-camera.target.wants",
+            result.stdout,
+        )
+
+    def test_boot_mode_not_enabled_fails(self):
+        root = self._root()
+        (
+            self._systemd(root) / "multi-user.target.wants"
+            / "prusa-boot-mode.service"
+        ).unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be enabled at multi-user.target", result.stdout)
+
+    def test_camera_target_enabled_fails(self):
+        root = self._root()
+        os.symlink(
+            "../prusa-camera.target",
+            self._systemd(root) / "multi-user.target.wants" / "prusa-camera.target",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-camera.target must NOT be enabled", result.stdout)
+
+    def test_provisioning_enabled_fails(self):
+        root = self._root()
+        os.symlink(
+            "../prusa-provisioning.service",
+            self._systemd(root) / "multi-user.target.wants"
+            / "prusa-provisioning.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-provisioning.service must NOT be enabled", result.stdout)
+
+    def test_camera_unit_enabled_fails(self):
+        root = self._root()
+        os.symlink(
+            "../rpicam-source.service",
+            self._systemd(root) / "multi-user.target.wants" / "rpicam-source.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("camera units enabled at multi-user.target", result.stdout)
+
+    def test_admin_not_bound_to_camera_target_fails(self):
+        root = self._root()
+        systemd = self._systemd(root)
+        (systemd / "prusa-camera.target.wants" / "prusa-admin.service").unlink()
+        unit = systemd / "prusa-admin.service"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(
+                "WantedBy=prusa-camera.target", "WantedBy=multi-user.target"
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "prusa-admin.service must be enabled under prusa-camera.target.wants",
+            result.stdout,
+        )
+
+    def test_admin_enabled_at_multi_user_fails(self):
+        root = self._root()
+        os.symlink(
+            "../prusa-admin.service",
+            self._systemd(root) / "multi-user.target.wants" / "prusa-admin.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not be enabled at multi-user.target", result.stdout)
+
+    def test_provisioning_without_conflicts_fails(self):
+        root = self._root()
+        unit = self._systemd(root) / "prusa-provisioning.service"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(
+                "Conflicts=prusa-camera.target\n", ""
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must Conflicts= prusa-camera.target", result.stdout)
+
+    def test_boot_mode_without_data_ready_after_fails(self):
+        root = self._root()
+        unit = self._systemd(root) / "prusa-boot-mode.service"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(
+                "After=data-ready.target", "After=network.target"
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be After= data-ready.target", result.stdout)
+
+
+class PrivilegedHelperValidationTests(unittest.TestCase):
+    """B3/H3: the root helper must not be service-account-writable."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def _systemd(self, root):
+        return Path(root) / "etc" / "systemd" / "system"
+
+    def test_good_rootfs_reports_helper_checks(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "prusa-priv is root:root and not group/world-writable", result.stdout
+        )
+        self.assertIn("/etc/sudoers.d/prusa-cam is root:root mode 0440", result.stdout)
+        self.assertIn(
+            "sudoers pins env_reset/secure_path and only the fixed-verb helper",
+            result.stdout,
+        )
+        self.assertIn(
+            "/opt/prusa-cam is root-owned and not group/world-writable",
+            result.stdout,
+        )
+
+    def test_world_writable_helper_fails(self):
+        root = self._root()
+        (root / "usr" / "libexec" / "prusa-cam" / "prusa-priv").chmod(0o777)
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("group/world-writable", result.stdout)
+
+    def test_missing_helper_fails(self):
+        root = self._root()
+        (root / "usr" / "libexec" / "prusa-cam" / "prusa-priv").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-priv helper is missing", result.stdout)
+
+    def test_wrong_sudoers_mode_fails(self):
+        root = self._root()
+        (root / "etc" / "sudoers.d" / "prusa-cam").chmod(0o644)
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be root:root mode 0440", result.stdout)
+
+    def test_opt_owned_by_prusa_cam_fails(self):
+        root = self._root()
+        # Map the synthetic prusa-cam account onto the test runner's uid so the
+        # /opt tree (owned by the runner) looks service-account-owned.
+        passwd = root / "etc" / "passwd"
+        passwd.write_text(
+            passwd.read_text(encoding="utf-8").replace(
+                f":{SYNTH_PRUSA_UID}:{SYNTH_PRUSA_GID}:Prusa Camera:",
+                f":{SYNTH_ROOT_UID}:{SYNTH_ROOT_GID}:Prusa Camera:",
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/opt/prusa-cam must not be owned by prusa-cam", result.stdout)
+
+    def test_camera_target_without_admin_wants_fails(self):
+        root = self._root()
+        unit = self._systemd(root) / "prusa-camera.target"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(" prusa-admin.service", ""),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "prusa-camera.target must Wants= prusa-admin.service", result.stdout
+        )
+
+
 @unittest.skipUnless(HAS_BOOT_TOOLS, "mkfs.fat/mcopy/mtype not available")
 class BootPartitionTests(unittest.TestCase):
     def setUp(self):
@@ -540,7 +825,10 @@ class PersistPartitionTests(unittest.TestCase):
         tree = make_persist_tree(
             Path(self.tmp) / "seeded", REQUIRED_DATA_DIRS
         )
-        persist = make_persist_image(Path(self.tmp) / "seeded.ext4", tree)
+        persist = make_persist_image(
+            Path(self.tmp) / "seeded.ext4", tree,
+            uid=SYNTH_PRUSA_UID, gid=SYNTH_PRUSA_GID,
+        )
         root = self._root()
         result = run_validator(
             "--image", self.image, "--persist-image", persist,

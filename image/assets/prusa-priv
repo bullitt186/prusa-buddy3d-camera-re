@@ -1,0 +1,57 @@
+#!/bin/bash
+# Fixed-verb root helper for the Buddy3D appliance (WP-R1, AC-17/B3).
+#
+# The unprivileged prusa-cam service account is allowed by
+# /etc/sudoers.d/prusa-cam to run ONLY this script. Sudoers entries that list a
+# command without arguments permit ANY arguments, so this script validates the
+# verb itself and exposes nothing else: an unknown verb exits 2 before any
+# privileged command runs.
+#
+# Verbs:
+#   start-camera         systemctl start prusa-camera.target
+#   stop-provisioning    systemctl stop prusa-provisioning.service
+#   hotspot-start        hotspot_ctl.py start  (setup AP, 192.168.4.1/24)
+#   hotspot-stop         hotspot_ctl.py stop
+#   wifi-station-apply   wifi_station.py apply <ssid>, PSK read from stdin
+#
+# The Wi-Fi PSK is never an argument: it is forwarded on stdin to
+# wifi_station.py, which writes it to a 0600 NetworkManager ``passwd-file`` and
+# activates the profile with `nmcli connection up ... passwd-file <file>`.
+#
+# PRUSA_CAM_APP_ROOT exists only so host tests can stub the application root; a
+# real sudo invocation resets the environment (env_reset is pinned in
+# /etc/sudoers.d/prusa-cam), so it cannot redirect the helper.
+set -eu
+
+APP_ROOT="${PRUSA_CAM_APP_ROOT:-/opt/prusa-cam}"
+PYTHON="$APP_ROOT/venv/bin/python"
+
+# Absolute path: the helper must not depend on the caller's PATH (secure_path is
+# pinned in the sudoers drop-in, but do not rely on it for a root command).
+SYSTEMCTL=/usr/bin/systemctl
+
+verb="${1:-}"
+case "$verb" in
+   start-camera)
+      exec "$SYSTEMCTL" start prusa-camera.target
+      ;;
+   stop-provisioning)
+      exec "$SYSTEMCTL" stop prusa-provisioning.service
+      ;;
+   hotspot-start)
+      exec "$PYTHON" "$APP_ROOT/hotspot_ctl.py" start
+      ;;
+   hotspot-stop)
+      exec "$PYTHON" "$APP_ROOT/hotspot_ctl.py" stop
+      ;;
+   wifi-station-apply)
+      ssid="${2:-}"
+      if [ -z "$ssid" ]; then
+         exit 2
+      fi
+      exec "$PYTHON" "$APP_ROOT/wifi_station.py" apply "$ssid"
+      ;;
+   *)
+      exit 2
+      ;;
+esac

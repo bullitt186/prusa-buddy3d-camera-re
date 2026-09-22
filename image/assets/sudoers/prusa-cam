@@ -1,0 +1,15 @@
+# Buddy3D camera: let the unprivileged prusa-cam service account invoke ONLY the
+# fixed-verb root helper (WP-R1, B3). A sudoers command listed without arguments
+# permits any arguments, so /usr/libexec/prusa-cam/prusa-priv validates the verb
+# itself and exits 2 on anything it does not implement; nothing else is granted.
+#
+# Installed to /etc/sudoers.d/prusa-cam (root:root, mode 0440) and checked with
+# `visudo -cf` during the image build.
+#
+# env_reset strips the caller's environment (so PRUSA_CAM_APP_ROOT and PATH
+# cannot be injected by the service account) and secure_path pins the PATH sudo
+# uses for the helper. Both are sudo defaults, but stating them here keeps the
+# privilege boundary independent of the base image's global sudoers.
+Defaults:prusa-cam env_reset
+Defaults:prusa-cam secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+prusa-cam ALL=(root) NOPASSWD: /usr/libexec/prusa-cam/prusa-priv

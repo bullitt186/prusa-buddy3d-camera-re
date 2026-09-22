@@ -1,0 +1,21 @@
+# Image-only boot-mode selector (AC-12/AC-17). Runs once at multi-user.target
+# and starts exactly one runtime: prusa-provisioning.service while the device is
+# unclaimed, or prusa-camera.target after claim. The decision is fail-closed to
+# the setup path (boot_mode.py), so a corrupt or unreadable state never starts
+# the camera units.
+#
+# Wants= (not Requires=) data-ready.target: a missing DATA partition must still
+# reach the setup hotspot (AC-7). boot_mode.py selects the unit with
+# `systemctl --no-block start`, so this oneshot exits without gating boot.
+[Unit]
+Description=Select the Buddy3D runtime (setup hotspot vs camera target)
+After=data-ready.target
+Wants=data-ready.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/boot_mode.py --apply
+
+[Install]
+WantedBy=multi-user.target

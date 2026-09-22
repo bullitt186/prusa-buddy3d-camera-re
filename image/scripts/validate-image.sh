@@ -289,7 +289,7 @@ else
       rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
       prusa-cam.service pi-persist.service prusa-data-ready.service \
       data-ready.target bootlog.service prusa-data-grow.service \
-      prusa-camera.target; do
+      prusa-camera.target prusa-boot-mode.service; do
       add_unit "$unit"
    done
    if [ -d "$REPO_UNITS" ]; then
@@ -350,17 +350,173 @@ else
       fi
    fi
 
-   target_file="$SYSTEMD_DIR/prusa-camera.target"
-   if [ -f "$target_file" ]; then
-      if unit_has "$target_file" After data-ready.target \
-         && unit_has "$target_file" Requires data-ready.target; then
-         report ok "prusa-camera.target is After= and Requires= data-ready.target"
-      else
-         report fail "prusa-camera.target must be After= and Requires= data-ready.target"
-      fi
-   fi
+    target_file="$SYSTEMD_DIR/prusa-camera.target"
+    if [ -f "$target_file" ]; then
+       if unit_has "$target_file" After data-ready.target \
+          && unit_has "$target_file" Requires data-ready.target; then
+          report ok "prusa-camera.target is After= and Requires= data-ready.target"
+       else
+          report fail "prusa-camera.target must be After= and Requires= data-ready.target"
+       fi
+    fi
 
-   # --- personal usernames / home paths / secret-looking config -----------
+    # --- boot-mode gating: unclaimed must not start the camera (AC-12/AC-17) -
+    # prusa-boot-mode.service is the only enabled runtime selector; it starts
+    # prusa-provisioning.service while unclaimed and prusa-camera.target after
+    # claim. Enabling the camera units or the target directly would start the
+    # camera pipeline before the device is claimed.
+    boot_unit="$SYSTEMD_DIR/prusa-boot-mode.service"
+    if [ -f "$boot_unit" ]; then
+       report ok "prusa-boot-mode.service is installed"
+       if grep -q 'boot_mode.py' "$boot_unit"; then
+          report ok "prusa-boot-mode.service runs boot_mode.py"
+       else
+          report fail "prusa-boot-mode.service must run boot_mode.py"
+       fi
+       if unit_has "$boot_unit" After data-ready.target; then
+          report ok "prusa-boot-mode.service is After= data-ready.target"
+       else
+          report fail "prusa-boot-mode.service must be After= data-ready.target"
+       fi
+    else
+       report fail "prusa-boot-mode.service is missing"
+    fi
+
+    wants_dir="$SYSTEMD_DIR/multi-user.target.wants"
+    camera_wants_dir="$SYSTEMD_DIR/prusa-camera.target.wants"
+
+    if [ -e "$wants_dir/prusa-boot-mode.service" ]; then
+       report ok "prusa-boot-mode.service is enabled at multi-user.target"
+    else
+       report fail "prusa-boot-mode.service must be enabled at multi-user.target"
+    fi
+
+    if [ -f "$SYSTEMD_DIR/prusa-provisioning.service" ]; then
+       report ok "prusa-provisioning.service is installed"
+       if unit_has "$SYSTEMD_DIR/prusa-provisioning.service" Conflicts prusa-camera.target; then
+          report ok "prusa-provisioning.service Conflicts= prusa-camera.target"
+       else
+          report fail "prusa-provisioning.service must Conflicts= prusa-camera.target"
+       fi
+    else
+       report fail "prusa-provisioning.service is missing"
+    fi
+    if [ -e "$wants_dir/prusa-provisioning.service" ]; then
+       report fail "prusa-provisioning.service must NOT be enabled (started by boot_mode)"
+    else
+       report ok "prusa-provisioning.service is not enabled"
+    fi
+
+    if [ -e "$wants_dir/prusa-camera.target" ]; then
+       report fail "prusa-camera.target must NOT be enabled (started by boot_mode)"
+    else
+       report ok "prusa-camera.target is not enabled"
+    fi
+
+    # prusa-admin.service is bound to the camera runtime, never to
+    # multi-user.target: it is either enabled under prusa-camera.target.wants or
+    # (because the installer does not enable it directly) carries
+    # [Install] WantedBy=prusa-camera.target. Either way it starts only after
+    # claim, when prusa-camera.target is selected.
+    admin_unit="$SYSTEMD_DIR/prusa-admin.service"
+    if [ -e "$wants_dir/prusa-admin.service" ]; then
+       report fail "prusa-admin.service must not be enabled at multi-user.target"
+    elif [ -e "$camera_wants_dir/prusa-admin.service" ] \
+         || unit_has "$admin_unit" WantedBy prusa-camera.target; then
+       report ok "prusa-admin.service is enabled under prusa-camera.target.wants"
+    else
+       report fail "prusa-admin.service must be enabled under prusa-camera.target.wants"
+    fi
+
+    # H3: the admin UI must be pulled by the camera target directly (not only
+    # via its own [Install] section), so it starts exactly when the camera
+    # runtime is selected after claim.
+    if [ -f "$target_file" ] && unit_has "$target_file" Wants prusa-admin.service; then
+       report ok "prusa-camera.target Wants= prusa-admin.service"
+    else
+       report fail "prusa-camera.target must Wants= prusa-admin.service"
+    fi
+
+    # --- privileged helper + sudoers (B3) ----------------------------------
+    # A root helper must never execute code the service account can write:
+    # /opt/prusa-cam stays root:root, the helper is root-owned and not
+    # group/world-writable, and the sudoers rule is root:root 0440.
+    passwd_file="$MOUNT_ROOT/etc/passwd"
+    root_uid="$(awk -F: '$1=="root"{print $3; exit}' "$passwd_file" 2>/dev/null || true)"
+    root_gid="$(awk -F: '$1=="root"{print $4; exit}' "$passwd_file" 2>/dev/null || true)"
+    prusa_uid="$(awk -F: '$1=="prusa-cam"{print $3; exit}' "$passwd_file" 2>/dev/null || true)"
+    prusa_gid="$(awk -F: '$1=="prusa-cam"{print $4; exit}' "$passwd_file" 2>/dev/null || true)"
+    root_uid="${root_uid:-0}"
+    root_gid="${root_gid:-0}"
+
+    helper="$MOUNT_ROOT/usr/libexec/prusa-cam/prusa-priv"
+    if [ -f "$helper" ]; then
+       helper_owner="$(stat -c '%u:%g' "$helper" 2>/dev/null || true)"
+       helper_mode="$(stat -c '%a' "$helper" 2>/dev/null || true)"
+       if [ -n "$prusa_uid" ] && [ "$prusa_uid" != "$root_uid" ] \
+          && [ "$helper_owner" = "$prusa_uid:$prusa_gid" ]; then
+          report fail "prusa-priv must not be owned by prusa-cam ($helper_owner)"
+       elif [ "$helper_owner" != "$root_uid:$root_gid" ]; then
+          report fail "prusa-priv must be root:root (found ${helper_owner:-missing})"
+       elif [ -n "$helper_mode" ] && [ $(( 0$helper_mode & 022 )) -ne 0 ]; then
+          report fail "prusa-priv must not be group/world-writable (mode $helper_mode)"
+       else
+          report ok "prusa-priv is root:root and not group/world-writable"
+       fi
+    else
+       report fail "prusa-priv helper is missing at /usr/libexec/prusa-cam/prusa-priv"
+    fi
+
+    sudoers="$MOUNT_ROOT/etc/sudoers.d/prusa-cam"
+    if [ -f "$sudoers" ]; then
+       sudoers_mode="$(stat -c '%a' "$sudoers" 2>/dev/null || true)"
+       sudoers_owner="$(stat -c '%u:%g' "$sudoers" 2>/dev/null || true)"
+       if [ "$sudoers_mode" = "440" ] && [ "$sudoers_owner" = "$root_uid:$root_gid" ]; then
+          report ok "/etc/sudoers.d/prusa-cam is root:root mode 0440"
+       else
+          report fail "/etc/sudoers.d/prusa-cam must be root:root mode 0440 (found ${sudoers_owner:-?} ${sudoers_mode:-?})"
+       fi
+       # The privilege boundary must not depend on the base image's global sudo
+       # defaults: pin env_reset (blocks PRUSA_CAM_APP_ROOT/PATH injection) and
+       # secure_path, and grant only the fixed-verb helper.
+       if grep -qE '^[[:space:]]*Defaults:prusa-cam[[:space:]]+env_reset([[:space:]]|$)' "$sudoers" \
+          && grep -qE '^[[:space:]]*Defaults:prusa-cam[[:space:]]+secure_path=' "$sudoers" \
+          && grep -qF '/usr/libexec/prusa-cam/prusa-priv' "$sudoers"; then
+          report ok "sudoers pins env_reset/secure_path and only the fixed-verb helper"
+       else
+          report fail "sudoers must pin env_reset + secure_path and grant only /usr/libexec/prusa-cam/prusa-priv"
+       fi
+    else
+       report fail "/etc/sudoers.d/prusa-cam is missing"
+    fi
+
+    app_root="$MOUNT_ROOT/opt/prusa-cam"
+    if [ -d "$app_root" ]; then
+       opt_owner="$(stat -c '%u:%g' "$app_root" 2>/dev/null || true)"
+       opt_mode="$(stat -c '%a' "$app_root" 2>/dev/null || true)"
+       if [ -n "$prusa_uid" ] && [ "$opt_owner" = "$prusa_uid:$prusa_gid" ]; then
+          report fail "/opt/prusa-cam must not be owned by prusa-cam ($opt_owner)"
+       elif [ -n "$opt_mode" ] && [ $(( 0$opt_mode & 022 )) -ne 0 ]; then
+          report fail "/opt/prusa-cam must not be group/world-writable (mode $opt_mode)"
+       else
+          report ok "/opt/prusa-cam is root-owned and not group/world-writable"
+       fi
+    fi
+
+    camera_leaks=()
+    for unit in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
+                prusa-cam.service; do
+       if [ -e "$wants_dir/$unit" ]; then
+          camera_leaks+=("$unit")
+       fi
+    done
+    if [ "${#camera_leaks[@]}" -eq 0 ]; then
+       report ok "camera units are not enabled at multi-user.target (unclaimed safe)"
+    else
+       report fail "camera units enabled at multi-user.target: ${camera_leaks[*]}"
+    fi
+
+    # --- personal usernames / home paths / secret-looking config -----------
    consume < <(python3 - "$MOUNT_ROOT" <<'PY'
 import os
 import re

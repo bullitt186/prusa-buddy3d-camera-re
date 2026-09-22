@@ -90,11 +90,25 @@ class DurableLayoutCreationTests(unittest.TestCase):
 
         expected = [path for path, _mode in persist_restore.DATA_LAYOUT]
         self.assertEqual(calls['makedirs'], expected)
-        self.assertEqual([p for p, _u in calls['chown']], expected)
+        # The NetworkManager keyfile store stays root-owned (B4): it is created
+        # but never chowned to the service account, because it is bind-mounted
+        # onto /etc/NetworkManager/system-connections and consumed by root.
+        expected_chown = [
+            path for path in expected if path not in persist_restore.ROOT_ONLY_DIRS
+        ]
+        self.assertEqual([p for p, _u in calls['chown']], expected_chown)
         self.assertEqual({u for _p, u in calls['chown']}, {'prusa-cam'})
         chmod = dict(calls['chmod'])
         self.assertEqual(chmod['/data/prusa-cam/config'], 0o750)
         self.assertEqual(chmod['/data/prusa-cam/backups'], 0o750)
+        self.assertEqual(chmod['/data/network'], 0o700)
+        self.assertEqual(chmod['/data/network/system-connections'], 0o700)
+
+    def test_root_only_dirs_are_never_chowned(self):
+        self.assertEqual(
+            persist_restore.ROOT_ONLY_DIRS,
+            {'/data/network', '/data/network/system-connections'},
+        )
 
     def test_service_user_env_override(self):
         users = []

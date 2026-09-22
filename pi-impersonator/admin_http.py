@@ -269,6 +269,7 @@ class AdminApp:
         storage_ready=None,
         wifi_scan=None,
         start_camera=None,
+        activate_station=None,
     ):
         if mode not in ('setup', 'admin'):
             raise ValueError("mode must be 'setup' or 'admin'")
@@ -303,6 +304,7 @@ class AdminApp:
         self._storage_ready = storage_ready
         self._wifi_scan = wifi_scan
         self._start_camera = start_camera
+        self._activate_station = activate_station
 
         # Lazily built wizard session and reset confirmation state.
         self._wizard = None
@@ -872,6 +874,7 @@ class AdminApp:
                     storage_ready=self._storage_ready,
                     wifi_scan=self._wifi_scan,
                     start_camera=self._start_camera,
+                    activate_station=self._activate_station,
                     hotspot_controller=(
                         self._hotspot
                         if hasattr(self._hotspot, 'stop') and hasattr(self._hotspot, 'start')

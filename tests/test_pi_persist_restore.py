@@ -1,6 +1,7 @@
 """GAP-PERSIST-01: persist_restore pure helpers + import safety."""
 import ast
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,73 @@ class PruneTimelapseTests(unittest.TestCase):
         ):
             persist_restore._prune_timelapse(self.dir, mount='/data')
         self.assertEqual(os.listdir(self.dir), ['frame_0.jpg'])
+
+
+class BindMountTests(unittest.TestCase):
+    """B4: the NetworkManager connection store bind mount."""
+
+    def test_constants_point_at_the_durable_store(self):
+        self.assertEqual(
+            persist_restore.DATA_NETWORK_CONNECTIONS,
+            '/data/network/system-connections',
+        )
+        self.assertEqual(
+            persist_restore.NM_CONNECTIONS,
+            '/etc/NetworkManager/system-connections',
+        )
+
+    def test_bind_mount_uses_mount_bind(self):
+        with patch.object(persist_restore.os, 'makedirs'), \
+                patch.object(persist_restore.os.path, 'ismount', return_value=False), \
+                patch.object(
+                    persist_restore.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, '', ''),
+                ) as run:
+            self.assertTrue(
+                persist_restore._bind_mount('/src', '/dst')
+            )
+        self.assertEqual(run.call_args[0][0], ['mount', '--bind', '/src', '/dst'])
+
+    def test_bind_mount_is_idempotent_when_already_mounted(self):
+        with patch.object(persist_restore.os, 'makedirs'), \
+                patch.object(persist_restore.os.path, 'ismount', return_value=True), \
+                patch.object(persist_restore.subprocess, 'run') as run:
+            self.assertTrue(persist_restore._bind_mount('/src', '/dst'))
+        run.assert_not_called()
+
+    def test_bind_mount_failure_is_isolated(self):
+        with patch.object(persist_restore.os, 'makedirs'), \
+                patch.object(persist_restore.os.path, 'ismount', return_value=False), \
+                patch.object(
+                    persist_restore.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 1, '', 'boom'),
+                ):
+            self.assertFalse(persist_restore._bind_mount('/src', '/dst'))
+
+    def test_bind_mount_makedirs_failure_is_isolated(self):
+        with patch.object(persist_restore.os, 'makedirs', side_effect=OSError('nope')), \
+                patch.object(persist_restore.subprocess, 'run') as run:
+            self.assertFalse(persist_restore._bind_mount('/src', '/dst'))
+        run.assert_not_called()
+
+    def test_main_binds_sdcard_and_nm_connections(self):
+        calls = []
+        with patch.object(persist_restore.settings_store, 'available', return_value=True), \
+                patch.object(persist_restore, 'ensure_durable_layout'), \
+                patch.object(
+                    persist_restore, '_bind_mount',
+                    side_effect=lambda src, dst: calls.append((src, dst)) or True,
+                ), \
+                patch.object(persist_restore, '_restore_settings'), \
+                patch.object(persist_restore, '_prune_timelapse'):
+            self.assertEqual(persist_restore.main(), 0)
+        self.assertEqual(
+            calls,
+            [
+                (persist_restore.DATA_SDCARD, persist_restore.SD_MOUNT),
+                (persist_restore.DATA_NETWORK_CONNECTIONS, persist_restore.NM_CONNECTIONS),
+            ],
+        )
 
 
 class ImportSafetyTests(unittest.TestCase):

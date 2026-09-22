@@ -217,6 +217,54 @@ class AdminTransportSourceTests(unittest.TestCase):
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))],
         )
 
+    def test_build_admin_app_wires_privileged_defaults(self):
+        functions = [
+            node for node in self.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'build_admin_app'
+        ]
+        self.assertEqual(len(functions), 1, 'expected a single build_admin_app')
+        admin_calls = [
+            call for call in _calls(functions[0])
+            if any(chain == ['admin_http', 'AdminApp'] for chain in _attr_chains(call))
+        ]
+        self.assertTrue(admin_calls, 'build_admin_app must construct AdminApp')
+        passed_keywords = {
+            keyword.arg
+            for call in admin_calls for keyword in call.keywords
+        }
+        for keyword in ('start_camera', 'activate_station', 'hotspot'):
+            self.assertIn(
+                keyword, passed_keywords,
+                f'build_admin_app must pass {keyword} to AdminApp',
+            )
+        chains = _attr_chains(functions[0])
+        self.assertIn(
+            ['privileged', 'start_camera'], chains,
+            'start_camera must default to privileged.start_camera',
+        )
+        self.assertIn(
+            ['privileged', 'activate_station'], chains,
+            'activate_station must default to privileged.activate_station',
+        )
+        self.assertIn(
+            ['privileged', 'PrivilegedHotspot'], chains,
+            'the default hotspot controller must be privileged.PrivilegedHotspot',
+        )
+
+    def test_device_id_falls_back_to_resolve_device_id(self):
+        functions = [
+            node for node in self.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == '_configured_device_id'
+        ]
+        self.assertEqual(len(functions), 1, 'expected a single _configured_device_id')
+        self.assertTrue(
+            any(
+                chain == ['provisioning', 'resolve_device_id']
+                for chain in _attr_chains(functions[0])
+            ),
+            'setup mode needs provisioning.resolve_device_id for a pre-claim id',
+        )
+
 
 class AdminUnitTests(unittest.TestCase):
     def setUp(self):
@@ -265,19 +313,30 @@ class AdminUnitTests(unittest.TestCase):
     def test_documents_mode(self):
         self.assertIn('ADMIN_MODE=admin', self._values('Environment'))
 
+    def test_installs_under_camera_target(self):
+        install_index = self.lines.index('[Install]')
+        self.assertIn('WantedBy=prusa-camera.target', self.lines[install_index:])
+
     def test_no_personal_username_or_home_path(self):
         self.assertNotIn('bullitt', self.text)
         self.assertNotIn('/home/', self.text)
 
 
 class FactoryInstallerTests(unittest.TestCase):
-    def test_installer_installs_and_enables_admin_unit(self):
+    def test_installer_installs_admin_unit_but_defers_enablement(self):
         text = INSTALLER.read_text(encoding='utf-8')
-        self.assertGreaterEqual(text.count('prusa-admin.service'), 2)
         unit_loop = text.split('systemctl enable', 1)[0]
         enable_block = text.split('systemctl enable', 1)[1]
+        # Installed verbatim; enabled only transitively via prusa-camera.target
+        # after claim, never directly at multi-user.target.
         self.assertIn('prusa-admin.service', unit_loop)
-        self.assertIn('prusa-admin.service', enable_block)
+        self.assertNotIn('prusa-admin.service', enable_block)
+
+    def test_installer_installs_provisioning_and_boot_mode_units(self):
+        text = INSTALLER.read_text(encoding='utf-8')
+        unit_loop = text.split('systemctl enable', 1)[0]
+        self.assertIn('prusa-provisioning.service', unit_loop)
+        self.assertIn('prusa-boot-mode.service', unit_loop)
 
 
 if __name__ == '__main__':

@@ -12,15 +12,23 @@
 Description=Buddy3D camera runtime target (source, signaling, RTSP, admin)
 Requires=data-ready.target
 After=data-ready.target
+# The setup runtime and the camera runtime are mutually exclusive (AC-12): the
+# wizard's finish step starts this target, which stops prusa-provisioning.service.
+# Ordering after it (AC-18) means the camera units cannot start while the
+# provisioning process — which may still hold the sensor during QR capture/probe
+# — is shutting down.
+Conflicts=prusa-provisioning.service
+After=prusa-provisioning.service
 
-# Reused units, activated and awaited by this target.
-Wants=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service
-After=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service
+# Reused units, activated and awaited by this target. prusa-admin.service is
+# pulled here (its [Install] WantedBy=prusa-camera.target), so the admin UI is
+# only reachable after claim.
+Wants=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service prusa-admin.service
+After=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service prusa-admin.service
 
-# Optional units (prusa-mqtt, prusa-admin, prusa-updater.timer; added by later
-# WPs) must be Wants=, never Requires=, so a WS-Discovery/MQTT/admin/update
-# failure never stops the source, Prusa registration/signaling, snapshots,
-# RTSP, or WebRTC.
+# Optional units (prusa-mqtt, prusa-updater.timer; added by later WPs) must be
+# Wants=, never Requires=, so a WS-Discovery/MQTT/admin/update failure never
+# stops the source, Prusa registration/signaling, snapshots, RTSP, or WebRTC.
 
 [Install]
 WantedBy=multi-user.target

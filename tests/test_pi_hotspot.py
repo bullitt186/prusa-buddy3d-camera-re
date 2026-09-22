@@ -85,24 +85,67 @@ class ConstantTests(unittest.TestCase):
 
 
 class StartTests(unittest.TestCase):
-    def test_start_open_hotspot_success(self):
+    def test_connection_name_and_address_are_pinned(self):
+        self.assertEqual(hotspot.CONNECTION_NAME, 'buddy3d-setup')
+        self.assertEqual(hotspot.CAPTIVE_PORTAL_PREFIX, '192.168.4.1/24')
+
+    def test_start_pins_address_and_disconnects_first(self):
         runner = make_runner(default=FakeResult(0, ''))
         result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
         self.assertTrue(result.ok)
         self.assertTrue(result.active)
         self.assertEqual(result.ssid, 'Buddy3D-Setup-ddeeff')
-        args = runner.calls[0][0]
-        self.assertEqual(args[:5], ['nmcli', 'device', 'wifi', 'hotspot', 'ifname'])
-        self.assertIn('ssid', args)
-        self.assertNotIn('password', args)
 
-    def test_start_with_password_passes_it(self):
+        # B1: a best-effort disconnect runs first so a prefilled station
+        # profile cannot keep the AP from starting.
+        self.assertEqual(
+            runner.calls[0][0], ['nmcli', 'device', 'disconnect', 'wlan0']
+        )
+
+        add = runner.calls[1][0]
+        self.assertEqual(add[:4], ['nmcli', 'connection', 'add', 'type'])
+        self.assertIn('con-name', add)
+        self.assertEqual(add[add.index('con-name') + 1], 'buddy3d-setup')
+        self.assertEqual(add[add.index('ssid') + 1], 'Buddy3D-Setup-ddeeff')
+        self.assertEqual(add[add.index('autoconnect') + 1], 'no')
+        self.assertEqual(add[add.index('mode') + 1], 'ap')
+        self.assertIn('ipv4.method', add)
+        self.assertEqual(add[add.index('ipv4.method') + 1], 'shared')
+        self.assertEqual(add[add.index('ipv4.addresses') + 1], '192.168.4.1/24')
+        self.assertEqual(add[add.index('ipv6.method') + 1], 'disabled')
+        # Open AP by design: no WPA2 material is passed (source §4.3).
+        self.assertNotIn('wifi-sec.psk', add)
+        self.assertNotIn('password', add)
+
+        self.assertEqual(
+            runner.calls[2][0],
+            ['nmcli', 'connection', 'up', 'buddy3d-setup'],
+        )
+
+    def test_start_with_password_passes_it_on_the_add(self):
         runner = make_runner(default=FakeResult(0, ''))
         result = hotspot.start('Buddy3D-Setup-ddeeff', password='longenough', runner=runner)
         self.assertTrue(result.ok)
-        args = runner.calls[0][0]
-        self.assertIn('password', args)
-        self.assertEqual(args[args.index('password') + 1], 'longenough')
+        add = runner.calls[1][0]
+        self.assertIn('wifi-sec.key-mgmt', add)
+        self.assertEqual(add[add.index('wifi-sec.psk') + 1], 'longenough')
+
+    def test_start_uses_modify_when_profile_exists(self):
+        # `connection add` fails (profile already exists) -> modify then up.
+        def runner(args, timeout):
+            runner.calls.append((list(args), timeout))
+            if 'add' in args:
+                return FakeResult(1, '')
+            return FakeResult(0, '')
+
+        runner.calls = []
+        result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertTrue(result.ok)
+        modify = runner.calls[2][0]
+        self.assertEqual(modify[:3], ['nmcli', 'connection', 'modify'])
+        self.assertEqual(modify[3], 'buddy3d-setup')
+        self.assertEqual(modify[modify.index('ipv4.addresses') + 1], '192.168.4.1/24')
+        self.assertEqual(modify[modify.index('connection.autoconnect') + 1], 'no')
 
     def test_start_rejects_empty_ssid_without_running(self):
         runner = make_runner()
@@ -122,19 +165,20 @@ class StartTests(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
     def test_start_command_failure_is_reported(self):
+        # add and modify both fail -> reported, never raised.
         runner = make_runner(default=FakeResult(1, ''))
         result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
         self.assertFalse(result.ok)
         self.assertIn('exit 1', result.reason)
 
     def test_start_timeout_is_reported(self):
-        runner = make_runner(timeout_match='hotspot')
+        runner = make_runner(timeout_match='connection add')
         result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
         self.assertFalse(result.ok)
         self.assertIn('timed out', result.reason)
 
     def test_start_missing_tool_is_reported(self):
-        runner = make_runner(unavailable_match='hotspot')
+        runner = make_runner(unavailable_match='connection add')
         result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
         self.assertFalse(result.ok)
         self.assertIn('unavailable', result.reason)

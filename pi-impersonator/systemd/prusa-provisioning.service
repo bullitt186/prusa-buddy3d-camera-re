@@ -1,0 +1,33 @@
+# Pre-claim setup hotspot + captive-portal wizard (AC-12/AC-17). Started by
+# prusa-boot-mode.service only while the persisted provisioning state is
+# unclaimed; it Conflicts= the camera target so the two runtimes can never
+# overlap. The wizard is bound to the hotspot address (ADMIN_HOST=192.168.4.1)
+# and port :80, so it is reachable ONLY through the setup AP — never on the
+# normal LAN interface. ExecStartPre/ExecStopPost carry the '+' prefix because
+# nmcli needs full privileges to manage the interface.
+#
+# The unit has no [Install] section: it is activated by the boot-mode selector,
+# never enabled. After= (not Requires=) data-ready.target keeps the setup path
+# reachable even when the durable DATA partition is missing (AC-7); a claimed
+# device instead selects prusa-camera.target, which does Require data-ready.
+[Unit]
+Description=Buddy3D setup hotspot and captive-portal wizard (unclaimed)
+After=network-online.target data-ready.target
+Wants=network-online.target
+Conflicts=prusa-camera.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=prusa-cam
+WorkingDirectory=/opt/prusa-cam
+Environment=ADMIN_MODE=setup
+Environment=ADMIN_HOST=192.168.4.1
+EnvironmentFile=-/etc/prusa-cam/admin.env
+ExecStartPre=+/opt/prusa-cam/venv/bin/python /opt/prusa-cam/hotspot_ctl.py start
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/admin_app.py
+ExecStopPost=+/opt/prusa-cam/venv/bin/python /opt/prusa-cam/hotspot_ctl.py stop
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5

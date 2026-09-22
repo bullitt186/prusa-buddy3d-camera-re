@@ -34,6 +34,11 @@ uid="$(chroot "$root" id -u "$SERVICE_USER")"
 gid="$(chroot "$root" id -g "$SERVICE_USER")"
 
 # --- immutable factory application code -------------------------------------
+# /opt/prusa-cam is an immutable factory tree owned by root:root (B3). The
+# prusa-cam account may read/execute it but must never be able to write it: a
+# root helper (prusa-priv) executes code from here, so service-account-writable
+# code would be a privilege-escalation path. Durable data lives under
+# /data/prusa-cam and the ephemeral runtime config under /etc/prusa-cam.
 install -d -m 0755 "$root$APP_ROOT"
 rsync -a --delete \
    --exclude 'venv/' --exclude '__pycache__/' --exclude '*.pyc' \
@@ -41,12 +46,28 @@ rsync -a --delete \
    --exclude 'deploy.sh' --exclude 'bootstrap.sh' --exclude 'README.md' \
    --exclude 'backups/' \
    "$repo/pi-impersonator/" "$root$APP_ROOT/"
+chown -R root:root "$root$APP_ROOT"
+
+# --- fixed-verb root helper + narrow sudoers rule (B3) ----------------------
+install -D -o root -g root -m 0755 "$assets/prusa-priv" \
+   "$root/usr/libexec/prusa-cam/prusa-priv"
+install -D -o root -g root -m 0440 "$assets/sudoers/prusa-cam" \
+   "$root/etc/sudoers.d/prusa-cam"
+if command -v visudo >/dev/null 2>&1; then
+   if ! visudo -cf "$root/etc/sudoers.d/prusa-cam" >/dev/null; then
+      log "ERROR: /etc/sudoers.d/prusa-cam failed visudo -cf"
+      exit 1
+   fi
+else
+   log "visudo unavailable; sudoers syntax check skipped"
+fi
 
 # --- reused runtime units (never divergent copies) --------------------------
 unit_src="$repo/pi-impersonator/systemd"
 for u in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
-         prusa-cam.service prusa-admin.service pi-persist.service \
-         prusa-data-ready.service data-ready.target bootlog.service; do
+         prusa-cam.service prusa-admin.service prusa-provisioning.service \
+         pi-persist.service prusa-data-ready.service data-ready.target \
+         bootlog.service; do
    install -D -m 0644 "$unit_src/$u" "$SYSTEMD_DST/$u"
 done
 
@@ -56,6 +77,8 @@ install -D -m 0644 "$assets/systemd/prusa-data-grow.service" \
    "$SYSTEMD_DST/prusa-data-grow.service"
 install -D -m 0644 "$assets/systemd/prusa-camera.target" \
    "$SYSTEMD_DST/prusa-camera.target"
+install -D -m 0644 "$assets/systemd/prusa-boot-mode.service" \
+   "$SYSTEMD_DST/prusa-boot-mode.service"
 install -D -m 0644 "$assets/systemd/data-ready.target.d/10-data-grow.conf" \
    "$SYSTEMD_DST/data-ready.target.d/10-data-grow.conf"
 install -D -m 0644 "$assets/systemd/NetworkManager.service.d/10-data-ready.conf" \
@@ -69,11 +92,17 @@ install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
 install -D -m 0755 "$assets/launcher.sh" "$root$APP_ROOT/launcher.sh"
 
 # --- enable the runtime graph (source §3.2) ---------------------------------
+# Only the pre-runtime gate, pi-persist.service and the boot-mode selector are
+# enabled. pi-persist.service must run at boot (even while unclaimed) so it
+# bind-mounts the durable NetworkManager system-connections and /mnt/sdcard
+# stores before NetworkManager/camera units start (B4). The camera units,
+# prusa-admin.service and prusa-camera.target are NOT enabled here: the selector
+# starts prusa-camera.target after claim and it pulls them via Wants=
+# (AC-12/AC-17), so nothing camera-related runs while the device is unclaimed.
+# The units' own [Install] sections are left intact for the dev deploy.sh path.
 chroot "$root" systemctl enable \
    data-ready.target prusa-data-ready.service prusa-data-grow.service \
-   pi-persist.service rpicam-source.service prusa-rtsp.service \
-   prusa-ha-rtsp.service prusa-cam.service prusa-admin.service \
-   bootlog.service prusa-camera.target >/dev/null 2>&1 || true
+   pi-persist.service bootlog.service prusa-boot-mode.service >/dev/null 2>&1 || true
 
 # SSH is installed but disabled by default (AC-13/AC-20). The disable runs in
 # image/layer/post-build.sh, which executes after every layer — the reused
@@ -109,8 +138,12 @@ python3 "$assets/build-info.py" \
    --output "$root/usr/share/prusa-buddy3d-camera/build-info.json"
 
 # --- durable configuration directory + ownership ----------------------------
+# /opt/prusa-cam stays root:root 0755 (B3): the factory app is immutable and is
+# never writable by the service account. Only the ephemeral runtime config
+# directory (quality.env/rtsp.mode are written at runtime) and the durable
+# /data/prusa-cam layout (created by persist_restore.py) are prusa-cam-owned.
 install -d -m 0750 "$root/etc/prusa-cam"
 install -d -m 0755 "$root$APP_ROOT/backups"
-chown -R "$uid:$gid" "$root$APP_ROOT" "$root/etc/prusa-cam"
+chown -R "$uid:$gid" "$root/etc/prusa-cam"
 chmod 0755 "$root$APP_ROOT/bootlog.sh" 2>/dev/null || true
-log "factory app installed at $APP_ROOT (uid=$uid gid=$gid)"
+log "factory app installed at $APP_ROOT (root:root; service uid=$uid gid=$gid)"
