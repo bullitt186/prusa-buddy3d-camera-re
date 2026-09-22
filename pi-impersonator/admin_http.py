@@ -213,6 +213,25 @@ _AUTHENTICATED = 'authenticated'
 _REAUTH_REQUIRED = 'reauth_required'
 
 
+@dataclasses.dataclass
+class _ProvisioningView:
+    """One resolved provisioning snapshot shared by gating and ``/api/status``.
+
+    ``state`` is the effective state name (``None`` when no trustworthy state is
+    known), ``source`` records where it came from (``persisted``, ``injected``,
+    ``persisted_corrupt`` or ``none``), ``error`` is a short, secret-free
+    recovery hint when an existing state file could not be trusted, and
+    ``setup_available`` is the final, mode-aware decision. Building both answers
+    from one object is what keeps the setup gate and the status payload in
+    agreement.
+    """
+
+    state: object = None
+    source: str = 'none'
+    error: str = ''
+    setup_available: bool = False
+
+
 # --------------------------------------------------------------------------- #
 # Admin application
 # --------------------------------------------------------------------------- #
@@ -402,24 +421,109 @@ class AdminApp:
     # Policy
     # ------------------------------------------------------------------ #
 
-    def _load_provisioning_state(self):
-        """Return the persisted provisioning state name, or ``None`` if unavailable.
+    def _load_persisted_state(self):
+        """Read the on-disk provisioning state, distinguishing missing from bad.
 
         The file is re-read on every check so a long-lived ``setup``-mode app
         observes a claim written by the wizard (or any other writer) without a
-        restart. ``None`` is returned when no path is configured or no state
-        file is present, so the caller falls back to the injected object; an
-        existing file is loaded (a corrupt one loads as ``factory``), and an
-        unexpected failure also yields ``None``.
+        restart. Returns ``(state, error)``:
+
+        * ``(None, '')`` -- no path is configured, or the file is absent. The
+          caller falls back to the injected snapshot: a fresh device must be
+          able to serve the setup portal.
+        * ``(state, '')`` -- the file exists and holds a documented state.
+        * ``(None, reason)`` -- the file exists but is unreadable, not JSON, not
+          an object, or carries an unknown state. ``reason`` is a fixed,
+          secret-free string safe for the status payload.
+
+        Unlike :meth:`provisioning.ProvisioningState.load`, which maps a corrupt
+        file to ``factory``, an existing-but-corrupt file is *not* treated as a
+        fresh device; the caller fails closed instead of reopening the
+        unauthenticated wizard.
         """
-        if not self._provisioning_path or not os.path.isfile(self._provisioning_path):
-            return None
+        path = self._provisioning_path
+        if not path or not os.path.isfile(path):
+            return None, ''
         try:
-            loaded = provisioning.ProvisioningState.load(self._provisioning_path)
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
         except Exception:  # noqa: BLE001 - a bad state file must not crash routing
-            return None
-        state = getattr(loaded, 'state', None)
-        return state if isinstance(state, str) else None
+            return None, 'provisioning state unreadable'
+        if not isinstance(data, dict):
+            return None, 'provisioning state is not an object'
+        state = data.get('state')
+        if not isinstance(state, str) or state not in provisioning.ALL_STATES:
+            return None, 'provisioning state value is invalid'
+        return state, ''
+
+    def _load_secrets_safe(self):
+        """Best-effort secrets load for the claim predicate (never raises)."""
+        try:
+            secrets = config_schema.load_secrets(self._secrets_path)
+        except Exception:  # noqa: BLE001 - a bad file must not crash routing
+            return {}
+        return secrets if isinstance(secrets, dict) else {}
+
+    def _load_device_safe(self):
+        """Best-effort device load for the claim predicate (never raises)."""
+        try:
+            device = config_schema.load_device(self._device_path)
+        except Exception:  # noqa: BLE001 - a bad file must not crash routing
+            return {}
+        return device if isinstance(device, dict) else {}
+
+    def _claimable_by_facts(self):
+        """True when the authoritative claim predicate says the device is claimed.
+
+        Reuses :func:`provisioning.is_claimed` (admin password hash present *and*
+        a valid device document) so the public wizard is refused on facts alone,
+        independent of what the state file or injected snapshot says. A missing
+        config is not a claim; an unreadable one cannot establish a claim, so it
+        is not treated as claimed (the corrupt-state-file gate covers the
+        takeover hole).
+        """
+        try:
+            return bool(provisioning.is_claimed(
+                self._load_secrets_safe(), self._load_device_safe()
+            ))
+        except Exception:  # noqa: BLE001 - a predicate must never crash routing
+            return False
+
+    def _provisioning_view(self):
+        """Resolve the effective provisioning state once for gating and status.
+
+        The persisted file is authoritative when present and valid. A corrupt
+        existing file fails closed (setup unavailable, ``error`` set) and the
+        injected snapshot is ignored. When no file is present the injected
+        snapshot is used, preserving the fresh-device setup flow. The
+        authoritative :func:`provisioning.is_claimed` predicate is a second,
+        independent gate: a device claimable by facts closes the portal even if
+        the state file (or the injected snapshot) says otherwise.
+        """
+        persisted, error = self._load_persisted_state()
+        if persisted is not None:
+            state = persisted
+            source = 'persisted'
+        elif error:
+            state = None
+            source = 'persisted_corrupt'
+        else:
+            state = getattr(self._provisioning_state, 'state', None)
+            source = 'injected' if state is not None else 'none'
+
+        claimable = self._claimable_by_facts()
+        if claimable and (state is None or state in PRE_CLAIM_STATES):
+            # Facts outrank a stale/unclaimed state, so /api/status never says
+            # "unclaimed" while the portal is closed.
+            state = 'claimed'
+
+        available = False
+        if self.mode == 'setup' and not error and not claimable:
+            available = state is None or state in PRE_CLAIM_STATES
+
+        return _ProvisioningView(
+            state=state, source=source, error=error, setup_available=available,
+        )
 
     def _setup_available(self):
         """True only in ``setup`` mode while the device is still unclaimed.
@@ -427,17 +531,12 @@ class AdminApp:
         The persisted provisioning state is authoritative and re-loaded from
         disk on every check, so once the wizard claims the device the portal is
         refused even if this app instance was built with a stale
-        ``provisioning_state`` snapshot. The injected object is consulted only
-        when the persisted state cannot be read.
+        ``provisioning_state`` snapshot. A corrupt existing state file fails
+        closed, and the authoritative :func:`provisioning.is_claimed` predicate
+        is a second gate. The injected object is consulted only when no state
+        file is present.
         """
-        if self.mode != 'setup':
-            return False
-        state = self._load_provisioning_state()
-        if state is None:
-            state = getattr(self._provisioning_state, 'state', None)
-        if state is None:
-            return True
-        return state in PRE_CLAIM_STATES
+        return self._provisioning_view().setup_available
 
     def _authorize(self, request, policy, body_data, now):
         """Enforce session, CSRF, and (for re-auth routes) fresh password checks.
@@ -556,17 +655,29 @@ class AdminApp:
         return self._html(request, 200, html)
 
     def _handle_status(self, request, match, body_data, now):
-        """Public status JSON, including the trusted-LAN labelling."""
+        """Public status JSON, including the trusted-LAN labelling.
+
+        ``setup_available`` and ``provisioning_state`` come from the same
+        :meth:`_provisioning_view`, so the payload can never claim the device is
+        ``unclaimed`` while the portal is closed (or vice versa). When an
+        existing state file is corrupt, ``provisioning_error`` carries a short,
+        secret-free recovery hint and ``provisioning_source`` is
+        ``persisted_corrupt``.
+        """
+        view = self._provisioning_view()
         payload = {
             'ok': True,
             'mode': self.mode,
-            'setup_available': self._setup_available(),
-            'provisioning_state': getattr(self._provisioning_state, 'state', None),
+            'setup_available': view.setup_available,
+            'provisioning_state': view.state,
+            'provisioning_source': view.source,
             'trusted_lan': {
                 'notice': lan_warning(),
                 'interfaces': TRUSTED_LAN_INTERFACES,
             },
         }
+        if view.error:
+            payload['provisioning_error'] = view.error
         if self._hotspot is not None:
             payload['hotspot'] = _hotspot_view(self._hotspot)
         if self._probe is not None:

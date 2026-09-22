@@ -267,6 +267,129 @@ class RoutingTests(AdminHttpTestBase):
 
 
 # --------------------------------------------------------------------------- #
+# Corrupt provisioning file / authoritative claim gate (fail closed)
+# --------------------------------------------------------------------------- #
+
+class SetupFailClosedTests(AdminHttpTestBase):
+    """A corrupt state file or a factual claim must close the public wizard.
+
+    Before this change a corrupt ``provisioning.json`` loaded as ``factory``,
+    which is a pre-claim state, so disk corruption reopened the unauthenticated
+    setup wizard and let it rewrite ``device.toml``/``secrets.toml`` -- a device
+    takeover without the admin password. These tests pin the fail-closed fix and
+    the second, facts-based :func:`provisioning.is_claimed` gate.
+    """
+
+    def _write_state(self, state):
+        (self.root / 'provisioning.json').write_text(
+            json.dumps({'state': state}), encoding='utf-8'
+        )
+
+    def _write_claimable_config(self):
+        (self.root / 'device.toml').write_text(
+            config_schema.dumps_device(config_schema.default_device()),
+            encoding='utf-8',
+        )
+        (self.root / 'secrets.toml').write_text(
+            config_schema.dumps_secrets({'admin': {'password_hash': ADMIN_HASH}}),
+            encoding='utf-8',
+        )
+
+    def _setup_app(self, injected_state):
+        return self._build_app(
+            mode='setup',
+            provisioning_state=provisioning.ProvisioningState(state=injected_state),
+        )
+
+    def _status(self, app):
+        response = app.handle(self.req('GET', '/api/status'))
+        self.assertEqual(response.status, 200)
+        return json.loads(response.body.decode('utf-8'))
+
+    def _assert_setup_closed(self, app):
+        redirect = app.handle(self.req('GET', '/setup'))
+        self.assertEqual(redirect.status, 302)
+        self.assertEqual(redirect.headers['Location'], '/admin')
+        self.assertEqual(
+            app.handle(self.req('POST', '/setup/step/1', body={})).status, 409
+        )
+        self.assertEqual(
+            app.handle(self.req('POST', '/setup/finish', body={})).status, 409
+        )
+
+    def test_corrupt_state_file_closes_setup_despite_claimed_injection(self):
+        (self.root / 'provisioning.json').write_text('{not json', encoding='utf-8')
+        app = self._setup_app('claimed')
+        self._assert_setup_closed(app)
+        payload = self._status(app)
+        self.assertFalse(payload['setup_available'])
+        self.assertNotEqual(payload['provisioning_state'], 'unclaimed')
+        self.assertEqual(payload['provisioning_source'], 'persisted_corrupt')
+        self.assertTrue(payload['provisioning_error'])
+
+    def test_corrupt_state_file_closes_setup_despite_unclaimed_injection(self):
+        # An empty (truncated/partial-write) file is corrupt, not a fresh device.
+        (self.root / 'provisioning.json').write_text('', encoding='utf-8')
+        app = self._setup_app('unclaimed')
+        self._assert_setup_closed(app)
+        payload = self._status(app)
+        self.assertFalse(payload['setup_available'])
+        self.assertNotEqual(payload['provisioning_state'], 'unclaimed')
+
+    def test_invalid_state_value_closes_setup(self):
+        self._write_state('bogus')
+        app = self._setup_app('unclaimed')
+        self._assert_setup_closed(app)
+        payload = self._status(app)
+        self.assertFalse(payload['setup_available'])
+        self.assertEqual(payload['provisioning_error'],
+                         'provisioning state value is invalid')
+
+    def test_missing_state_file_unclaimed_serves_setup(self):
+        app = self._setup_app('unclaimed')
+        self.assertEqual(app.handle(self.req('GET', '/setup')).status, 200)
+        payload = self._status(app)
+        self.assertTrue(payload['setup_available'])
+        self.assertEqual(payload['provisioning_state'], 'unclaimed')
+        self.assertEqual(payload['provisioning_source'], 'injected')
+
+    def test_missing_state_file_claimed_refuses_setup(self):
+        app = self._setup_app('claimed')
+        self._assert_setup_closed(app)
+        payload = self._status(app)
+        self.assertFalse(payload['setup_available'])
+        self.assertEqual(payload['provisioning_state'], 'claimed')
+
+    def test_claimable_by_facts_refuses_setup_despite_unclaimed_state(self):
+        # The state file and the injected snapshot both say unclaimed, but the
+        # authoritative predicate (admin hash + valid device) says claimed.
+        self._write_claimable_config()
+        self._write_state('unclaimed')
+        app = self._setup_app('unclaimed')
+        self._assert_setup_closed(app)
+        payload = self._status(app)
+        self.assertFalse(payload['setup_available'])
+        self.assertEqual(payload['provisioning_state'], 'claimed')
+        self.assertEqual(payload['provisioning_source'], 'persisted')
+
+    def test_status_consistent_after_persisted_flip(self):
+        self._write_state('unclaimed')
+        app = self._setup_app('unclaimed')
+        before = self._status(app)
+        self.assertTrue(before['setup_available'])
+        self.assertEqual(before['provisioning_state'], 'unclaimed')
+
+        self._write_state('claimed')
+        after = self._status(app)
+        self.assertFalse(after['setup_available'])
+        self.assertEqual(after['provisioning_state'], 'claimed')
+        # The invariant the shared view exists to guarantee.
+        self.assertFalse(
+            after['setup_available'] and after['provisioning_state'] == 'claimed'
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Session policy
 # --------------------------------------------------------------------------- #
 
