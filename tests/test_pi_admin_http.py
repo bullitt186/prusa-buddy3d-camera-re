@@ -220,13 +220,28 @@ class RoutingTests(AdminHttpTestBase):
         )
         self.assertEqual(setup_app.handle(self.req('GET', '/setup')).status, 200)
 
-    def test_persisted_claimed_state_closes_setup_routes(self):
+    def test_persisted_claimed_state_keeps_setup_open_for_finish(self):
+        # ``persist`` writes a valid device + admin password and advances to
+        # ``claimed`` (camera validated) while the runtime has not started: the
+        # finish step must stay reachable to stop the AP and start the camera.
         path = self.root / 'provisioning.json'
         path.write_text(json.dumps({'state': 'claimed'}), encoding='utf-8')
         setup_app = self._build_app(
             mode='setup',
-            # Deliberately stale: the in-memory snapshot still says unclaimed.
             provisioning_state=provisioning.ProvisioningState(state='unclaimed'),
+            provisioning_path=str(path),
+        )
+        self.assertEqual(setup_app.handle(self.req('GET', '/setup')).status, 200)
+        self.assertNotEqual(
+            setup_app.handle(self.req('POST', '/setup/finish', body={})).status, 409
+        )
+
+    def test_persisted_running_state_closes_setup_routes(self):
+        path = self.root / 'provisioning.json'
+        path.write_text(json.dumps({'state': 'running'}), encoding='utf-8')
+        setup_app = self._build_app(
+            mode='setup',
+            provisioning_state=provisioning.ProvisioningState(state='running'),
             provisioning_path=str(path),
         )
         redirect = setup_app.handle(self.req('GET', '/setup'))
@@ -241,10 +256,10 @@ class RoutingTests(AdminHttpTestBase):
 
     def test_missing_provisioning_file_falls_back_to_injected_state(self):
         # No state file exists, so the injected snapshot is authoritative. A
-        # claimed snapshot must therefore close the portal (fail closed).
+        # running snapshot must therefore close the portal (fail closed).
         setup_app = self._build_app(
             mode='setup',
-            provisioning_state=provisioning.ProvisioningState(state='claimed'),
+            provisioning_state=provisioning.ProvisioningState(state='running'),
             provisioning_path=str(self.root / 'absent-provisioning.json'),
         )
         redirect = setup_app.handle(self.req('GET', '/setup'))
@@ -260,7 +275,7 @@ class RoutingTests(AdminHttpTestBase):
     def test_empty_provisioning_path_falls_back_to_injected_state(self):
         setup_app = self._build_app(
             mode='setup',
-            provisioning_state=provisioning.ProvisioningState(state='claimed'),
+            provisioning_state=provisioning.ProvisioningState(state='running'),
             provisioning_path='',
         )
         self.assertEqual(setup_app.handle(self.req('GET', '/setup')).status, 302)
@@ -450,11 +465,28 @@ class SetupFailClosedTests(AdminHttpTestBase):
         self.assertEqual(payload['provisioning_state'], 'unclaimed')
         self.assertEqual(payload['provisioning_source'], 'injected')
 
-    def test_missing_state_file_claimed_refuses_setup(self):
-        app = self._setup_app('claimed')
+    def test_missing_state_file_running_refuses_setup(self):
+        app = self._setup_app('running')
         self._assert_setup_closed(app)
         payload = self._status(app)
         self.assertFalse(payload['setup_available'])
+        self.assertEqual(payload['provisioning_state'], 'running')
+
+    def test_claimable_in_finish_window_keeps_setup_open(self):
+        # The bug this pins: persist writes a valid device + admin password, so
+        # the device is claimable by facts while the state is still pre-runtime
+        # (storage_ready when the camera is not validated). ``finish`` must stay
+        # callable, otherwise the hotspot is never stopped and the camera target
+        # never starts.
+        self._write_claimable_config()
+        self._write_state('storage_ready')
+        app = self._setup_app('storage_ready')
+        self.assertEqual(app.handle(self.req('GET', '/setup')).status, 200)
+        self.assertNotEqual(
+            app.handle(self.req('POST', '/setup/finish', body={})).status, 409
+        )
+        payload = self._status(app)
+        self.assertTrue(payload['setup_available'])
         self.assertEqual(payload['provisioning_state'], 'claimed')
 
     def test_claimable_by_facts_refuses_setup_despite_unclaimed_state(self):
@@ -476,13 +508,14 @@ class SetupFailClosedTests(AdminHttpTestBase):
         self.assertTrue(before['setup_available'])
         self.assertEqual(before['provisioning_state'], 'unclaimed')
 
-        self._write_state('claimed')
+        self._write_state('running')
         after = self._status(app)
         self.assertFalse(after['setup_available'])
-        self.assertEqual(after['provisioning_state'], 'claimed')
-        # The invariant the shared view exists to guarantee.
+        self.assertEqual(after['provisioning_state'], 'running')
+        # The invariant the shared view exists to guarantee: once the runtime
+        # owns the device, setup is closed.
         self.assertFalse(
-            after['setup_available'] and after['provisioning_state'] == 'claimed'
+            after['setup_available'] and after['provisioning_state'] == 'running'
         )
 
 

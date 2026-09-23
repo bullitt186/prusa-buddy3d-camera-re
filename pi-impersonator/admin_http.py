@@ -216,6 +216,18 @@ PRE_CLAIM_STATES = frozenset({
     'unclaimed',
 })
 
+#: States in which the setup portal stays reachable while the device is not
+#: yet claimable by facts: every pre-claim state plus ``claimed`` (the runtime
+#: has not started, so the wizard/``finish`` must stay reachable).
+SETUP_OPEN_STATES = PRE_CLAIM_STATES | frozenset({'claimed'})
+
+#: The finish window: states a *claimable* device (persist already wrote a valid
+#: device + admin password) can legitimately be in while ``finish`` still has to
+#: run. ``persist`` advances to ``storage_ready`` when the camera is not
+#: validated and to ``claimed`` when it is. A claimable device in any other
+#: state is inconsistent (stale/tampered) and keeps setup closed.
+FINISH_WINDOW_STATES = frozenset({'storage_ready', 'claimed'})
+
 _PUBLIC = 'public'
 _PUBLIC_SETUP = 'public_setup'
 _AUTHENTICATED = 'authenticated'
@@ -540,15 +552,29 @@ class AdminApp:
             state = getattr(self._provisioning_state, 'state', None)
             source = 'injected' if state is not None else 'none'
 
+        # The raw state drives gating; the reported state may be upgraded to
+        # ``claimed`` when the facts already prove a claim, so /api/status never
+        # says "unclaimed" while the portal is closed.
+        raw_state = state
         claimable = self._claimable_by_facts()
-        if claimable and (state is None or state in PRE_CLAIM_STATES):
-            # Facts outrank a stale/unclaimed state, so /api/status never says
-            # "unclaimed" while the portal is closed.
+        if claimable and (raw_state is None or raw_state in PRE_CLAIM_STATES):
             state = 'claimed'
 
         available = False
-        if self.mode == 'setup' and not error and not claimable:
-            available = state is None or state in PRE_CLAIM_STATES
+        if self.mode == 'setup' and not error:
+            if raw_state is None:
+                # No trustworthy state: only a fresh, non-claimable device may
+                # open setup. A facts-only claim (files present, no state file)
+                # stays closed so a claimed device cannot be reconfigured.
+                available = not claimable
+            elif claimable:
+                # Persist has written a valid device + admin password but the
+                # runtime has not started: keep ``finish`` reachable only in the
+                # legitimate finish window. A claimable device in any other
+                # (stale/tampered) state stays closed.
+                available = raw_state in FINISH_WINDOW_STATES
+            else:
+                available = raw_state in SETUP_OPEN_STATES
 
         return _ProvisioningView(
             state=state, source=source, error=error, setup_available=available,
