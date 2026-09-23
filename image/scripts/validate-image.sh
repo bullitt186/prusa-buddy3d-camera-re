@@ -385,7 +385,7 @@ else
     wants_dir="$SYSTEMD_DIR/multi-user.target.wants"
     camera_wants_dir="$SYSTEMD_DIR/prusa-camera.target.wants"
 
-    if [ -e "$wants_dir/prusa-boot-mode.service" ]; then
+    if [ -L "$wants_dir/prusa-boot-mode.service" ]; then
        report ok "prusa-boot-mode.service is enabled at multi-user.target"
     else
        report fail "prusa-boot-mode.service must be enabled at multi-user.target"
@@ -401,13 +401,13 @@ else
     else
        report fail "prusa-provisioning.service is missing"
     fi
-    if [ -e "$wants_dir/prusa-provisioning.service" ]; then
+    if [ -L "$wants_dir/prusa-provisioning.service" ]; then
        report fail "prusa-provisioning.service must NOT be enabled (started by boot_mode)"
     else
        report ok "prusa-provisioning.service is not enabled"
     fi
 
-    if [ -e "$wants_dir/prusa-camera.target" ]; then
+    if [ -L "$wants_dir/prusa-camera.target" ]; then
        report fail "prusa-camera.target must NOT be enabled (started by boot_mode)"
     else
        report ok "prusa-camera.target is not enabled"
@@ -419,9 +419,9 @@ else
     # [Install] WantedBy=prusa-camera.target. Either way it starts only after
     # claim, when prusa-camera.target is selected.
     admin_unit="$SYSTEMD_DIR/prusa-admin.service"
-    if [ -e "$wants_dir/prusa-admin.service" ]; then
+    if [ -L "$wants_dir/prusa-admin.service" ]; then
        report fail "prusa-admin.service must not be enabled at multi-user.target"
-    elif [ -e "$camera_wants_dir/prusa-admin.service" ] \
+    elif [ -L "$camera_wants_dir/prusa-admin.service" ] \
          || unit_has "$admin_unit" WantedBy prusa-camera.target; then
        report ok "prusa-admin.service is enabled under prusa-camera.target.wants"
     else
@@ -503,10 +503,164 @@ else
        fi
     fi
 
+    # --- hash-locked Python runtime venv + dependency lock (WP-R3/AC-14) ---
+    # The runtime units all ExecStart=/opt/prusa-cam/venv/bin/python. The venv
+    # is built by install-factory-app.sh from the committed hash-locked
+    # requirements.lock; a venv-less image is not runnable, so a missing venv
+    # or lock is a hard failure here.
+    venv_dir="$app_root/venv"
+    venv_python="$venv_dir/bin/python"
+    if [ -f "$venv_python" ]; then
+       # venv/bin/python is a symlink to the system interpreter; follow it so
+       # the symlink's own 0777 mode is not mistaken for a writable interpreter.
+       venv_owner="$(stat -Lc '%u:%g' "$venv_python" 2>/dev/null || true)"
+       venv_mode="$(stat -Lc '%a' "$venv_python" 2>/dev/null || true)"
+       if [ -n "$prusa_uid" ] && [ "$venv_owner" = "$prusa_uid:$prusa_gid" ]; then
+          report fail "venv python must not be owned by prusa-cam ($venv_owner)"
+       elif [ "$venv_owner" != "$root_uid:$root_gid" ]; then
+          report fail "venv python must be root:root (found ${venv_owner:-missing})"
+       elif [ -n "$venv_mode" ] && [ $(( 0$venv_mode & 022 )) -ne 0 ]; then
+          report fail "venv python must not be group/world-writable (mode $venv_mode)"
+       else
+          report ok "/opt/prusa-cam/venv/bin/python is root-owned and not group/world-writable"
+       fi
+    else
+       report fail "/opt/prusa-cam/venv/bin/python is missing (runtime venv not built)"
+    fi
+
+    lock_file="$app_root/requirements.lock"
+    if [ -f "$lock_file" ]; then
+       lock_owner="$(stat -c '%u:%g' "$lock_file" 2>/dev/null || true)"
+       lock_mode="$(stat -c '%a' "$lock_file" 2>/dev/null || true)"
+       if [ "$lock_mode" = "644" ] && [ "$lock_owner" = "$root_uid:$root_gid" ]; then
+          report ok "/opt/prusa-cam/requirements.lock is root:root mode 0644"
+       else
+          report fail "/opt/prusa-cam/requirements.lock must be root:root mode 0644 (found ${lock_owner:-?} ${lock_mode:-?})"
+       fi
+       consume < <(python3 - "$lock_file" <<'PY'
+import sys
+
+path = sys.argv[1]
+
+
+def out(kind, msg):
+    print(f"{kind}|{msg}")
+
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+except OSError as exc:  # noqa: BLE001 - report, never raise
+    out("fail", f"requirements.lock unreadable: {exc}")
+    sys.exit(0)
+
+# Drop comment lines, then re-join backslash continuations so a pinned package
+# and its --hash lines form one spec (the pip-compile output format).
+lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+joined = []
+buf = ""
+for line in lines:
+    if line.rstrip().endswith("\\"):
+        buf += line.rstrip()[:-1] + " "
+    else:
+        buf += line
+        joined.append(buf)
+        buf = ""
+if buf:
+    joined.append(buf)
+
+specs = [spec for spec in joined if "==" in spec and not spec.lstrip().startswith("-")]
+if not specs:
+    out("fail", "requirements.lock pins no packages")
+    sys.exit(0)
+
+unhashed = [
+    spec.split("==", 1)[0].strip()
+    for spec in specs
+    if "--hash=sha256:" not in spec
+]
+if unhashed:
+    out(
+        "fail",
+        "requirements.lock packages without a sha256 hash: "
+        + ", ".join(unhashed),
+    )
+else:
+    out(
+        "ok",
+        f"requirements.lock pins {len(specs)} packages, each with a sha256 hash",
+    )
+
+names = {spec.split("==", 1)[0].strip().lower() for spec in specs}
+missing = [
+    dep
+    for dep in ("aiohttp", "python-socketio", "paho-mqtt")
+    if dep not in names
+]
+if missing:
+    out(
+        "fail",
+        "requirements.lock missing direct dependencies: " + ", ".join(missing),
+    )
+else:
+    out("ok", "requirements.lock contains the aiohttp/python-socketio/paho-mqtt deps")
+PY
+)
+    else
+       report fail "/opt/prusa-cam/requirements.lock is missing"
+    fi
+
+    # The installed packages must actually be present in the venv (not just a
+    # venv shell). Python-socketio installs the ``socketio`` module and
+    # paho-mqtt the ``paho`` module; aiohttp is its own module.
+    if [ -f "$venv_dir/pyvenv.cfg" ]; then
+       report ok "/opt/prusa-cam/venv/pyvenv.cfg present"
+    else
+       report fail "/opt/prusa-cam/venv/pyvenv.cfg missing (not a virtualenv)"
+    fi
+    missing_modules=()
+    for module in aiohttp socketio paho; do
+       found=""
+       for candidate in "$venv_dir"/lib/python3*/site-packages/"$module"; do
+          if [ -e "$candidate" ]; then
+             found="$candidate"
+             break
+          fi
+       done
+       [ -n "$found" ] || missing_modules+=("$module")
+    done
+    if [ "${#missing_modules[@]}" -eq 0 ]; then
+       report ok "venv site-packages contains aiohttp, socketio and paho"
+    else
+       report fail "venv is missing installed modules: ${missing_modules[*]}"
+    fi
+
+    # --no-cache-dir must leave no wheel cache behind.
+    wheels="$(find "$venv_dir" -name '*.whl' 2>/dev/null || true)"
+    if [ -n "$wheels" ]; then
+       report fail "pip wheel cache inside venv: $(printf '%s ' $wheels)"
+    else
+       report ok "no pip wheel cache inside venv"
+    fi
+
+    # The runtime deps come from the hash-locked requirements.lock only; an
+    # unpinned requirements.txt would bypass it.
+    req_txt="$app_root/requirements.txt"
+    if [ -f "$req_txt" ]; then
+       unpinned="$(grep -vE '^[[:space:]]*(#|--|$)' "$req_txt" | grep -vE '==' || true)"
+       if [ -n "$unpinned" ]; then
+          report fail "requirements.txt contains unpinned dependencies"
+       else
+          report ok "requirements.txt pins every dependency"
+       fi
+    else
+       report ok "no unpinned requirements.txt"
+    fi
+
     camera_leaks=()
     for unit in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
                 prusa-cam.service; do
-       if [ -e "$wants_dir/$unit" ]; then
+       if [ -L "$wants_dir/$unit" ]; then
           camera_leaks+=("$unit")
        fi
     done

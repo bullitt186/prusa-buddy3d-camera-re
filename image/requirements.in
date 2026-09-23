@@ -1,0 +1,15 @@
+# Direct Python runtime dependencies of the Buddy3D camera application (AC-14).
+#
+# This is the human-edited input for the hash-locked requirements.lock in this
+# directory. The lock is generated on the native arm64 build host with:
+#
+#   pip-compile --generate-hashes --resolver=backtracking \
+#       --output-file requirements.lock requirements.in
+#
+# and installed in the image with `pip install --require-hashes` (see
+# image/layer/bdebstrap/customize95-buddy3d-python). Native components
+# (PyGObject, GStreamer, libcamera/rpicam, NetworkManager, Samba) come from
+# Debian packages and must NOT be added here.
+aiohttp
+python-socketio
+paho-mqtt

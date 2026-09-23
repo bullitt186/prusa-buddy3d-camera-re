@@ -45,8 +45,11 @@ rsync -a --delete \
    --exclude 'config.ini' --exclude '*.example' --exclude 'systemd/' \
    --exclude 'deploy.sh' --exclude 'bootstrap.sh' --exclude 'README.md' \
    --exclude 'backups/' \
-   "$repo/pi-impersonator/" "$root$APP_ROOT/"
+    "$repo/pi-impersonator/" "$root$APP_ROOT/"
 chown -R root:root "$root$APP_ROOT"
+# rsync -a applies the source directory's mode (the checkout is often 0775),
+# so pin the factory tree to 0755 explicitly (B3/AC-13).
+chmod 0755 "$root$APP_ROOT"
 
 # --- fixed-verb root helper + narrow sudoers rule (B3) ----------------------
 install -D -o root -g root -m 0755 "$assets/prusa-priv" \
@@ -90,6 +93,72 @@ install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
 
 # --- factory fallback launcher (AC-13; units wired through it in WP-6) ------
 install -D -m 0755 "$assets/launcher.sh" "$root$APP_ROOT/launcher.sh"
+
+# --- hash-locked Python runtime venv (WP-R3 / AC-14) ------------------------
+# The venv is built here, not in the bdebstrap customize95-buddy3d-python
+# hook: this installer runs from the layer's customize-hooks, which execute
+# after the factory app directory exists, so the venv always lands in a
+# populated /opt/prusa-cam. That hook is a documented no-op.
+#
+# requirements.lock is the committed, hash-locked arm64 dependency set. It is
+# installed with --require-hashes and --no-cache-dir so no unpinned, tampered,
+# or cached wheel can enter the image. Native components (PyGObject, GStreamer,
+# libcamera/rpicam, NetworkManager, Samba) stay Debian packages.
+install -m 0644 "$repo/image/requirements.lock" "$root$APP_ROOT/requirements.lock"
+lock_sha256="$(sha256sum "$root$APP_ROOT/requirements.lock" | awk '{print $1}')"
+log "installing hash-locked Python deps (requirements.lock sha256=$lock_sha256)"
+
+# --system-site-packages keeps Debian's PyGObject/GStreamer visible inside the
+# venv; only the pure-Python deps come from the lock (AC-14 tail).
+# Preflight: `python3 -m venv` needs ensurepip. The package list requests the
+# versioned venv package, but apt resolution in the pinned snapshot is brittle
+# (trixie's python3-venv metapackage pins an older python3), so repair it in
+# place rather than shipping a venv-less image. The diagnostic lines below make
+# an apt failure self-explanatory in the build log.
+pyver="$(chroot "$root" /usr/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3)"
+export DEBIAN_FRONTEND=noninteractive
+if ! chroot "$root" /usr/bin/python3 -c 'import ensurepip' >/dev/null 2>&1; then
+   log "ensurepip is missing in the image; installing python${pyver}-venv"
+   chroot "$root" dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null \
+      | grep -E "python3(\.${pyver#3.}-)?-(venv|pip)" \
+      | sed 's/^/buddy3d-image: installed: /' || true
+   if ! chroot "$root" apt-get install -y --no-install-recommends "python${pyver}-venv" 2>&1 \
+           | sed 's/^/buddy3d-image: apt: /'; then
+      log "apt install failed; refreshing the package lists and retrying"
+      chroot "$root" apt-get update -qq 2>&1 | sed 's/^/buddy3d-image: apt: /' || true
+      chroot "$root" apt-get install -y --no-install-recommends "python${pyver}-venv" 2>&1 \
+         | sed 's/^/buddy3d-image: apt: /' || true
+   fi
+fi
+if ! chroot "$root" /usr/bin/python3 -c 'import ensurepip' >/dev/null 2>&1; then
+   log "ERROR: ensurepip is unavailable in the image; refusing to ship a venv-less image"
+   exit 1
+fi
+if ! chroot "$root" /usr/bin/python3 -m venv --system-site-packages "$APP_ROOT/venv"; then
+   log "ERROR: failed to create the runtime venv at $APP_ROOT/venv"
+   exit 1
+fi
+if [ ! -x "$root$APP_ROOT/venv/bin/python" ]; then
+   log "ERROR: $APP_ROOT/venv/bin/python is missing after venv creation"
+   exit 1
+fi
+if ! chroot "$root" "$APP_ROOT/venv/bin/pip" install \
+      --require-hashes --no-cache-dir -r "$APP_ROOT/requirements.lock"; then
+   log "ERROR: pip install --require-hashes failed; refusing to ship a venv-less image"
+   exit 1
+fi
+# The venv is part of the immutable factory tree: root:root and never
+# group/world-writable (B3).
+chown -R root:root "$root$APP_ROOT/venv"
+chmod -R go-w "$root$APP_ROOT/venv"
+
+# The reused openssh-server layer runs `uchroot $1 'mkdir -p ${HOME}/.ssh'` as
+# user1 (prusa-cam). Since B3 the factory tree is root-owned, so that hook would
+# fail with "Permission denied" and abort the build. Pre-create the service
+# account's .ssh directory (0700, owned by the account); SSH itself stays
+# disabled by default until an operator explicitly enables it (AC-20).
+install -d -m 0700 "$root$APP_ROOT/.ssh"
+chown "$uid:$gid" "$root$APP_ROOT/.ssh"
 
 # --- enable the runtime graph (source §3.2) ---------------------------------
 # Only the pre-runtime gate, pi-persist.service and the boot-mode selector are
@@ -135,6 +204,7 @@ python3 "$assets/build-info.py" \
    --os-suite "${PRUSA_OS_SUITE:-trixie}" \
    --kernel-package "${PRUSA_KERNEL_PACKAGE:-linux-image-rpi-v8}" \
    --package-manifest "$manifest_arg" \
+   --python-lock-sha256 "$lock_sha256" \
    --output "$root/usr/share/prusa-buddy3d-camera/build-info.json"
 
 # --- durable configuration directory + ownership ----------------------------

@@ -71,9 +71,39 @@
 ---
 mmdebstrap:
   packages:
+    # Package installation here is authoritative. The config's top-level
+    # `packages:` list is expanded to IGconf_packages_* but the built-in
+    # customize20-packages hook does not reliably install it in this tool
+    # revision (observed on the arm64 build host: the appliance packages were
+    # missing and the venv had no ensurepip). Keep both lists in sync.
     - dosfstools
     - e2fsprogs
     - initramfs-tools
+    # Appliance runtime (mirrors image/config/buddy3d-pi-zero2w.yaml).
+    - rpicam-apps
+    - python3
+    # Versioned venv package: trixie's python3-venv metapackage pins an exact
+    # (older) python3 in the pinned snapshot and does not bring ensurepip.
+    - python3.13-venv
+    - python3-pip
+    - python3-gi
+    - python3-gst-1.0
+    - gstreamer1.0-tools
+    - gstreamer1.0-plugins-base
+    - gstreamer1.0-plugins-good
+    - gstreamer1.0-plugins-bad
+    - gstreamer1.0-nice
+    - gstreamer1.0-rtsp
+    - gir1.2-gst-rtsp-server-1.0
+    - gir1.2-gst-plugins-bad-1.0
+    - overlayroot
+    - cloud-guest-utils
+    - rsync
+    - curl
+    - samba
+    - wpasupplicant
+    - ca-certificates
+    - sudo
   customize-hooks:
     # Factory app + image layout. See image/assets/install-factory-app.sh.
     - >-

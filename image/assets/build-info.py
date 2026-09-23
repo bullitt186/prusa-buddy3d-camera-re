@@ -4,9 +4,9 @@
 Standard library only, as required for image assets. Records the application
 version (``--version``, defaulting to ``PRUSA_IMAGE_VERSION`` or
 ``0.0.0+local``), the source commit, the pinned image-builder revision, the OS
-suite, the kernel package, and (when WP-2b supplies it) the installed-package
-manifest. Output is deterministic: keys are sorted and no wall-clock time is
-embedded; SOURCE_DATE_EPOCH is copied through when present.
+suite, the kernel package, the installed-package manifest, and the sha256 of the
+hash-locked Python dependency set. Output is deterministic: keys are sorted and
+no wall-clock time is embedded; SOURCE_DATE_EPOCH is copied through when present.
 
 The ``version`` field is read back at runtime by ``pi-impersonator/app_version.py``
 (WP-R2). Release automation (WP-R5) owns the actual release versioning; this
@@ -30,6 +30,12 @@ def main(argv=None):
     parser.add_argument("--kernel-package", required=True)
     parser.add_argument("--package-manifest", default="")
     parser.add_argument(
+        "--python-lock-sha256",
+        default="",
+        help="sha256 of the hash-locked Python dependency set "
+             "(image/requirements.lock); recorded as 'python_lock_sha256'",
+    )
+    parser.add_argument(
         "--version",
         default=os.environ.get("PRUSA_IMAGE_VERSION") or "0.0.0+local",
         help="application/image version recorded as 'version' "
@@ -47,6 +53,9 @@ def main(argv=None):
         "kernel_package": args.kernel_package,
         # WP-2b fills this; null until then.
         "package_manifest": args.package_manifest or None,
+        # WP-R3/AC-14: sha256 of the installed hash-locked requirements.lock.
+        # null when the caller does not supply it (existing callers unaffected).
+        "python_lock_sha256": args.python_lock_sha256 or None,
     }
     source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if source_date_epoch:

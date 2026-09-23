@@ -24,6 +24,8 @@ except ImportError:  # pragma: no cover - environment normally has PyYAML
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IMAGE = REPO_ROOT / "image"
 LOCK = IMAGE / "rpi-image-gen.lock"
+REQUIREMENTS_IN = IMAGE / "requirements.in"
+REQUIREMENTS_LOCK = IMAGE / "requirements.lock"
 CONFIG = IMAGE / "config" / "buddy3d-pi-zero2w.yaml"
 LAYER_DIR = IMAGE / "layer"
 ASSETS = IMAGE / "assets"
@@ -53,6 +55,31 @@ IMAGE_ONLY_UNITS = [
     "prusa-camera.target",
     "prusa-boot-mode.service",
 ]
+
+# Direct Python runtime dependencies (image/requirements.in / AC-14).
+DIRECT_PYTHON_DEPS = ("aiohttp", "python-socketio", "paho-mqtt")
+
+
+def lock_package_specs(text):
+    """Return the pinned package specs in a pip-compile lock file.
+
+    Comment lines are dropped and backslash continuations are re-joined so a
+    pinned package and its ``--hash`` lines form one spec.
+    """
+    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    specs = []
+    buf = ""
+    for line in lines:
+        if line.rstrip().endswith("\\"):
+            buf += line.rstrip()[:-1] + " "
+        else:
+            buf += line
+            specs.append(buf)
+            buf = ""
+    if buf:
+        specs.append(buf)
+    return [s for s in specs if "==" in s and not s.lstrip().startswith("-")]
+
 
 
 def read_text(path):
@@ -108,6 +135,8 @@ class ImageScaffoldingTests(unittest.TestCase):
         required = [
             IMAGE / "README.md",
             LOCK,
+            REQUIREMENTS_IN,
+            REQUIREMENTS_LOCK,
             CONFIG,
             LAYER_DIR / "buddy3d-image.yaml",
             LAYER_DIR / "buddy3d-suite.yaml",
@@ -164,6 +193,11 @@ class ImageScaffoldingTests(unittest.TestCase):
         packages = set(config["packages"])
         self.assertIn("overlayroot", packages)
         self.assertIn("cloud-guest-utils", packages)
+        # WP-R3/AC-14: the venv build needs ensurepip (versioned venv package)
+        # and pip inside the image. python3-venv alone does not bring ensurepip
+        # in the pinned trixie snapshot (see the package-list comment).
+        self.assertIn("python3.13-venv", packages)
+        self.assertIn("python3-pip", packages)
 
     @unittest.skipUnless(yaml is not None, "PyYAML not available")
     def test_layer_metadata_declares_layout_variables(self):
@@ -174,6 +208,28 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn("X-Env-Var-persist_part_size: 512M", text)
         self.assertIn("X-Env-Var-assetsdir: ${DIRECTORY}/../assets", text)
         self.assertIn("X-Env-Layer-Requires: image-base", text)
+
+    @unittest.skipUnless(yaml is not None, "PyYAML not available")
+    def test_layer_packages_install_the_appliance_runtime(self):
+        # The config's IGconf_packages list is not reliably installed by the
+        # built-in customize20-packages hook, so the layer's mmdebstrap.packages
+        # list is authoritative for the runtime (WP-R3 build bring-up).
+        doc = yaml.safe_load(read_text(LAYER_DIR / "buddy3d-image.yaml"))
+        packages = set(doc["mmdebstrap"]["packages"])
+        for name in (
+            "rpicam-apps",
+            "python3.13-venv",
+            "python3-pip",
+            "python3-gi",
+            "gstreamer1.0-tools",
+            "gstreamer1.0-nice",
+            "gir1.2-gst-rtsp-server-1.0",
+            "overlayroot",
+            "cloud-guest-utils",
+            "samba",
+            "sudo",
+        ):
+            self.assertIn(name, packages, name)
 
     def test_layout_declares_three_ordered_partitions(self):
         text = read_text(LAYER_DIR / "genimage.cfg.in.ext4")
@@ -527,6 +583,78 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertRegex(text, r'--package-manifest\s+"\$manifest_arg"')
         self.assertRegex(text, r'MANIFEST_IMAGE_PATH=/usr/share/prusa-buddy3d-camera/packages\.txt')
 
+    # --- WP-R3 / AC-14: hash-locked Python venv -----------------------------
+
+    def test_requirements_in_lists_direct_dependencies(self):
+        text = read_text(REQUIREMENTS_IN)
+        for dep in DIRECT_PYTHON_DEPS:
+            self.assertIn(dep, text, f"{dep} missing from requirements.in")
+
+    def test_requirements_lock_pins_every_package_with_hashes(self):
+        text = read_text(REQUIREMENTS_LOCK)
+        specs = lock_package_specs(text)
+        self.assertGreaterEqual(len(specs), len(DIRECT_PYTHON_DEPS))
+        names = []
+        for spec in specs:
+            name = spec.split("==", 1)[0].strip().lower()
+            names.append(name)
+            self.assertIn(
+                "--hash=sha256:", spec, f"{name} has no sha256 hash in the lock"
+            )
+        for dep in DIRECT_PYTHON_DEPS:
+            self.assertIn(dep, names, f"{dep} missing from requirements.lock")
+        self.assertIn(
+            "--extra-index-url https://www.piwheels.org/simple", text
+        )
+
+    def test_installer_copies_lock_and_builds_hashed_venv(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        # The committed lock is copied into the image verbatim, mode 0644.
+        self.assertIn(
+            'install -m 0644 "$repo/image/requirements.lock" '
+            '"$root$APP_ROOT/requirements.lock"',
+            text,
+        )
+        # System site packages keeps Debian's PyGObject/GStreamer visible.
+        self.assertIn(
+            "/usr/bin/python3 -m venv --system-site-packages", text
+        )
+        # Hash enforcement and no on-disk wheel cache.
+        self.assertIn("--require-hashes", text)
+        self.assertIn("--no-cache-dir", text)
+        self.assertIn('"$APP_ROOT/requirements.lock"', text)
+        # The venv is part of the immutable root-owned factory tree.
+        self.assertIn('chown -R root:root "$root$APP_ROOT/venv"', text)
+        # A venv/pip failure must abort the build, never ship a venv-less image.
+        self.assertIn("refusing to ship a venv-less image", text)
+        self.assertIn("exit 1", text)
+
+    def test_installer_records_python_lock_sha256(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn("sha256sum", text)
+        self.assertRegex(text, r'--python-lock-sha256\s+"\$lock_sha256"')
+
+    def test_python_hook_is_noop_owned_by_installer(self):
+        text = read_text(
+            LAYER_DIR / "bdebstrap" / "customize95-buddy3d-python"
+        )
+        # It must document the ownership boundary and exit cleanly.
+        self.assertIn("install-factory-app.sh", text)
+        self.assertIn("exit 0", text)
+        # It must not build the venv itself (hook ordering is not guaranteed).
+        # Comments may name the installer's commands; only executable lines
+        # matter here.
+        body = "\n".join(code_lines(text))
+        self.assertNotIn("python3 -m venv", body)
+        self.assertNotIn("--require-hashes", body)
+        self.assertNotIn("pip install", body)
+        result = subprocess.run(
+            ["bash", "-n", str(LAYER_DIR / "bdebstrap" / "customize95-buddy3d-python")],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_build_info_generator_records_nonempty_package_manifest(self):
         # Functional guard for AC-14: the generator records the supplied path.
         with tempfile.TemporaryDirectory() as tmp:
@@ -602,6 +730,27 @@ class ImageScaffoldingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             doc = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(doc["version"], "4.5.6")
+
+    def test_build_info_generator_records_python_lock_sha256(self):
+        # WP-R3/AC-14: the lock digest is recorded in build-info.json.
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = self._run_build_info(
+                output, "--python-lock-sha256", digest
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(doc["python_lock_sha256"], digest)
+
+    def test_build_info_generator_python_lock_defaults_null(self):
+        # Existing callers that omit the flag still work: the field is null.
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = self._run_build_info(output)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIsNone(doc.get("python_lock_sha256"))
 
     def test_build_info_generator_is_stdlib_only(self):
         source = read_text(ASSETS / "build-info.py")

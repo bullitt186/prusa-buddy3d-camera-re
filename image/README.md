@@ -45,7 +45,7 @@ image/
     pre-image.sh                    renders genimage.cfg
     post-build.sh                   strips build-time identity
     mke2fs.conf                     deterministic ext4 parameters
-    bdebstrap/customize95-buddy3d-python  WP-2b extension point (stub)
+    bdebstrap/customize95-buddy3d-python  no-op (venv built by install-factory-app.sh)
   assets/
     prusa-data-grow.sh              first-boot PERSIST growth (AC-11)
     systemd/prusa-data-grow.service image-only grow unit
@@ -143,14 +143,17 @@ revision, not invented syntax:
    configuration. This is the mechanism already proven on the development Pi
    (`pi-impersonator/deploy.sh`), but it must be confirmed resolvable from the
    pinned Trixie/Raspberry Pi repositories at build time.
-3. **WP-2b is not implemented.** Hash-locked Python dependencies, the runtime
-   venv at `/opt/prusa-cam/venv`, the SBOM, and the installed-package manifest
-   are stubbed at `layer/bdebstrap/customize95-buddy3d-python`. The app units
-   reference `/opt/prusa-cam/venv/bin/python`, so the image is not runnable
-   until WP-2b lands.
-4. **WP-2b/WP-7 scripts are out of scope.** `scripts/validate-image.sh`,
-   `scripts/make-release.sh`, and `imager/os-list.template.json` are not part of
-   this increment.
+3. **Hash-locked Python deps (WP-R3).** `requirements.lock` pins the direct
+   deps (aiohttp, python-socketio, paho-mqtt) and their transitive closure with
+   `--hash=sha256` entries. `install-factory-app.sh` copies it to
+   `/opt/prusa-cam/requirements.lock` and builds `/opt/prusa-cam/venv` with
+   `python3 -m venv --system-site-packages` + `pip install --require-hashes
+   --no-cache-dir`; the lock digest is recorded in `build-info.json` as
+   `python_lock_sha256`. The bdebstrap `customize95-buddy3d-python` hook is an
+   explicit no-op. The SBOM is still owned by WP-5.
+4. **Release scripts are out of scope.** `scripts/make-release.sh` and
+   `imager/os-list.template.json` are not part of this increment.
+   `scripts/validate-image.sh` is implemented and asserts the venv/lock above.
 5. **Fixed disk signature trade-off.** A fixed MBR signature gives static,
    deterministic PARTUUIDs and simple first-boot validation, at the cost of
    identical PARTUUIDs on every unit. They are never present on one system

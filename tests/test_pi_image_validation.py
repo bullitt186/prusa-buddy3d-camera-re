@@ -198,6 +198,38 @@ def make_rootfs(base):
     )
     launcher.chmod(0o755)
 
+    # Hash-locked runtime venv + dependency lock (WP-R3/AC-14). The installer
+    # copies the lock mode 0644 and builds the venv with
+    # ``--system-site-packages``; the fixture mirrors that layout. Everything
+    # is owned by the synthetic "root" account (the test runner).
+    lock = app / "requirements.lock"
+    lock.write_text(
+        "aiohttp==3.14.3 \\\n"
+        f"    --hash=sha256:{'0' * 64}\n"
+        "python-socketio==5.17.0 \\\n"
+        f"    --hash=sha256:{'1' * 64}\n"
+        "paho-mqtt==2.1.0 \\\n"
+        f"    --hash=sha256:{'2' * 64}\n",
+        encoding="utf-8",
+    )
+    lock.chmod(0o644)
+
+    venv = app / "venv"
+    venv_bin = venv / "bin"
+    venv_bin.mkdir(parents=True)
+    venv.chmod(0o755)
+    venv_bin.chmod(0o755)
+    venv_python = venv_bin / "python"
+    venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    venv_python.chmod(0o755)
+    (venv / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = true\n",
+        encoding="utf-8",
+    )
+    site_packages = venv / "lib" / "python3.13" / "site-packages"
+    for module in ("aiohttp", "socketio", "paho"):
+        (site_packages / module).mkdir(parents=True)
+
     # Privileged helper + narrow sudoers rule (B3). Both are owned by the
     # synthetic "root" account (the test runner) with the restricted modes the
     # image installs, so the validator's ownership/mode assertions are exercised.
@@ -770,6 +802,101 @@ class PrivilegedHelperValidationTests(unittest.TestCase):
         self.assertIn(
             "prusa-camera.target must Wants= prusa-admin.service", result.stdout
         )
+
+
+class PythonVenvValidationTests(unittest.TestCase):
+    """WP-R3/AC-14: the runtime venv + hash-locked requirements.lock."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    @staticmethod
+    def _app(root):
+        return Path(root) / "opt" / "prusa-cam"
+
+    def test_good_rootfs_reports_venv_and_lock(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "/opt/prusa-cam/venv/bin/python is root-owned", result.stdout
+        )
+        self.assertIn(
+            "/opt/prusa-cam/requirements.lock is root:root mode 0644",
+            result.stdout,
+        )
+        self.assertIn("each with a sha256 hash", result.stdout)
+        self.assertIn("venv site-packages contains aiohttp", result.stdout)
+        self.assertIn("no pip wheel cache inside venv", result.stdout)
+        self.assertIn("no unpinned requirements.txt", result.stdout)
+
+    def test_missing_venv_fails(self):
+        root = self._root()
+        shutil.rmtree(self._app(root) / "venv")
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("venv/bin/python is missing", result.stdout)
+
+    def test_missing_lock_fails(self):
+        root = self._root()
+        (self._app(root) / "requirements.lock").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requirements.lock is missing", result.stdout)
+
+    def test_unhashed_lock_fails(self):
+        root = self._root()
+        (self._app(root) / "requirements.lock").write_text(
+            "aiohttp==3.14.3\n"
+            f"python-socketio==5.17.0 \\\n    --hash=sha256:{'0' * 64}\n"
+            f"paho-mqtt==2.1.0 \\\n    --hash=sha256:{'1' * 64}\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("without a sha256 hash", result.stdout)
+        self.assertIn("aiohttp", result.stdout)
+
+    def test_lock_missing_direct_dependency_fails(self):
+        root = self._root()
+        (self._app(root) / "requirements.lock").write_text(
+            f"aiohttp==3.14.3 \\\n    --hash=sha256:{'0' * 64}\n"
+            f"python-socketio==5.17.0 \\\n    --hash=sha256:{'1' * 64}\n",
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing direct dependencies", result.stdout)
+        self.assertIn("paho-mqtt", result.stdout)
+
+    def test_group_writable_venv_python_fails(self):
+        root = self._root()
+        (self._app(root) / "venv" / "bin" / "python").chmod(0o775)
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("venv python must not be group/world-writable", result.stdout)
+
+    def test_wheel_cache_fails(self):
+        root = self._root()
+        wheel = (
+            self._app(root) / "venv" / "lib" / "python3.13"
+            / "site-packages" / "aiohttp" / "cached.whl"
+        )
+        wheel.write_text("synthetic wheel\n", encoding="utf-8")
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pip wheel cache", result.stdout)
 
 
 @unittest.skipUnless(HAS_BOOT_TOOLS, "mkfs.fat/mcopy/mtype not available")
