@@ -188,11 +188,36 @@ PYTHON_BINARY = '/usr/bin/python3'
 #: (AC-32), so a compromised service account cannot redirect verification.
 MANIFEST_URL_ENV = 'PRUSA_UPDATE_MANIFEST_URL'
 HEALTH_ENDPOINTS_ENV = 'PRUSA_UPDATE_HEALTH_ENDPOINTS'
-#: Local-only health endpoints; Prusa reachability is intentionally excluded.
+#: Local-only health endpoints. The default is the release app's own local
+#: HTTP/ONVIF facade on port 80 (started by the release ``main.py``), so a pass
+#: proves the newly activated release is actually serving -- not an unrelated
+#: process that happens to hold a port. Prusa cloud reachability is deliberately
+#: excluded (an Internet outage must never trigger a rollback).
 DEFAULT_HEALTH_ENDPOINTS = ('127.0.0.1:80',)
+#: RTSP ports are deliberately NOT in :data:`DEFAULT_HEALTH_ENDPOINTS`: a device
+#: with RTSP intentionally disabled must still pass a post-update health check.
+#: Operators who want RTSP/ONVIF coverage list them through
+#: :data:`HEALTH_ENDPOINTS_ENV`; every listed endpoint must then pass.
+RTSP_HEALTH_PORTS = (8554, 8555)
+
+#: Core release modules that must import cleanly under the release interpreter.
+#: Chosen because they are stdlib-only at import time (no display/GStreamer and
+#: no eager ``paho``/``aiohttp`` import), so the check proves the staged release
+#: tree is self-consistent without requiring a display or network.
+PREFLIGHT_IMPORT_MODULES = ('config_schema', 'mqtt_service', 'updater', 'settings_store')
+#: Durable device document the migration dry-run loads and migrates (AC-30,
+#: §7.2 step 7). Mirrors :data:`config_schema.DEVICE_TOML_PATH`; kept as a plain
+#: string so this module does not need to import :mod:`config_schema` on the host
+#: (the dry-run imports it *inside* the release interpreter).
+DEFAULT_DEVICE_CONFIG_PATH = '/data/prusa-cam/config/device.toml'
+#: Bounded wall-clock timeout for each preflight subprocess (compile, import,
+#: migration dry-run).
+PREFLIGHT_TIMEOUT_SECONDS = 60.0
 
 _SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 _CONTROL_RE = re.compile(r'[\x00-\x1f\x7f]+')
+#: A bare Python exception class name (the only dry-run stderr we echo back).
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _REDACTED = '<redacted>'
 
 
@@ -1258,50 +1283,196 @@ def default_build_venv(staging_dir, manifest):
     return True, ''
 
 
-def default_preflight(staging_dir, manifest):
-    """Compile the staged release and require an application entry point."""
+def _default_preflight_runner(args, timeout):
+    """Run a preflight command with a bounded timeout (text output)."""
+    return subprocess.run(
+        list(args), capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def _preflight_python(staging_dir, python):
+    """Release interpreter: explicit override, release venv, then system Python."""
+    if isinstance(python, str) and python:
+        return python
+    venv_python = os.path.join(staging_dir, 'venv', 'bin', 'python')
+    if os.path.isfile(venv_python):
+        return venv_python
+    return PYTHON_BINARY
+
+
+def _preflight_returncode(result):
+    """Best-effort return code of a runner result (missing means failure)."""
+    code = getattr(result, 'returncode', 1)
+    return code if isinstance(code, int) and not isinstance(code, bool) else 1
+
+
+def _run_preflight_command(runner, args, timeout):
+    """Call ``runner``; return ``(result_or_None, exception_name)``; never raises."""
+    try:
+        return runner(list(args), timeout), ''
+    except Exception as e:  # noqa: BLE001 - a broken runner is a bounded failure
+        return None, type(e).__name__
+
+
+def _preflight_reason(prefix, exception_name):
+    """Append a bounded exception class name when it is a plain identifier."""
+    if isinstance(exception_name, str) and _IDENTIFIER_RE.match(exception_name):
+        return _sanitize(f'{prefix} ({exception_name})')
+    return prefix
+
+
+def _import_check_script(staging_dir, modules):
+    """Script that imports the release's core modules from the staged tree.
+
+    The staging directory is prepended to ``sys.path`` explicitly so the check
+    resolves the release modules regardless of the service working directory
+    (which stays ``/opt/prusa-cam``).
+    """
+    imports = '; '.join(f'import {name}' for name in modules)
+    return f'import sys; sys.path.insert(0, {str(staging_dir)!r}); {imports}'
+
+
+def _migration_dry_run_script(staging_dir, config_path):
+    """Script that parses + migrates the durable device document, secret-free.
+
+    Loads ``config_path`` with the release's :mod:`config_schema`, migrates it up
+    to the release's ``SCHEMA_VERSION``, and exits non-zero on any failure. Only
+    the exception *class name* is ever written to stderr, never a document value,
+    so the dry-run cannot leak configuration contents or secrets.
+    """
+    return (
+        'import sys\n'
+        f'sys.path.insert(0, {str(staging_dir)!r})\n'
+        'import config_schema as _c\n'
+        'try:\n'
+        f'    with open({str(config_path)!r}, encoding="utf-8") as _h:\n'
+        '        _text = _h.read()\n'
+        '    _cfg = _c.parse_device(_text)\n'
+        '    _c.migrate_device(_cfg, _cfg.get("schema_version", 1))\n'
+        'except Exception as _e:\n'
+        '    sys.stderr.write(type(_e).__name__)\n'
+        '    sys.exit(1)\n'
+    )
+
+
+def default_preflight(staging_dir, manifest, *, runner=None, python=None,
+                      config_path=DEFAULT_DEVICE_CONFIG_PATH):
+    """Compile, import-check, and migration-dry-run the staged release.
+
+    §7.2 step 7. In order:
+
+    1. ``main.py`` must be present (the launcher entry point).
+    2. ``compileall`` over the staged tree.
+    3. An **import check** that imports the release's stdlib-only core modules
+       (:data:`PREFLIGHT_IMPORT_MODULES`) with the release interpreter.
+    4. A **migration dry-run** that parses the durable device document at
+       ``config_path`` and runs :func:`config_schema.migrate_device` up to the
+       release's ``SCHEMA_VERSION``. A missing document (first install /
+       unclaimed device) skips the dry-run and still passes. The dry-run never
+       prints configuration contents or secrets; only the exception class name
+       reaches the bounded reason.
+
+    Returns ``(ok, reason)`` and never raises. ``runner(args, timeout)`` is
+    injectable so tests never invoke a real subprocess; ``python`` overrides the
+    release interpreter and ``config_path`` overrides the device document.
+    """
+    try:
+        return _default_preflight(
+            staging_dir, manifest, runner, python, config_path)
+    except Exception as e:  # noqa: BLE001 - preflight must never raise
+        log.debug('updater_install: preflight failed: %s', type(e).__name__)
+        return False, 'release preflight failed'
+
+
+def _default_preflight(staging_dir, manifest, runner, python, config_path):
     if not os.path.isfile(os.path.join(staging_dir, 'main.py')):
         return False, 'release is missing main.py'
-    python = os.path.join(staging_dir, 'venv', 'bin', 'python')
-    if not os.path.isfile(python):
-        python = PYTHON_BINARY
-    try:
-        result = subprocess.run(
-            [python, '-m', 'compileall', '-q', staging_dir],
-            capture_output=True, text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS, check=False)
-    except Exception as e:  # noqa: BLE001 - preflight must never raise
-        return False, f'release preflight failed ({type(e).__name__})'
-    if result.returncode != 0:
+    interpreter = _preflight_python(staging_dir, python)
+    runner = runner or _default_preflight_runner
+
+    result, exception_name = _run_preflight_command(
+        runner, [interpreter, '-m', 'compileall', '-q', staging_dir],
+        PREFLIGHT_TIMEOUT_SECONDS)
+    if result is None:
+        return False, _preflight_reason('release preflight failed', exception_name)
+    if _preflight_returncode(result) != 0:
         return False, 'release preflight compilation failed'
+
+    script = _import_check_script(staging_dir, PREFLIGHT_IMPORT_MODULES)
+    result, exception_name = _run_preflight_command(
+        runner, [interpreter, '-c', script], PREFLIGHT_TIMEOUT_SECONDS)
+    if result is None:
+        return False, _preflight_reason('release import check failed', exception_name)
+    if _preflight_returncode(result) != 0:
+        return False, 'release core modules failed to import'
+
+    if isinstance(config_path, str) and config_path and os.path.isfile(config_path):
+        script = _migration_dry_run_script(staging_dir, config_path)
+        result, exception_name = _run_preflight_command(
+            runner, [interpreter, '-c', script], PREFLIGHT_TIMEOUT_SECONDS)
+        if result is None:
+            return False, _preflight_reason(
+                'release configuration migration dry-run failed', exception_name)
+        if _preflight_returncode(result) != 0:
+            return False, _migration_dry_run_reason(result)
     return True, ''
 
 
+def _migration_dry_run_reason(result):
+    """Bounded, non-secret reason from the dry-run's stderr (class name only)."""
+    base = 'release configuration migration dry-run failed'
+    detail = _bounded_text(getattr(result, 'stderr', ''), MAX_REASON_LENGTH)
+    if detail and _IDENTIFIER_RE.match(detail):
+        return _sanitize(f'{base} ({detail})')
+    return base
+
+
 def _parse_endpoints(raw):
+    """Parse ``host:port,...`` tolerantly, skipping malformed entries.
+
+    Empty entries, entries without a port, an empty host, a non-numeric port and
+    an out-of-range port are all dropped rather than raising.
+    """
     endpoints = []
     for item in str(raw).split(','):
         item = item.strip()
         if not item or ':' not in item:
             continue
         host, _, port = item.rpartition(':')
+        host = host.strip()
+        if not host:
+            continue
         try:
-            endpoints.append((host, int(port)))
+            number = int(port)
         except ValueError:
             continue
+        if not 1 <= number <= 65535:
+            continue
+        endpoints.append((host, number))
     return endpoints
 
 
 def default_health_check(version):
     """Local-only health probe (source/local HTTP/ONVIF/RTSP/app).
 
-    Prusa cloud reachability is deliberately excluded (an Internet outage must
-    never trigger a rollback). Endpoints are configurable through
-    ``PRUSA_UPDATE_HEALTH_ENDPOINTS`` (``host:port,...``); the default is the
-    local admin/ONVIF port. Returns ``True`` only when every endpoint accepts a
-    TCP connection.
+    The default endpoint is the release app's own local HTTP/ONVIF facade on
+    port 80 (started by the release ``main.py``), so a pass proves the newly
+    activated release is serving rather than an unrelated process. Prusa cloud
+    reachability is deliberately excluded (an Internet outage must never trigger
+    a rollback).
+
+    RTSP ports (:data:`RTSP_HEALTH_PORTS`, 8554/8555) are intentionally *not* in
+    the default set, so a device with RTSP disabled still passes. Operators who
+    want RTSP/ONVIF coverage list them through :data:`HEALTH_ENDPOINTS_ENV`
+    (``host:port,...``); every listed endpoint must then pass. Returns ``True``
+    only when every endpoint accepts a TCP connection.
     """
     raw = os.environ.get(HEALTH_ENDPOINTS_ENV)
-    endpoints = _parse_endpoints(raw) if raw else list(DEFAULT_HEALTH_ENDPOINTS)
+    if raw:
+        endpoints = _parse_endpoints(raw)
+    else:
+        # The defaults are documented in the same ``host:port`` form as the
+        # environment override, so they go through the same tolerant parser.
+        endpoints = _parse_endpoints(','.join(DEFAULT_HEALTH_ENDPOINTS))
     if not endpoints:
         return False
     for host, port in endpoints:
@@ -1707,6 +1878,7 @@ __all__ = [
     'CheckResult',
     'DATA_ROOT',
     'DEFAULT_CURRENT_LINK',
+    'DEFAULT_DEVICE_CONFIG_PATH',
     'DEFAULT_FACTORY_APP',
     'DEFAULT_LAST_CHECK_PATH',
     'DEFAULT_PREVIOUS_LINK',
@@ -1717,6 +1889,9 @@ __all__ = [
     'EXTRACTED_EXPANSION_FACTOR',
     'FREE_SPACE_HEADROOM_BYTES',
     'HEALTH_TIMEOUT_SECONDS',
+    'PREFLIGHT_IMPORT_MODULES',
+    'PREFLIGHT_TIMEOUT_SECONDS',
+    'RTSP_HEALTH_PORTS',
     'INSTALL_FAILED',
     'INSTALL_INSTALLED',
     'INSTALL_ROLLED_BACK',

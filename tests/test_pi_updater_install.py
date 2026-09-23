@@ -1144,6 +1144,271 @@ class DefaultPruneTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# default_preflight (WP-R4c-2b): compile + import + migration dry-run
+# --------------------------------------------------------------------------- #
+
+class FakePreflightRunner:
+    """Records preflight commands and returns per-step return codes.
+
+    Never invokes a real subprocess; ``raise_on`` selects a step that raises so
+    the never-raise/bounded-reason path can be exercised.
+    """
+
+    def __init__(self, *, compile_rc=0, import_rc=0, migrate_rc=0,
+                 import_stderr='', migrate_stderr='', raise_on=None):
+        self.compile_rc = compile_rc
+        self.import_rc = import_rc
+        self.migrate_rc = migrate_rc
+        self.import_stderr = import_stderr
+        self.migrate_stderr = migrate_stderr
+        self.raise_on = raise_on
+        self.calls = []
+
+    def _kind(self, args):
+        if '-m' in args and 'compileall' in args:
+            return 'compile'
+        if '-c' in args:
+            script = args[args.index('-c') + 1]
+            return 'migrate' if 'migrate_device' in script else 'import'
+        return 'other'
+
+    def __call__(self, args, timeout):
+        args = list(args)
+        kind = self._kind(args)
+        self.calls.append((args, timeout))
+        if self.raise_on == kind:
+            raise RuntimeError('runner boom')
+        returncodes = {
+            'compile': self.compile_rc,
+            'import': self.import_rc,
+            'migrate': self.migrate_rc,
+        }
+        stderrs = {
+            'import': self.import_stderr,
+            'migrate': self.migrate_stderr,
+        }
+        return subprocess.CompletedProcess(
+            args, returncodes.get(kind, 0), '', stderrs.get(kind, ''))
+
+    def kinds(self):
+        return [self._kind(args) for args, _ in self.calls]
+
+    def args_text(self):
+        return ' '.join(' '.join(args) for args, _ in self.calls)
+
+
+class DefaultPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.staging = os.path.join(self.tmp.name, 'release')
+        os.makedirs(self.staging)
+        (Path(self.staging) / 'main.py').write_text('# release\n', encoding='utf-8')
+        self.config = os.path.join(self.tmp.name, 'device.toml')
+        self.python = '/release/venv/bin/python'
+
+    def _run(self, runner, *, config_path=None):
+        return ui.default_preflight(
+            self.staging, make_manifest(), runner=runner, python=self.python,
+            config_path=config_path if config_path is not None else self.config)
+
+    def test_happy_path_compiles_then_imports(self):
+        # No device document: the migration dry-run is skipped.
+        runner = FakePreflightRunner()
+        ok, reason = self._run(runner)
+        self.assertTrue(ok, reason)
+        self.assertEqual(runner.kinds(), ['compile', 'import'])
+        self.assertFalse(os.path.exists(self.config))
+
+    def test_uses_the_release_interpreter(self):
+        runner = FakePreflightRunner()
+        self.assertTrue(self._run(runner)[0])
+        for args, _ in runner.calls:
+            self.assertEqual(args[0], self.python)
+        for args, _ in runner.calls:
+            if '-c' in args:
+                self.assertIn('sys.path.insert(0, ', args[args.index('-c') + 1])
+
+    def test_import_check_uses_documented_core_modules(self):
+        runner = FakePreflightRunner()
+        self.assertTrue(self._run(runner)[0])
+        import_calls = [
+            args for args, _ in runner.calls
+            if '-c' in args and 'migrate_device' not in args[args.index('-c') + 1]
+        ]
+        self.assertEqual(len(import_calls), 1)
+        script = import_calls[0][import_calls[0].index('-c') + 1]
+        for module in ui.PREFLIGHT_IMPORT_MODULES:
+            self.assertIn(f'import {module}', script)
+
+    def test_missing_main_py_fails_without_running(self):
+        os.remove(os.path.join(self.staging, 'main.py'))
+        runner = FakePreflightRunner()
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertIn('main.py', reason)
+        self.assertEqual(runner.calls, [])
+
+    def test_compile_failure_is_bounded(self):
+        runner = FakePreflightRunner(compile_rc=1)
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertIn('compilation', reason)
+        self.assertEqual(runner.kinds(), ['compile'])
+
+    def test_import_failure_is_bounded(self):
+        runner = FakePreflightRunner(import_rc=1)
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertIn('import', reason)
+        self.assertLessEqual(len(reason), ui.MAX_REASON_LENGTH)
+        self.assertEqual(runner.kinds(), ['compile', 'import'])
+
+    def test_migration_failure_is_bounded_and_non_secret(self):
+        secret = 'super-secret-config-value'
+        with open(self.config, 'w', encoding='utf-8') as handle:
+            handle.write(f'camera_name = "{secret}"\n')
+        runner = FakePreflightRunner(migrate_rc=1, migrate_stderr='ValidationError')
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertIn('migration', reason)
+        self.assertIn('ValidationError', reason)
+        self.assertNotIn(secret, reason)
+        self.assertLessEqual(len(reason), ui.MAX_REASON_LENGTH)
+        self.assertEqual(runner.kinds(), ['compile', 'import', 'migrate'])
+        # The dry-run script carries only the path, never the document contents.
+        self.assertNotIn(secret, runner.args_text())
+
+    def test_migration_dry_run_passes(self):
+        with open(self.config, 'w', encoding='utf-8') as handle:
+            handle.write('schema_version = 1\ncamera_name = "Cam"\n')
+        runner = FakePreflightRunner()
+        ok, reason = self._run(runner)
+        self.assertTrue(ok, reason)
+        self.assertEqual(runner.kinds(), ['compile', 'import', 'migrate'])
+
+    def test_missing_device_document_skips_migration_and_passes(self):
+        runner = FakePreflightRunner(migrate_rc=1)
+        ok, reason = self._run(runner, config_path=os.path.join(
+            self.tmp.name, 'does-not-exist.toml'))
+        self.assertTrue(ok, reason)
+        self.assertEqual(runner.kinds(), ['compile', 'import'])
+
+    def test_reason_never_leaks_secret_stderr(self):
+        secret = 'token=deadbeefcafebabe'
+        runner = FakePreflightRunner(import_rc=1, import_stderr=secret)
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertNotIn(secret, reason)
+        self.assertLessEqual(len(reason), ui.MAX_REASON_LENGTH)
+
+    def test_runner_exception_is_a_bounded_failure(self):
+        runner = FakePreflightRunner(raise_on='compile')
+        ok, reason = self._run(runner)
+        self.assertFalse(ok)
+        self.assertIn('RuntimeError', reason)
+        self.assertLessEqual(len(reason), ui.MAX_REASON_LENGTH)
+
+    def test_never_raises_and_never_calls_real_subprocess(self):
+        with patch.object(subprocess, 'run',
+                          side_effect=AssertionError('real subprocess')):
+            runner = FakePreflightRunner()
+            ok, reason = self._run(runner)
+        self.assertTrue(ok, reason)
+
+    def test_never_raises_on_bad_staging_path(self):
+        ok, reason = ui.default_preflight(
+            None, make_manifest(), runner=FakePreflightRunner())
+        self.assertFalse(ok)
+        self.assertIn('preflight', reason)
+
+
+# --------------------------------------------------------------------------- #
+# default_health_check (WP-R4c-2b): local facade, RTSP opt-in, tolerant parse
+# --------------------------------------------------------------------------- #
+
+class ParseEndpointsTests(unittest.TestCase):
+    def test_skips_malformed_entries(self):
+        self.assertEqual(
+            ui._parse_endpoints(
+                'garbage,,127.0.0.1:80,::,h:notaport,127.0.0.1:99999,:80,'
+                '127.0.0.1:8554'),
+            [('127.0.0.1', 80), ('127.0.0.1', 8554)])
+
+    def test_empty_and_none(self):
+        self.assertEqual(ui._parse_endpoints(''), [])
+        self.assertEqual(ui._parse_endpoints(None), [])
+
+    def test_strips_whitespace_and_rejects_port_zero(self):
+        self.assertEqual(
+            ui._parse_endpoints(' 127.0.0.1:80 , x:0 '), [('127.0.0.1', 80)])
+
+
+class DefaultHealthCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.attempts = []
+        self.fail_ports = set()
+
+        def fake_connect(address, timeout=None):
+            self.attempts.append(address)
+            if address[1] in self.fail_ports:
+                raise OSError('connection refused')
+
+            class _Conn:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+            return _Conn()
+
+        patcher = patch.object(
+            ui.socket, 'create_connection', side_effect=fake_connect)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, env=None):
+        with patch.dict(os.environ, env or {}, clear=True):
+            return ui.default_health_check('1.1.0')
+
+    def test_default_requires_only_the_local_facade(self):
+        self.assertTrue(self._run())
+        self.assertEqual(self.attempts, [('127.0.0.1', 80)])
+
+    def test_rtsp_ports_are_not_in_the_default_set(self):
+        default_ports = {
+            port for _, port in ui._parse_endpoints(
+                ','.join(ui.DEFAULT_HEALTH_ENDPOINTS))}
+        for rtsp_port in ui.RTSP_HEALTH_PORTS:
+            self.assertNotIn(rtsp_port, default_ports)
+
+    def test_configured_rtsp_endpoint_is_required(self):
+        self.fail_ports.add(8554)
+        self.assertFalse(self._run({
+            ui.HEALTH_ENDPOINTS_ENV: '127.0.0.1:80,127.0.0.1:8554'}))
+        self.assertEqual(self.attempts, [('127.0.0.1', 80), ('127.0.0.1', 8554)])
+
+    def test_configured_endpoints_all_must_pass(self):
+        self.fail_ports.add(80)
+        self.assertFalse(self._run({
+            ui.HEALTH_ENDPOINTS_ENV: '127.0.0.1:80,127.0.0.1:8554'}))
+
+    def test_malformed_entries_are_skipped(self):
+        self.assertTrue(self._run({
+            ui.HEALTH_ENDPOINTS_ENV: 'garbage,,127.0.0.1:80,h:notaport,:80'}))
+        self.assertEqual(self.attempts, [('127.0.0.1', 80)])
+
+    def test_probe_failure_returns_false(self):
+        self.fail_ports.add(80)
+        self.assertFalse(self._run())
+
+    def test_empty_endpoint_list_returns_false(self):
+        self.assertFalse(self._run({ui.HEALTH_ENDPOINTS_ENV: 'garbage'}))
+        self.assertEqual(self.attempts, [])
+
+
+# --------------------------------------------------------------------------- #
 # default_download + updater.verify_file composition (finding: detached sig)
 # --------------------------------------------------------------------------- #
 
