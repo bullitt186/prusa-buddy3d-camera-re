@@ -26,7 +26,9 @@ The wizard steps (source §4.3) in order:
 6. ``admin_password``   local administrator password + confirmation. Only the
                         scrypt hash from :func:`admin_auth.hash_password` is
                         stored; the plaintext is never retained.
-7. ``mqtt``             optional MQTT settings; validation only, no live connect.
+7. ``mqtt``             optional MQTT settings; validation by default, with an
+                        optional injectable live broker test (WP-R2, AC-23 tail)
+                        that is never persisted.
 8. ``summary``          final REDACTED summary before committing.
 9. ``persist``          atomic, validate-before-activate persistence. The device
                         and secrets documents are built, then parsed with
@@ -60,6 +62,7 @@ import admin_auth
 import camera_probe
 import config_schema
 import hotspot
+import mqtt_service
 import provisioning
 import settings_store
 
@@ -136,6 +139,9 @@ class WizardSession:
     * ``qr_decoder`` is the WP-4 QR hook (not implemented here).
     * ``hotspot_controller`` performs the real ``nmcli`` stop; tests inject a
       fake that records call order.
+    * ``mqtt_tester`` optionally runs a live broker connection test for step 7
+      (WP-R2); it receives a ``mqtt_service.MqttConfig`` and returns
+      ``(ok, reason)``. When ``None`` step 7 stays validation-only.
     * ``start_camera`` starts ``prusa-camera.target``.
     * ``activate_station`` creates/activates the Wi-Fi station profile after the
       hotspot is stopped and before the camera target starts; when it fails the
@@ -158,6 +164,7 @@ class WizardSession:
         storage_ready=None,
         wifi_scan=None,
         qr_decoder=None,
+        mqtt_tester=None,
         start_camera=None,
         activate_station=None,
         camera_running=False,
@@ -176,6 +183,7 @@ class WizardSession:
         self.probe_result = probe_result
         self.wifi_scan = wifi_scan
         self.qr_decoder = qr_decoder
+        self.mqtt_tester = mqtt_tester
         self.start_camera = start_camera
         self.activate_station = activate_station
         self.camera_running = bool(camera_running)
@@ -409,7 +417,14 @@ class WizardSession:
         return True, ''
 
     def _step_mqtt(self, data):
-        """Step 7: validate optional MQTT settings (no live connection)."""
+        """Step 7: validate optional MQTT settings, with an optional live test.
+
+        Validation-only is the default (no connection). When MQTT is enabled,
+        the caller requests a test (``test`` truthy), and an injectable
+        ``mqtt_tester`` is configured, the broker is probed before anything is
+        staged; a failure is surfaced redacted and the step is not completed, so
+        nothing is persisted (WP-R2, AC-23 tail).
+        """
         enabled = data.get('enabled', False)
         if not isinstance(enabled, bool):
             return False, 'mqtt enabled must be a boolean'
@@ -431,6 +446,10 @@ class WizardSession:
                 config_schema.parse_device(config_schema.dumps_device(candidate))
             except config_schema.ConfigError as e:
                 return False, str(e)
+        if enabled and data.get('test') and self.mqtt_tester is not None:
+            ok, reason = self._test_mqtt(uri, username, password)
+            if not ok:
+                return False, reason
         self.mqtt = {
             'enabled': enabled,
             'uri': uri or DEFAULT_MQTT_URI,
@@ -438,6 +457,30 @@ class WizardSession:
             'password': password or '',
         }
         return True, ''
+
+    def _test_mqtt(self, uri, username, password):
+        """Run the injected broker test; return a redacted ``(ok, reason)``.
+
+        Never raises and never echoes a credential: the reason is scrubbed
+        against the supplied username/password/URI before it is returned.
+        """
+        try:
+            config = mqtt_service.MqttConfig(
+                enabled=True, uri=uri, username=username, password=password,
+            )
+            result = self.mqtt_tester(config)
+        except Exception as e:  # noqa: BLE001 - a tester must never raise
+            log.warning(f'setup_wizard: mqtt broker test failed: {type(e).__name__}')
+            return False, 'mqtt connection test failed'
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            ok, reason = result
+        else:
+            ok, reason = bool(result), ''
+        if ok:
+            return True, ''
+        safe = admin_auth.redact(str(reason or ''), (password, username, uri))
+        safe = ''.join(ch for ch in safe if ch.isprintable()).strip()
+        return False, (safe[:200] or 'mqtt connection test failed')
 
     def _step_summary(self, data):
         """Step 8: build the redacted summary (no secret is retained)."""

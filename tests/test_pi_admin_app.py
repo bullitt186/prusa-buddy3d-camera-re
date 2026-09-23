@@ -265,6 +265,36 @@ class AdminTransportSourceTests(unittest.TestCase):
             'setup mode needs provisioning.resolve_device_id for a pre-claim id',
         )
 
+    def test_build_admin_app_injects_the_broker_probe(self):
+        # WP-R2: admin_app injects mqtt_probe.probe as the default broker test.
+        functions = [
+            node for node in self.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'build_admin_app'
+        ]
+        self.assertEqual(len(functions), 1, 'expected a single build_admin_app')
+        admin_calls = [
+            call for call in _calls(functions[0])
+            if any(chain == ['admin_http', 'AdminApp'] for chain in _attr_chains(call))
+        ]
+        self.assertTrue(admin_calls, 'build_admin_app must construct AdminApp')
+        passed_keywords = {
+            keyword.arg
+            for call in admin_calls for keyword in call.keywords
+        }
+        self.assertIn('mqtt_probe', passed_keywords)
+        self.assertIn(
+            ['mqtt_probe', 'probe'], self.chains,
+            'the default broker test must be mqtt_probe.probe',
+        )
+        # The parameter must accept an injected override.
+        args = functions[0].args
+        self.assertIn('mqtt_probe', [a.arg for a in args.kwonlyargs])
+
+    def test_route_table_declares_the_broker_test(self):
+        routes_node = _module_assign(self.tree, 'ROUTES')
+        declared = {tuple(entry) for entry in ast.literal_eval(routes_node)}
+        self.assertIn(('POST', '/api/mqtt/test'), declared)
+
 
 class AdminUnitTests(unittest.TestCase):
     def setUp(self):
@@ -337,6 +367,43 @@ class FactoryInstallerTests(unittest.TestCase):
         unit_loop = text.split('systemctl enable', 1)[0]
         self.assertIn('prusa-provisioning.service', unit_loop)
         self.assertIn('prusa-boot-mode.service', unit_loop)
+
+
+class CoreOffloadTests(unittest.TestCase):
+    """AC-27: the blocking stdlib core must not run on the aiohttp loop.
+
+    The MQTT broker-test route blocks on DNS/TCP/TLS/paho waits, so the core is
+    dispatched to a dedicated single-worker executor: off the loop, but still
+    serialized because AdminApp has no internal locks.
+    """
+
+    def test_core_runs_on_a_single_worker_executor(self):
+        tree = _tree()
+        executor = _module_assign(tree, '_CORE_EXECUTOR')
+        self.assertIsNotNone(executor, '_CORE_EXECUTOR must be defined')
+        self.assertIn(
+            ['concurrent', 'futures', 'ThreadPoolExecutor'],
+            _attr_chains(executor),
+        )
+        max_workers = [
+            kw.value.value for call in _calls(executor)
+            for kw in call.keywords if kw.arg == 'max_workers'
+        ]
+        self.assertEqual(
+            max_workers, [1], 'the core executor must serialize (max_workers=1)')
+
+    def test_handle_offloads_the_core(self):
+        tree = _tree()
+        handle = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == '_handle'
+        )
+        text = ast.unparse(handle)
+        self.assertIn('run_in_executor', text)
+        self.assertIn('_CORE_EXECUTOR', text)
+        # The core is passed to the worker, never invoked inline on the loop.
+        self.assertIn('app.handle', text)
+        self.assertNotIn('app.handle(_to_request', text)
 
 
 if __name__ == '__main__':

@@ -40,14 +40,37 @@ def parse_wireless_level(line):
         return None
 
 
-def signal_quality_from_wireless(path='/proc/net/wireless'):
-    """Read the wlan0 RSSI and convert it; 0 when unavailable."""
+def wifi_rssi_dbm(line_or_path='/proc/net/wireless'):
+    """Return the raw ``wlan0`` level in dBm, or None when unavailable.
+
+    ``line_or_path`` accepts either a single ``/proc/net/wireless`` line (parsed
+    with :func:`parse_wireless_level`) or a path to read. This exposes the raw
+    level for diagnostics/MQTT metrics; :func:`signal_quality_from_wireless`
+    keeps the firmware 0..100 conversion on top of it. Never raises.
+    """
+    if not isinstance(line_or_path, str) or not line_or_path:
+        return None
+    level = parse_wireless_level(line_or_path)
+    if level is not None:
+        return level
+    if '\n' in line_or_path:
+        # A multi-line/malformed value is not a usable line and must not be
+        # treated as a (bogus) path.
+        return None
     try:
-        with open(path) as f:
+        with open(line_or_path) as f:
             for line in f:
                 level = parse_wireless_level(line)
                 if level is not None:
-                    return rssi_to_quality(level)
+                    return level
     except OSError:
         pass
-    return 0
+    return None
+
+
+def signal_quality_from_wireless(path='/proc/net/wireless'):
+    """Read the wlan0 RSSI and convert it; 0 when unavailable."""
+    level = wifi_rssi_dbm(path)
+    if level is None:
+        return 0
+    return rssi_to_quality(level)

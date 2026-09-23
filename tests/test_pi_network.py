@@ -47,5 +47,41 @@ class WirelessParseTests(unittest.TestCase):
         self.assertEqual(network.signal_quality_from_wireless('/nonexistent/wireless'), 0)
 
 
+class WifiRssiDbmTests(unittest.TestCase):
+    """WP-R2: the raw wlan0 level is exposed alongside the 0..100 quality."""
+
+    LINE = ' wlan0: 0000   54.  -56.  -256        0      0      0      0  0  0\n'
+
+    def test_line_returns_raw_dbm(self):
+        self.assertEqual(network.wifi_rssi_dbm(self.LINE), -56)
+
+    def test_path_returns_raw_dbm(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'wireless')
+            with open(path, 'w') as f:
+                f.write('Inter-| sta-|   Quality        |   Discarded packets\n')
+                f.write(self.LINE)
+            self.assertEqual(network.wifi_rssi_dbm(path), -56)
+
+    def test_non_wlan0_line_is_none(self):
+        self.assertIsNone(network.wifi_rssi_dbm(' eth0: 0000 54. -56. -256 0\n'))
+
+    def test_missing_file_is_none(self):
+        self.assertIsNone(network.wifi_rssi_dbm('/nonexistent/wireless'))
+
+    def test_non_string_is_none(self):
+        self.assertIsNone(network.wifi_rssi_dbm(None))
+
+    def test_quality_still_derives_from_raw_level(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'wireless')
+            with open(path, 'w') as f:
+                f.write(self.LINE)
+            self.assertEqual(network.signal_quality_from_wireless(path), 88)
+            self.assertEqual(
+                network.rssi_to_quality(network.wifi_rssi_dbm(path)), 88
+            )
+
+
 if __name__ == '__main__':
     unittest.main()

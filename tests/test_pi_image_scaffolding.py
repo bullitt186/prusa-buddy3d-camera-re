@@ -558,6 +558,51 @@ class ImageScaffoldingTests(unittest.TestCase):
                 "/usr/share/prusa-buddy3d-camera/packages.txt",
             )
 
+    def _run_build_info(self, output, *extra, env=None):
+        cmd = [
+            "python3",
+            str(ASSETS / "build-info.py"),
+            "--source-commit",
+            "0" * 40,
+            "--builder-revision",
+            "unknown",
+            "--os-suite",
+            "trixie",
+            "--kernel-package",
+            "linux-image-rpi-v8",
+            *extra,
+            "--output",
+            str(output),
+        ]
+        return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+    def test_build_info_generator_records_explicit_version(self):
+        # WP-R2: build-info carries the application version app_version.py reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = self._run_build_info(output, "--version", "9.9.9")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(doc["version"], "9.9.9")
+
+    def test_build_info_generator_version_defaults(self):
+        env = {k: v for k, v in os.environ.items() if k != "PRUSA_IMAGE_VERSION"}
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = self._run_build_info(output, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(doc["version"], "0.0.0+local")
+
+    def test_build_info_generator_version_from_env(self):
+        env = dict(os.environ, PRUSA_IMAGE_VERSION="4.5.6")
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "build-info.json"
+            result = self._run_build_info(output, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doc = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(doc["version"], "4.5.6")
+
     def test_build_info_generator_is_stdlib_only(self):
         source = read_text(ASSETS / "build-info.py")
         tree = ast.parse(source)

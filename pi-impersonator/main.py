@@ -54,6 +54,10 @@ import timezone
 import ota
 import timelapse
 import settings_store
+import app_metrics
+import app_version
+import config_schema
+import mqtt_service
 from settings_coordinator import SettingsCoordinator, persist_state
 
 logging.basicConfig(
@@ -349,6 +353,30 @@ async def timelapse_loop():
         await asyncio.sleep(state.timelapse_interval)
 
 
+def build_timelapse_video():
+    """Build the timelapse ``.avi`` from stored frames; True on success.
+
+    WP-R2: shared by the Prusa ``timelapse_make`` trigger and the MQTT
+    ``timelapse_build`` button so the build logic is not duplicated. Returns a
+    bool (the MQTT button action contract) and never raises: a capture/tool
+    failure is logged and reported as ``False``.
+    """
+    try:
+        width, height = state.resolution()
+        path = timelapse.build_avi(
+            timelapse.TIMELAPSE_DIR, fps=state.timelapse_fps,
+            width=width, height=height,
+        )
+    except Exception as e:
+        log.warning(f'Timelapse build failed: {e}')
+        return False
+    if path:
+        log.info(f'Timelapse build: wrote {path}')
+        return True
+    log.warning('Timelapse build: no frames stored')
+    return False
+
+
 def _request_id_from_event(data):
     """Best-effort request id from a direct ``timelapse_get_file_list`` payload.
 
@@ -478,6 +506,25 @@ async def info_service_loop(token, fingerprint, server, session, mac, ip, ssid):
         )
 
 
+async def _start_mqtt_service(service, uri):
+    """Connect MQTT without blocking startup (AC-27).
+
+    Scheduled as a task and never awaited by :func:`main`: a slow, blackholed,
+    or unauthenticated broker must not delay Prusa signaling, snapshots, RTSP,
+    ONVIF, or WebRTC. The broker URI is logged only after ``MqttConfig`` has
+    validated it to contain no credentials, and any failure is swallowed.
+    """
+    try:
+        started = await asyncio.to_thread(service.start)
+        log.info(
+            'MQTT service %s (broker %s)',
+            'connected' if started else 'not connected',
+            uri,
+        )
+    except Exception as e:  # noqa: BLE001 - MQTT must never be fatal
+        log.warning(f'MQTT start unavailable: {type(e).__name__}')
+
+
 async def main():
     cfg = load_config()
     token = cfg['identity']['token']
@@ -586,6 +633,44 @@ async def main():
     sig = PrusaSignaling(fingerprint, token, state, mac=mac, ip=ip, ssid=ssid)
     loop = asyncio.get_event_loop()
 
+    # WP-R2 (AC-23/AC-24/AC-27): wire the optional MQTT service. MQTT stays
+    # disabled until device.toml enables it; credentials come only from the
+    # durable secrets document. Any load/build failure is logged non-secret and
+    # ignored, and the service is started off the event loop so a slow or
+    # unreachable broker can never stall the camera, Prusa signaling, snapshots,
+    # RTSP, or WebRTC.
+    mqtt_service_instance = None
+    mqtt_start_task = None
+    try:
+        device_doc = config_schema.load_device()
+        secrets_doc = config_schema.load_secrets()
+        mqtt_config = mqtt_service.MqttConfig.from_documents(
+            device_doc, secrets_doc, device_seed=fingerprint
+        )
+        if mqtt_config.enabled:
+            mqtt_service_instance = mqtt_service.MqttService(
+                coordinator,
+                mqtt_config,
+                application_version=app_version.application_version(),
+                serial=mqtt_config.device_id,
+                mac=mac,
+                build_timelapse=build_timelapse_video,
+                restart=reboot_device,
+                metrics_provider=app_metrics.metrics_provider,
+                secrets=(token,),
+            )
+            # Schedule, never await: a slow or unreachable broker must not delay
+            # signaling, snapshots, RTSP, ONVIF, or WebRTC (AC-27). The task
+            # reference is kept so it is cancelled on shutdown.
+            mqtt_start_task = asyncio.get_event_loop().create_task(
+                _start_mqtt_service(mqtt_service_instance, mqtt_config.uri)
+            )
+        else:
+            log.info('MQTT disabled or unconfigured; not starting the service')
+    except Exception as e:  # noqa: BLE001 - MQTT must never be fatal
+        log.warning(f'MQTT unavailable: {type(e).__name__}')
+        mqtt_service_instance = None
+
     async def on_webrtc_offer(request_id, sdp_text):
         msg = encode_camera_webrtc_message(
             token, request_id, fingerprint, WEBRTC_OFFER, sdp=sdp_text
@@ -683,15 +768,8 @@ async def main():
             if result.ok:
                 log.info(f'Trigger {action}: timelapse_enabled={state.timelapse_enabled}')
         elif action == trigger.TIMELAPSE_MAKE:
-            width, height = state.resolution()
-            path = timelapse.build_avi(
-                timelapse.TIMELAPSE_DIR, fps=state.timelapse_fps,
-                width=width, height=height,
-            )
-            if path:
-                log.info(f'Trigger timelapse_make: wrote {path}')
-            else:
-                log.warning('Trigger timelapse_make: no frames stored')
+            # WP-R2: one shared build path for the trigger and the MQTT button.
+            build_timelapse_video()
         elif action == trigger.TIMELAPSE_FILE_LIST:
             await _send_timelapse_file_list(sig, request_id)
         else:
@@ -1010,6 +1088,16 @@ async def main():
         asyncio.create_task(sig.supervise())
         await asyncio.Event().wait()
     finally:
+        # WP-R2 (AC-27): cancel the scheduled start and stop MQTT best-effort,
+        # off the event loop, so a broker shutdown can never block the other
+        # shutdown paths.
+        if mqtt_start_task is not None:
+            mqtt_start_task.cancel()
+        if mqtt_service_instance is not None:
+            try:
+                await asyncio.to_thread(mqtt_service_instance.stop)
+            except Exception as e:  # noqa: BLE001 - shutdown must stay clean
+                log.warning(f'MQTT stop failed: {type(e).__name__}')
         if discovery_transport is not None:
             discovery_transport.close()
         if http_runner is not None:

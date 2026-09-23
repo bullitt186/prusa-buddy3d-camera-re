@@ -37,6 +37,8 @@ Stdlib-only tests parse this file with :mod:`ast` and never import it, so the
 top-level ``aiohttp`` import is intentional and expected.
 """
 import argparse
+import asyncio
+import concurrent.futures
 import logging
 import os
 import ssl
@@ -45,10 +47,16 @@ from aiohttp import web
 
 import admin_http
 import camera_probe
+import mqtt_probe
 import privileged
 import provisioning
 
 log = logging.getLogger('prusa-cam.admin_app')
+
+#: Default broker-test callable for the wizard/admin MQTT route (WP-R2).
+#: Resolved at import so the ``build_admin_app`` parameter can also be named
+#: ``mqtt_probe`` without shadowing the module.
+_DEFAULT_MQTT_PROBE = mqtt_probe.probe
 
 #: The captive-portal bind port while the device is unclaimed (setup mode).
 DEFAULT_SETUP_PORT = 80
@@ -77,6 +85,7 @@ ROUTES = (
     ('POST', '/setup/finish'),
     ('GET', '/api/status'),
     ('POST', '/api/login'),
+    ('POST', '/api/mqtt/test'),
     ('POST', '/api/logout'),
     ('POST', '/api/reauth'),
     ('GET', '/api/config'),
@@ -158,11 +167,29 @@ def _to_response(response: admin_http.Response) -> web.Response:
     )
 
 
+#: Single-worker executor for the stdlib admin core. ``AdminApp`` is not
+#: thread-safe (no locks around its session store or rate limiter), so exactly
+#: one worker guarantees the core's previous single-threaded semantics while
+#: keeping blocking work off the aiohttp event loop. Without this, the MQTT
+#: broker-test route (blocking DNS/TCP/TLS/paho waits) would freeze the whole
+#: provisioning/admin UI.
+_CORE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix='admin-core')
+
+
 async def _handle(request):
-    """Dispatch one aiohttp request through the stdlib admin core."""
+    """Dispatch one aiohttp request through the stdlib admin core.
+
+    The core runs on the dedicated single worker thread, never inline on the
+    event loop, so a blocking handler (the MQTT broker probe) cannot stall
+    other requests or the loop.
+    """
     app = request.app['admin_app']
     body = await request.read()
-    core_response = app.handle(_to_request(request, body))
+    core_request = _to_request(request, body)
+    loop = asyncio.get_running_loop()
+    core_response = await loop.run_in_executor(
+        _CORE_EXECUTOR, app.handle, core_request)
     return _to_response(core_response)
 
 
@@ -226,7 +253,7 @@ def _configured_device_id(device_path=None):
 
 def build_admin_app(mode, *, device_path=None, secrets_path=None,
                     provisioning_path=None, hotspot_controller=None, probe=None,
-                    start_camera=None, activate_station=None):
+                    start_camera=None, activate_station=None, mqtt_probe=None):
     """Build the stdlib :class:`admin_http.AdminApp` with real dependencies.
 
     Paths default to the durable ``/data`` locations through the core's own
@@ -267,6 +294,9 @@ def build_admin_app(mode, *, device_path=None, secrets_path=None,
         activate_station=(
             activate_station if activate_station is not None
             else privileged.activate_station
+        ),
+        mqtt_probe=(
+            mqtt_probe if mqtt_probe is not None else _DEFAULT_MQTT_PROBE
         ),
         device_path=device_path,
         secrets_path=secrets_path,

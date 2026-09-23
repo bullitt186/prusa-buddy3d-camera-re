@@ -332,6 +332,69 @@ class MqttTests(WizardTestBase):
         self.assertEqual(session.mqtt['username'], 'mqttuser')
 
 
+class MqttTesterTests(WizardTestBase):
+    """WP-R2 (AC-23 tail): optional live broker test in step 7."""
+
+    MQTT = {
+        'enabled': True, 'uri': 'mqtts://broker.example:8883',
+        'username': 'mqttuser', 'password': 'mqtt-secret',
+    }
+
+    def test_validation_only_is_the_default(self):
+        session = self.make_session()
+        result = session.submit('mqtt', dict(self.MQTT, test=True))
+        self.assertTrue(result.ok, result.reason)
+
+    def test_successful_test_is_called_and_staged(self):
+        seen = []
+
+        def tester(config):
+            seen.append(config)
+            return True, 'connected'
+
+        session = self.make_session(mqtt_tester=tester)
+        result = session.submit('mqtt', dict(self.MQTT, test=True))
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].uri, self.MQTT['uri'])
+        self.assertEqual(seen[0].username, self.MQTT['username'])
+        self.assertEqual(session.mqtt['password'], 'mqtt-secret')
+
+    def test_failed_test_is_redacted_and_not_staged(self):
+        def tester(config):
+            return False, f'bad password mqtt-secret for mqttuser'
+
+        session = self.make_session(mqtt_tester=tester)
+        result = session.submit('mqtt', dict(self.MQTT, test=True))
+        self.assertFalse(result.ok)
+        self.assertNotIn('mqtt-secret', result.reason)
+        self.assertNotIn('mqttuser', result.reason)
+        self.assertNotIn('mqtt', session.completed)
+        self.assertFalse(session.mqtt['enabled'])
+
+    def test_raising_tester_never_leaks(self):
+        def tester(config):
+            raise RuntimeError('boom mqtt-secret')
+
+        session = self.make_session(mqtt_tester=tester)
+        result = session.submit('mqtt', dict(self.MQTT, test=True))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, 'mqtt connection test failed')
+        self.assertNotIn('mqtt-secret', result.reason)
+
+    def test_test_flag_without_enabled_does_not_call_tester(self):
+        calls = []
+        session = self.make_session(mqtt_tester=lambda config: calls.append(config))
+        result = session.submit('mqtt', {'enabled': False, 'test': True})
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, [])
+
+    def test_test_flag_without_tester_is_validation_only(self):
+        session = self.make_session()
+        result = session.submit('mqtt', dict(self.MQTT, test=True))
+        self.assertTrue(result.ok)
+
+
 class SummaryTests(WizardTestBase):
     def test_summary_is_redacted(self):
         session = self.make_session()

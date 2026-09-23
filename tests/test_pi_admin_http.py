@@ -266,6 +266,103 @@ class RoutingTests(AdminHttpTestBase):
         self.assertEqual(setup_app.handle(self.req('GET', '/setup')).status, 302)
 
 
+class MqttTestRouteTests(AdminHttpTestBase):
+    """WP-R2 (AC-23 tail): the broker-test route and its secret hygiene."""
+
+    URI = 'mqtts://broker.example:8883'
+    MQTT_PASSWORD = 'mqtt-route-secret'
+
+    def _setup_app(self, probe):
+        return self._build_app(
+            mode='setup',
+            provisioning_state=provisioning.ProvisioningState(state='unclaimed'),
+            mqtt_probe=probe,
+        )
+
+    def _body(self):
+        return {
+            'uri': self.URI,
+            'username': 'mqttuser',
+            'password': self.MQTT_PASSWORD,
+            'ca_file': '/etc/ssl/certs/ca.pem',
+        }
+
+    def test_unavailable_when_no_probe_injected(self):
+        # Setup mode keeps the route public (the wizard calls it before saving).
+        response = self._setup_app(None).handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body()))
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)
+        self.assertFalse(payload['ok'])
+        self.assertEqual(payload['reason'], 'mqtt test unavailable')
+
+    def test_setup_mode_public_success(self):
+        seen = []
+
+        def probe(config):
+            seen.append(config)
+            return True, 'connected'
+
+        response = self._setup_app(probe).handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body()))
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.body)['ok'])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].uri, self.URI)
+        self.assertEqual(seen[0].username, 'mqttuser')
+        self.assertEqual(seen[0].password, self.MQTT_PASSWORD)
+
+    def test_failure_reason_is_redacted(self):
+        def probe(config):
+            return False, f'bad credentials {self.MQTT_PASSWORD}'
+
+        response = self._setup_app(probe).handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body()))
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)
+        self.assertFalse(payload['ok'])
+        self.assertNotIn(self.MQTT_PASSWORD, payload['reason'])
+        self.assertNotIn(self.MQTT_PASSWORD, response.body.decode('utf-8'))
+
+    def test_raising_probe_is_isolated(self):
+        def probe(config):
+            raise RuntimeError(self.MQTT_PASSWORD)
+
+        response = self._setup_app(probe).handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body()))
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)
+        self.assertFalse(payload['ok'])
+        self.assertNotIn(self.MQTT_PASSWORD, response.body.decode('utf-8'))
+
+    def test_missing_uri_is_rejected(self):
+        response = self._setup_app(lambda config: (True, 'connected')).handle(
+            self.req('POST', '/api/mqtt/test', body={'username': 'u'}))
+        self.assertEqual(response.status, 400)
+
+    def test_oversized_body_is_rejected(self):
+        body = b'x' * (admin_http.MAX_MQTT_TEST_BODY_BYTES + 1)
+        response = self._setup_app(lambda config: (True, 'connected')).handle(
+            self.req('POST', '/api/mqtt/test', body=body))
+        self.assertEqual(response.status, 413)
+
+    def test_post_claim_requires_authentication(self):
+        response = self.app.handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body()))
+        self.assertEqual(response.status, 401)
+
+    def test_post_claim_authenticated_succeeds(self):
+        app = self._build_app(mqtt_probe=lambda config: (True, 'connected'))
+        token = self.login(app=app)
+        csrf = self.sessions.csrf_for(token)
+        response = app.handle(self.req(
+            'POST', '/api/mqtt/test', body=self._body(),
+            headers=self.auth_headers(token, csrf=csrf)))
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)
+        self.assertTrue(payload['ok'])
+
+
 # --------------------------------------------------------------------------- #
 # Corrupt provisioning file / authoritative claim gate (fail closed)
 # --------------------------------------------------------------------------- #

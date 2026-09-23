@@ -205,13 +205,29 @@ class MainWiringTests(unittest.TestCase):
         self.assertIsInstance(calls[0].args[1], ast.Name)
         self.assertEqual(calls[0].args[1].id, 'reboot_device')
 
-    def test_reboot_device_is_referenced_only_by_the_trigger_dispatcher(self):
-        # It is passed as the injected callable, not called directly anywhere.
+    def test_reboot_device_is_injected_and_never_called_directly(self):
+        # It is only ever passed as an injected callable: to the trigger
+        # dispatcher and as the MQTT restart action. It must never be the
+        # callee of a direct call.
         references = [
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.Name) and node.id == 'reboot_device'
         ]
-        self.assertEqual(len(references), 1)
+        self.assertEqual(len(references), 2)
+        direct_calls = [
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == 'reboot_device'
+        ]
+        self.assertEqual(direct_calls, [])
+        # The second reference is the MQTT service's restart callable.
+        keyword_refs = [
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.keyword) and node.arg == 'restart'
+            and isinstance(node.value, ast.Name) and node.value.id == 'reboot_device'
+        ]
+        self.assertEqual(len(keyword_refs), 1)
 
 
 if __name__ == '__main__':

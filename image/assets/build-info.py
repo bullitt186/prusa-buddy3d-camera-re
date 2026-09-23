@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Generate /usr/share/prusa-buddy3d-camera/build-info.json (AC-14).
 
-Standard library only, as required for image assets. Records the source commit,
-the pinned image-builder revision, the OS suite, the kernel package, and (when
-WP-2b supplies it) the installed-package manifest. Output is deterministic:
-keys are sorted and no wall-clock time is embedded; SOURCE_DATE_EPOCH is copied
-through when present.
+Standard library only, as required for image assets. Records the application
+version (``--version``, defaulting to ``PRUSA_IMAGE_VERSION`` or
+``0.0.0+local``), the source commit, the pinned image-builder revision, the OS
+suite, the kernel package, and (when WP-2b supplies it) the installed-package
+manifest. Output is deterministic: keys are sorted and no wall-clock time is
+embedded; SOURCE_DATE_EPOCH is copied through when present.
+
+The ``version`` field is read back at runtime by ``pi-impersonator/app_version.py``
+(WP-R2). Release automation (WP-R5) owns the actual release versioning; this
+generator only records whatever version it is handed.
 
 WP-2b extension point: pass --package-manifest with the generated package
 manifest path to have it recorded here.
@@ -24,11 +29,18 @@ def main(argv=None):
     parser.add_argument("--os-suite", required=True)
     parser.add_argument("--kernel-package", required=True)
     parser.add_argument("--package-manifest", default="")
+    parser.add_argument(
+        "--version",
+        default=os.environ.get("PRUSA_IMAGE_VERSION") or "0.0.0+local",
+        help="application/image version recorded as 'version' "
+             "(default: $PRUSA_IMAGE_VERSION or 0.0.0+local)",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
     doc = {
         "schema_version": 1,
+        "version": args.version,
         "source_commit": args.source_commit,
         "builder_revision": args.builder_revision,
         "os_suite": args.os_suite,

@@ -82,6 +82,7 @@ import admin_auth
 import config_schema
 import expert_config
 import factory_reset as factory_reset_module
+import mqtt_service
 import provisioning
 import recovery
 import setup_wizard
@@ -199,6 +200,14 @@ class Route:
 #: Re-auth freshness window after a successful password re-check.
 REAUTH_WINDOW_SECONDS = 5 * 60.0
 
+#: Largest accepted MQTT broker-test request body (bytes). The route carries
+#: only a URI and optional credentials, so anything larger is rejected before
+#: the probe runs.
+MAX_MQTT_TEST_BODY_BYTES = 4096
+
+#: Bound on the broker-test reason returned to the client.
+MAX_MQTT_TEST_REASON = 200
+
 #: Provisioning states in which the public setup wizard is available.
 PRE_CLAIM_STATES = frozenset({
     'factory',
@@ -211,6 +220,9 @@ _PUBLIC = 'public'
 _PUBLIC_SETUP = 'public_setup'
 _AUTHENTICATED = 'authenticated'
 _REAUTH_REQUIRED = 'reauth_required'
+#: The MQTT broker test is available to the unclaimed wizard (public while setup
+#: is available) and, after claim, only to an authenticated admin session.
+_SETUP_OR_AUTHENTICATED = 'setup_or_authenticated'
 
 
 @dataclasses.dataclass
@@ -270,6 +282,7 @@ class AdminApp:
         wifi_scan=None,
         start_camera=None,
         activate_station=None,
+        mqtt_probe=None,
     ):
         if mode not in ('setup', 'admin'):
             raise ValueError("mode must be 'setup' or 'admin'")
@@ -305,6 +318,8 @@ class AdminApp:
         self._wifi_scan = wifi_scan
         self._start_camera = start_camera
         self._activate_station = activate_station
+        # WP-R2: the optional broker-test callable; None reports unavailable.
+        self._mqtt_probe = mqtt_probe
 
         # Lazily built wizard session and reset confirmation state.
         self._wizard = None
@@ -335,6 +350,10 @@ class AdminApp:
             ),
             Route('GET', re.compile(r'^/api/status$'), _PUBLIC, self._handle_status),
             Route('POST', re.compile(r'^/api/login$'), _PUBLIC, self._handle_login),
+            Route(
+                'POST', re.compile(r'^/api/mqtt/test$'),
+                _SETUP_OR_AUTHENTICATED, self._handle_mqtt_test,
+            ),
             Route(
                 'POST', re.compile(r'^/api/logout$'),
                 _AUTHENTICATED, self._handle_logout,
@@ -401,6 +420,14 @@ class AdminApp:
 
         if route.policy in (_AUTHENTICATED, _REAUTH_REQUIRED):
             token, denied = self._authorize(request, route.policy, body_data, now)
+            if denied is not None:
+                self._log_request(request, denied)
+                return denied
+
+        if route.policy == _SETUP_OR_AUTHENTICATED and not self._setup_available():
+            # Post-claim: the broker test lives on the authenticated admin
+            # surface (session + CSRF) instead of the public wizard.
+            token, denied = self._authorize(request, _AUTHENTICATED, body_data, now)
             if denied is not None:
                 self._log_request(request, denied)
                 return denied
@@ -712,6 +739,56 @@ class AdminApp:
         self._limiter.record_failure(key, now)
         return self._error(request, 401, 'invalid credentials')
 
+    def _handle_mqtt_test(self, request, match, body_data, now):
+        """Run the injected broker connection test (WP-R2; AC-23 tail).
+
+        Available to the unclaimed wizard and, after claim, to an authenticated
+        admin session (see the route policy). The supplied URI/username/password/
+        CA are used only for this probe: they are never persisted and never
+        logged. The reason is bounded and redacted against the supplied
+        credentials, so a password or URI userinfo can never be echoed.
+        """
+        if self._mqtt_probe is None:
+            return self._json(
+                request, 200, {'ok': False, 'reason': 'mqtt test unavailable'})
+
+        body = request.body
+        size = len(body) if isinstance(body, (bytes, bytearray, str)) else 0
+        if size > MAX_MQTT_TEST_BODY_BYTES:
+            return self._error(request, 413, 'request body too large')
+
+        uri = body_data.get('uri')
+        username = body_data.get('username', '')
+        password = body_data.get('password', '')
+        ca_file = body_data.get('ca_file', '')
+        if not isinstance(uri, str) or not uri:
+            return self._error(request, 400, 'mqtt uri is required')
+        for name, value in (('username', username), ('password', password), ('ca_file', ca_file)):
+            if value is None:
+                value = ''
+            if not isinstance(value, str):
+                return self._error(request, 400, f'mqtt {name} must be a string')
+
+        config = mqtt_service.MqttConfig(
+            enabled=True, uri=uri, username=username or '',
+            password=password or '', ca_file=ca_file or '',
+        )
+        try:
+            result = self._mqtt_probe(config)
+        except Exception as e:  # noqa: BLE001 - a tester must never crash a request
+            log.warning(f'admin_http: mqtt broker test failed: {type(e).__name__}')
+            result = (False, 'mqtt test failed')
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            ok, reason = result
+        else:
+            ok, reason = bool(result), ''
+
+        secrets = tuple(v for v in (password, username, uri) if isinstance(v, str) and v)
+        safe = admin_auth.redact(str(reason or ''), secrets)
+        safe = ''.join(ch for ch in safe if ch.isprintable()).strip()[:MAX_MQTT_TEST_REASON]
+        return self._json(
+            request, 200, {'ok': bool(ok), 'reason': safe or 'mqtt test failed'})
+
     # ------------------------------------------------------------------ #
     # Authenticated routes
     # ------------------------------------------------------------------ #
@@ -873,6 +950,7 @@ class AdminApp:
                     probe_result=self._probe_result,
                     storage_ready=self._storage_ready,
                     wifi_scan=self._wifi_scan,
+                    mqtt_tester=self._mqtt_probe,
                     start_camera=self._start_camera,
                     activate_station=self._activate_station,
                     hotspot_controller=(
