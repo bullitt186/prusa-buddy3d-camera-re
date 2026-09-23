@@ -28,6 +28,7 @@ protocol from the ARM firmware and reimplements it so you can:
 | Know what actually works vs. what's still theory | [`docs/status.md`](docs/status.md) ⭐ |
 | Understand the wire protocol (the spec) | [`docs/protocol.md`](docs/protocol.md) |
 | **Set up the Pi impersonator (one command)** | [`pi-impersonator/README.md`](pi-impersonator/README.md) ⭐ |
+| **Use the released appliance image (flash → onboarding → HA/MQTT)** | [`docs/appliance-user-guide.md`](docs/appliance-user-guide.md) |
 | Run the local RTSP proxy / control tool | [`proxy/README.md`](proxy/README.md) |
 | Reproduce or extend the RE work | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
 | See exactly what changed in firmware 3.1.6 | [`docs/firmware-3.1.6.md`](docs/firmware-3.1.6.md) |
@@ -73,6 +74,16 @@ Throughout the docs:
 - **Confirmed** / verified live / observed = proven against the real firmware or backend.
 - **Assumption** / likely / probably / *guess* = inferred, not yet proven.
 - `<PLACEHOLDER>` = a value redacted from real captures (IP, MAC, SSID, token). Supply your own.
+
+## License and non-affiliation
+
+This repository is released under the **MIT License** — see [`LICENSE`](LICENSE) and the full
+[`NOTICE.md`](NOTICE.md).
+
+It is an **independent, community-developed project** and is **not affiliated with or endorsed by
+Prusa Research**. Prusa®, Prusa Connect, and Buddy3D are trademarks of Prusa Research a.s. No
+Prusa source code or firmware is distributed here; the protocol documentation is the result of
+independent reverse engineering for interoperability. The appliance is not ONVIF certified.
 
 ## Not included (on purpose)
 

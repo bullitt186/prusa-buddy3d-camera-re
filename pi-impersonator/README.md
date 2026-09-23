@@ -110,7 +110,7 @@ writes `/etc/prusa-cam/quality.env` for the next boot.
 | `config.ini.example` | Config template |
 | `deploy.sh` | Overlay-aware deploy helper (dev: fast rsync; prod: maintenance dance) |
 | `bootstrap.sh` | One-command fresh-Pi provisioning |
-| `systemd/` | Ready-to-install unit files (`User=pi` templates — `bootstrap.sh` adapts them) |
+| `systemd/` | Ready-to-install unit files (run as the dedicated `prusa-cam` service account from `/opt/prusa-cam`; installed verbatim) |
 
 ## Local development
 
@@ -159,6 +159,11 @@ PI=pi@<PI_IP> pi-impersonator/deploy.sh --enable-overlay   # verifies initramfs 
 
 ## Manual install (without bootstrap.sh)
 
+This is a **developer path**, separate from the supported appliance image. The shipped systemd
+units target the dedicated `prusa-cam` service account and `/opt/prusa-cam`; this path retargets
+them to your login user and `~/prusa-cam` (the supported path is `bootstrap.sh`, which creates the
+service account and `/opt/prusa-cam`).
+
 ```bash
 # 1. Apt dependencies
 sudo apt update && sudo apt install -y \
@@ -179,8 +184,9 @@ cp pi-impersonator/* ~/prusa-cam/
 cp ~/prusa-cam/config.ini.example ~/prusa-cam/config.ini
 # edit config.ini: token
 
-# 4. Systemd units (adjust User= to your username)
-sed "s/^User=pi$/User=$USER/; s|/home/pi/|/home/$USER/|g" \
+# 4. Systemd units — shipped as User=prusa-cam from /opt/prusa-cam (the appliance
+#    layout); retarget them to your dev user + ~/prusa-cam for this path.
+sed "s|User=prusa-cam|User=$USER|; s|/opt/prusa-cam|$HOME/prusa-cam|g" \
     pi-impersonator/systemd/rpicam-source.service \
     | sudo tee /etc/systemd/system/rpicam-source.service
 # repeat for prusa-rtsp.service, prusa-ha-rtsp.service and prusa-cam.service

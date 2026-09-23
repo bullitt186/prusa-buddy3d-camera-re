@@ -170,7 +170,7 @@ Use these durable locations:
 ```
 
 Preserve `/mnt/sdcard` as the bind-mounted firmware-facing/SMB path. Replace the hard-coded
-`DEFAULT_SERVICE_USER='bullitt'` and all home-directory assumptions with a dedicated non-login
+`DEFAULT_SERVICE_USER='<operator>'` and all home-directory assumptions with a dedicated non-login
 `prusa-cam` system account. The service account owns application configuration, state, releases,
 and media. Secrets are mode `0600`; configuration directories are not world-readable.
 

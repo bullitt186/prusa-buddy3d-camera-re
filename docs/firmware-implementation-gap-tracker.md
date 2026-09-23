@@ -1296,7 +1296,7 @@ closing the gap.
   persisted resolution), and the app logged `Loaded persisted settings: quality_tier`; frames +
   `.avi` + `.timelapse_videos.csv` written under `/mnt/sdcard/timelapse` survived the reboot and
   `file_list_entries()` still returned the `.avi`; `smbd` active with `[sdcard]` `force user =
-  bullitt`; `quality.live.env` was absent after the reboot (still ephemeral, GAP-QUALITY-02).
+  <operator>`; `quality.live.env` was absent after the reboot (still ephemeral, GAP-QUALITY-02).
 - **Remaining:** none for the persistence scope. Optional follow-ups: an in-app live UI check of
   the save wiring (only the AST tests cover the mutation call sites today), and a `dosfsck`/fsck
   note for the new partition (ext4, journaled, fsck order 2 in fstab).
