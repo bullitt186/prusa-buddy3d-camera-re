@@ -80,6 +80,10 @@ packages:
   - curl
   - samba
   - wpasupplicant
+  # NetworkManager `ipv4.method shared` (the setup hotspot) needs dnsmasq for
+  # DHCP; network-manager only Recommends dnsmasq-base and this image installs
+  # without recommends, so the AP would fail to activate without it.
+  - dnsmasq-base
   - ca-certificates
   # sudo runs the fixed-verb root helper (prusa-priv) for the prusa-cam service
   # account; the image installs a narrow /etc/sudoers.d/prusa-cam rule (B3).

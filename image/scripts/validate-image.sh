@@ -1099,6 +1099,16 @@ PY
       report fail "NetworkManager configuration absent"
    fi
 
+   # The setup hotspot uses NetworkManager `ipv4.method shared`. network-manager
+   # only Recommends dnsmasq-base and this image installs without recommends, so
+   # without the dnsmasq binary the AP activation fails and an unclaimed device
+   # has no setup hotspot at all (first-boot dead device, found on hardware).
+   if [ -x "$MOUNT_ROOT/usr/sbin/dnsmasq" ]; then
+      report ok "dnsmasq present for the NetworkManager shared setup hotspot"
+   else
+      report fail "dnsmasq missing (NetworkManager shared/hotspot DHCP requires dnsmasq-base)"
+   fi
+
    # --- factory app + launcher fallback -----------------------------------
    if [ -f "$MOUNT_ROOT/opt/prusa-cam/main.py" ]; then
       report ok "factory application present under /opt/prusa-cam"

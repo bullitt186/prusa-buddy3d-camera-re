@@ -201,6 +201,8 @@ class ImageScaffoldingTests(unittest.TestCase):
         # in the pinned trixie snapshot (see the package-list comment).
         self.assertIn("python3.13-venv", packages)
         self.assertIn("python3-pip", packages)
+        # Hardware-found: NetworkManager shared/hotspot mode needs dnsmasq.
+        self.assertIn("dnsmasq-base", packages)
 
     @unittest.skipUnless(yaml is not None, "PyYAML not available")
     def test_layer_metadata_declares_layout_variables(self):
@@ -231,6 +233,7 @@ class ImageScaffoldingTests(unittest.TestCase):
             "cloud-guest-utils",
             "samba",
             "sudo",
+            "dnsmasq-base",
         ):
             self.assertIn(name, packages, name)
 

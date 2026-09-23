@@ -106,6 +106,13 @@ mmdebstrap:
     - zstd
     - samba
     - wpasupplicant
+    # The setup hotspot uses NetworkManager `ipv4.method shared`, whose DHCP
+    # server is dnsmasq. network-manager only *Recommends* dnsmasq-base and the
+    # image installs without recommends, so without this the AP activation fails
+    # outright and an unclaimed device has no setup hotspot at all (first-boot
+    # dead device, found on hardware). dnsmasq-base provides /usr/sbin/dnsmasq;
+    # the full `dnsmasq` package is intentionally NOT installed (no service).
+    - dnsmasq-base
     - ca-certificates
     - sudo
   customize-hooks:

@@ -249,6 +249,12 @@ def make_rootfs(base):
         "#!/bin/bash\n# synthetic fixed-verb helper\nexit 2\n", encoding="utf-8"
     )
     helper.chmod(0o755)
+    # dnsmasq is required by NetworkManager's shared/hotspot mode; the validator
+    # asserts /usr/sbin/dnsmasq exists (hardware-found missing package).
+    dnsmasq = root / "usr" / "sbin" / "dnsmasq"
+    dnsmasq.parent.mkdir(parents=True, exist_ok=True)
+    dnsmasq.write_text("#!/bin/sh\n# synthetic dnsmasq\nexit 0\n", encoding="utf-8")
+    dnsmasq.chmod(0o755)
     sudoers_dir = root / "etc" / "sudoers.d"
     sudoers_dir.mkdir(parents=True)
     sudoers_file = sudoers_dir / "prusa-cam"
@@ -513,6 +519,14 @@ class RootfsValidationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("RESULT: PASS", result.stdout)
         self.assertIn("all required units installed", result.stdout)
+
+    def test_missing_dnsmasq_fails(self):
+        # NetworkManager shared/hotspot mode cannot activate without dnsmasq.
+        root = self._root()
+        (root / "usr" / "sbin" / "dnsmasq").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dnsmasq missing", result.stdout)
 
     def test_unit_referencing_personal_home_fails(self):
         root = self._root()
