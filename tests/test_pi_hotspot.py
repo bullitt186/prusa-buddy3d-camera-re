@@ -202,24 +202,40 @@ class StartTests(unittest.TestCase):
 
 
 class StopTests(unittest.TestCase):
-    def test_stop_success_uses_disconnect(self):
-        runner = make_runner(default=FakeResult(0, ''))
+    def _down_calls(self, runner):
+        return [c[0] for c in runner.calls if 'connection' in c[0] and 'down' in c[0]]
+
+    def test_stop_deactivates_only_the_ap_profile(self):
+        # Must NOT disconnect the device: that would also tear down the station
+        # connection the wizard's finish step just activated.
+        runner = make_runner(handlers=ACTIVE_AP, default=FakeResult(0, ''))
         result = hotspot.stop(runner=runner)
         self.assertTrue(result.ok)
         self.assertFalse(result.active)
         self.assertEqual(
-            runner.calls[0][0],
+            self._down_calls(runner),
+            [['nmcli', 'connection', 'down', 'buddy3d-setup']],
+        )
+        self.assertNotIn(
             ['nmcli', 'device', 'disconnect', 'wlan0'],
+            [c[0] for c in runner.calls],
         )
 
+    def test_stop_when_ap_already_down_is_a_noop(self):
+        # Idempotent: the ExecStopPost must not fail after finish took the AP down.
+        runner = make_runner(default=FakeResult(0, ''))
+        result = hotspot.stop(runner=runner)
+        self.assertTrue(result.ok)
+        self.assertEqual(self._down_calls(runner), [])
+
     def test_stop_failure_is_reported(self):
-        runner = make_runner(default=FakeResult(1, ''))
+        runner = make_runner(handlers=ACTIVE_AP, default=FakeResult(1, ''))
         result = hotspot.stop(runner=runner)
         self.assertFalse(result.ok)
         self.assertIn('exit 1', result.reason)
 
     def test_stop_timeout_is_reported(self):
-        runner = make_runner(timeout_match='disconnect')
+        runner = make_runner(handlers=ACTIVE_AP, timeout_match='connection down')
         result = hotspot.stop(runner=runner)
         self.assertFalse(result.ok)
         self.assertIn('timed out', result.reason)

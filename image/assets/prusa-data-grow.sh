@@ -47,13 +47,19 @@ label="$(blkid -s LABEL -o value "$src" 2>/dev/null || true)"
 [ "$label" = "$EXPECTED_LABEL" ] || die "$src label '$label' != $EXPECTED_LABEL"
 
 # Validate the expected PARTUUID relationship: PARTUUID is <disk-signature>-NN
-# and the signature matches the first partition on the same device.
+# with a zero-padded partition number (MBR: -01, -02, -03), and the signature
+# matches the first partition on the same device. Compare the suffix
+# numerically so '-3' and '-03' both mean partition 3 (hardware-found: a
+# literal '*-3' match rejected the real 'b33dcafe-03', which failed
+# prusa-data-grow -> data-ready.target -> the whole camera target).
 partuuid="$(blkid -s PARTUUID -o value "$src" 2>/dev/null || true)"
 [ -n "$partuuid" ] || die "no PARTUUID for $src"
-case "$partuuid" in
-   *-"$EXPECTED_PARTNUM") ;;
-   *) die "PARTUUID '$partuuid' does not end in -$EXPECTED_PARTNUM" ;;
+pu_num="${partuuid##*-}"
+case "$pu_num" in
+   ''|*[!0-9]*) die "PARTUUID '$partuuid' has no numeric partition suffix" ;;
 esac
+[ "$((10#$pu_num))" = "$EXPECTED_PARTNUM" ] ||
+   die "PARTUUID '$partuuid' does not end in partition $EXPECTED_PARTNUM"
 disk_sig="${partuuid%-*}"
 first_pu="$(lsblk -no PARTUUID "$base" 2>/dev/null | awk 'NF { print; exit }')"
 [ -n "$first_pu" ] || die "no PARTUUID found on $base"

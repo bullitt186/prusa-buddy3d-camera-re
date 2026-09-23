@@ -249,8 +249,23 @@ def _up_command():
 
 
 def _disconnect_command(ifname):
-    """``nmcli device disconnect <ifname>`` stops the setup AP."""
+    """``nmcli device disconnect <ifname>`` (best effort, used by ``start``)."""
     return ['nmcli', 'device', 'disconnect', ifname]
+
+
+def _down_command():
+    """``nmcli connection down buddy3d-setup`` -- deactivate only the AP profile.
+
+    :func:`stop` uses this instead of ``nmcli device disconnect <ifname>``.
+    Disconnecting the *device* tears down whatever connection is active on the
+    interface, including the station connection the wizard's ``finish`` step
+    just established; when ``finish`` starts the camera target the provisioning
+    service stops (``Conflicts=``) and its ``ExecStopPost`` runs
+    ``hotspot_ctl stop``, so a device-wide disconnect left the claimed device
+    offline (hardware-found). Bringing the AP profile down by name leaves any
+    other active connection untouched.
+    """
+    return ['nmcli', 'connection', 'down', CONNECTION_NAME]
 
 
 def _active_connection_command(ifname):
@@ -374,21 +389,28 @@ def start(ssid, password=None, ifname=DEFAULT_IFNAME, runner=None):
 
 
 def stop(ifname=DEFAULT_IFNAME, runner=None):
-    """Stop the setup hotspot (``nmcli device disconnect <ifname>``).
+    """Stop the setup hotspot by deactivating only the AP profile.
 
-    Called before the camera target starts. Returns a :class:`HotspotResult`;
-    a command failure/timeout is reported, never raised.
+    Idempotent: when the AP is not active there is nothing to stop, so success
+    is reported without running nmcli (the wizard's ``finish`` already takes the
+    AP down, and the provisioning service's ``ExecStopPost`` must not then fail).
+    ``nmcli connection down buddy3d-setup`` leaves any other active connection
+    (e.g. the station network ``finish`` just activated) untouched. Returns a
+    :class:`HotspotResult`; a command failure/timeout is reported, never raised.
     """
     runner = runner or _default_runner
+    state = is_active(ifname=ifname, runner=runner)
+    if getattr(state, 'ok', False) and not getattr(state, 'active', False):
+        return HotspotResult(True, '', active=False, ifname=ifname)
     returncode, _stdout_text, failure = _run(
-        runner, _disconnect_command(ifname), COMMAND_TIMEOUT_SECONDS
+        runner, _down_command(), COMMAND_TIMEOUT_SECONDS
     )
     if failure is not None:
         return HotspotResult(False, failure, ifname=ifname)
     if returncode != 0:
         return HotspotResult(
             False,
-            _sanitize_reason(f'nmcli device disconnect failed (exit {returncode})'),
+            _sanitize_reason(f'nmcli connection down failed (exit {returncode})'),
             ifname=ifname,
         )
     return HotspotResult(True, '', active=False, ifname=ifname)

@@ -546,11 +546,14 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn("MARKER=/data/.prusa-data-grow.done", text)
         self.assertIn("EXPECTED_LABEL=PERSIST", text)
         self.assertIn("EXPECTED_PARTNUM=3", text)
-        # Validates the label and the expected PARTUUID relationship.
+        # Validates the label and the expected PARTUUID relationship. The MBR
+        # suffix is zero-padded ('-03'), so the partition number must be
+        # compared numerically (hardware-found: a literal '*-3' match failed).
         self.assertIn("blkid -s LABEL", text)
         self.assertIn("blkid -s PARTUUID", text)
         self.assertIn("EXPECTED_LABEL", text)
-        self.assertIn('case "$partuuid" in', text)
+        self.assertIn('pu_num="${partuuid##*-}"', text)
+        self.assertIn("10#$pu_num", text)
         # Grows partition 3 and resizes the filesystem.
         self.assertIn("growpart", text)
         self.assertIn("resize2fs", text)
@@ -565,6 +568,28 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertLess(grow, marker_write)
         self.assertLess(resize, marker_write)
         self.assertIn("sync", text[marker_write:])
+
+    def test_grow_partuuid_partition_number_is_compared_numerically(self):
+        # The exact hardware failure: 'b33dcafe-03' must be accepted as
+        # partition 3, 'b33dcafe-04' rejected, and a non-numeric suffix is an
+        # error. Mirrors the shell logic in prusa-data-grow.sh.
+        script = (
+            'p="$1"; EXPECTED_PARTNUM=3; '
+            'n="${p##*-}"; '
+            'case "$n" in ""|*[!0-9]*) exit 2;; esac; '
+            '[ "$((10#$n))" = "$EXPECTED_PARTNUM" ] && exit 0 || exit 1'
+        )
+
+        def rc(value):
+            return subprocess.run(
+                ["bash", "-c", script, "--", value],
+                capture_output=True,
+            ).returncode
+
+        self.assertEqual(rc("b33dcafe-03"), 0)
+        self.assertEqual(rc("b33dcafe-3"), 0)
+        self.assertEqual(rc("b33dcafe-04"), 1)
+        self.assertEqual(rc("b33dcafe-xx"), 2)
 
     # --- AC-13/AC-14: build script + no secrets ----------------------------
 
