@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  # branches-only so a tag push does not run this twice (release.yml owns tags).
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-gate:
+    name: host regression gate (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Unit tests (stdlib only)
+        run: python3 -m unittest discover -s tests
+
+      - name: Byte-compile pi-impersonator and tests
+        run: python3 -m compileall -q pi-impersonator tests
+
+      - name: Shell syntax (app + image scripts)
+        run: |
+          status=0
+          for f in image/scripts/*.sh pi-impersonator/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f" || status=1
+          done
+          exit "$status"
+
+      # Committed-secret gate: scan the files changed by this push/PR. Python
+      # source is scanned with the high-signal source-tree mode; every other
+      # changed file is scanned with the default artifact mode. tests/ and
+      # docs/ are skipped because they intentionally contain synthetic secret
+      # fixtures and redacted examples. Fails closed if the diff cannot be
+      # computed.
+      - name: Secret scan (changed files)
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            range="origin/${{ github.base_ref }}...HEAD"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              range="HEAD~1..HEAD"
+            else
+              range="${before}..${{ github.sha }}"
+            fi
+          fi
+          if ! git diff --name-only -z --diff-filter=ACMR "$range" > changed.z 2>/dev/null; then
+            echo "WARNING: could not diff $range; scanning the tip commit" >&2
+            if ! git show --name-only --pretty=format: -z HEAD > changed.z 2>/dev/null; then
+              echo "ERROR: could not enumerate changed files for $range" >&2
+              exit 1
+            fi
+          fi
+          mapfile -d '' -t changed < changed.z
+          py=()
+          other=()
+          for f in "${changed[@]}"; do
+            # tests/ and docs/ carry intentional synthetic/example fixtures;
+            # scan-secrets.sh itself defines the patterns and is not content.
+            case "$f" in
+              tests/* | docs/* | image/scripts/scan-secrets.sh) continue ;;
+            esac
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.py) py+=("$f") ;;
+              *) other+=("$f") ;;
+            esac
+          done
+          if [ "${#py[@]}" -gt 0 ]; then
+            echo "scan-secrets (source): ${py[*]}"
+            image/scripts/scan-secrets.sh --source-tree "${py[@]}"
+          fi
+          if [ "${#other[@]}" -gt 0 ]; then
+            echo "scan-secrets (data): ${other[*]}"
+            image/scripts/scan-secrets.sh "${other[@]}"
+          fi
+          if [ "${#py[@]}" -eq 0 ] && [ "${#other[@]}" -eq 0 ]; then
+            echo "no changed files to scan"
+          fi
+
+      - name: Whitespace check
+        run: git diff --check

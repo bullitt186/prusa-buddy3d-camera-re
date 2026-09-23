@@ -1,0 +1,295 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "alpha-v*"
+
+permissions:
+  contents: read
+
+env:
+  RPI_IMAGE_GEN_DIR: ${{ vars.RPI_IMAGE_GEN_DIR || '/data/build/rpi-image-gen' }}
+  WORKROOT: ${{ vars.WORKROOT || '/data/build/work' }}
+
+jobs:
+  host-gate:
+    name: host regression gate (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Unit tests (stdlib only)
+        run: python3 -m unittest discover -s tests
+
+      - name: Byte-compile pi-impersonator and tests
+        run: python3 -m compileall -q pi-impersonator tests
+
+      - name: Shell syntax (app + image scripts)
+        run: |
+          status=0
+          for f in image/scripts/*.sh pi-impersonator/*.sh; do
+            bash -n "$f" || status=1
+          done
+          exit "$status"
+
+      - name: Whitespace check
+        run: git diff --check
+
+  release:
+    name: build, sign and publish (native arm64)
+    needs: host-gate
+    # The supported release path is a controlled native arm64 Debian/Raspberry
+    # Pi OS runner (distribution plan §2.1). Never claim a QEMU/foreign build.
+    runs-on: [self-hosted, linux, arm64]
+    # Required to create the GitHub Release the signed manifest URLs point at.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail loudly on a non-arm64 runner
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64 | arm64) echo "native arm64 runner: $arch" ;;
+            *)
+              echo "ERROR: release builds require a native arm64 runner; got $arch" >&2
+              echo "Refusing to publish a foreign-architecture build." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Derive version and channel from the tag
+        id: meta
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            alpha-v*)
+              channel=alpha
+              version="${tag#alpha-v}"
+              ;;
+            v*)
+              channel=stable
+              version="${tag#v}"
+              ;;
+            *)
+              echo "ERROR: unexpected release tag: $tag" >&2
+              exit 1
+              ;;
+          esac
+          # Channel separation guard: alpha is a channel, never a version
+          # suffix. An alpha tag must not be publishable to stable, and a
+          # stable tag must not be publishable to alpha. make-app-release.sh
+          # re-checks the tag/channel pair when HEAD is exactly tagged.
+          case "$tag" in
+            alpha-*)
+              if [ "$channel" != "alpha" ]; then
+                echo "ERROR: alpha tag $tag must use the alpha channel" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              if [ "$channel" != "stable" ]; then
+                echo "ERROR: stable tag $tag must use the stable channel" >&2
+                exit 1
+              fi
+              ;;
+          esac
+          case "$version" in
+            *-* | *+*)
+              echo "ERROR: $tag is not a strict X.Y.Z release tag (version=$version)" >&2
+              exit 1
+              ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "url_base=https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}" >> "$GITHUB_OUTPUT"
+          echo "release_url=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build the appliance image
+        run: |
+          set -euo pipefail
+          image/scripts/build-image.sh | tee build.log
+          img="$(sed -n 's/^build complete: //p' build.log | tail -n1)"
+          if [ -z "$img" ] || [ ! -f "$img" ]; then
+            echo "ERROR: build-image.sh produced no image path" >&2
+            exit 1
+          fi
+          echo "IMAGE_PATH=$img" >> "$GITHUB_ENV"
+
+      - name: Write the release signing key (never echoed)
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "ERROR: the RELEASE_SIGNING_KEY repository secret is not set" >&2
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+          echo "MINISIGN_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Assemble the OS-image release artifacts
+        run: |
+          set -euo pipefail
+          image/scripts/make-release.sh \
+            --image "$IMAGE_PATH" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --out-dir dist \
+            --url-base "${{ steps.meta.outputs.url_base }}" \
+            --release-date "$(date -u +%Y-%m-%d)" \
+            --key "$MINISIGN_KEY"
+
+      - name: Download hash-pinned wheels for the offline release venv
+        run: |
+          set -euo pipefail
+          if ! python3 -m pip --version >/dev/null 2>&1; then
+            echo "ERROR: python3 -m pip is required on the release runner" >&2
+            exit 1
+          fi
+          rm -rf wheels
+          python3 -m pip download --require-hashes \
+            -r image/requirements.lock -d wheels
+
+      - name: Assemble the signed application release
+        run: |
+          set -euo pipefail
+          image/scripts/make-app-release.sh \
+            --source-dir pi-impersonator \
+            --version "${{ steps.meta.outputs.version }}" \
+            --channel "${{ steps.meta.outputs.channel }}" \
+            --out-dir dist \
+            --wheels wheels \
+            --url-base "${{ steps.meta.outputs.url_base }}" \
+            --key "$MINISIGN_KEY" \
+            --source-commit "$GITHUB_SHA" \
+            --min-image-version "${{ steps.meta.outputs.version }}" \
+            --release-summary "Buddy3D camera application ${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.channel }})" \
+            --release-url "${{ steps.meta.outputs.release_url }}" \
+            --release-date "$(date -u +%Y-%m-%d)"
+
+      - name: Validate the release artifacts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import sys
+
+          sys.path.insert(0, "pi-impersonator")
+          import updater  # noqa: E402
+
+          dist = "dist"
+          manifest_path = os.path.join(dist, "update-manifest.json")
+          with open(manifest_path, "rb") as handle:
+              manifest = updater.parse_manifest(handle.read())
+
+          bundle = os.path.join(
+              dist, "buddy3d-camera-app-%s.tar.zst" % manifest.version)
+          if not os.path.isfile(bundle):
+              raise SystemExit("bundle is missing: %s" % bundle)
+          with open(bundle, "rb") as handle:
+              digest = hashlib.sha256(handle.read()).hexdigest()
+          if digest != manifest.bundle_sha256:
+              raise SystemExit("bundle sha256 does not match the manifest")
+          if os.path.getsize(bundle) != manifest.bundle_size:
+              raise SystemExit("bundle size does not match the manifest")
+
+          public_key = "image/keys/buddy3d-release.pub"
+          for path in (bundle, manifest_path):
+              ok, reason = updater.verify_file(path, public_key_path=public_key)
+              if not ok:
+                  raise SystemExit("signature check failed for %s: %s" % (path, reason))
+
+          checksums = [n for n in os.listdir(dist) if n.endswith(".img.xz.sha256")]
+          if not checksums:
+              raise SystemExit("no OS-image checksum was produced")
+          for name in checksums:
+              target = os.path.join(dist, name[: -len(".sha256")])
+              recorded = open(os.path.join(dist, name), encoding="utf-8").read().split()[0]
+              with open(target, "rb") as handle:
+                  actual = hashlib.sha256(handle.read()).hexdigest()
+              if actual != recorded:
+                  raise SystemExit("OS-image checksum mismatch: %s" % name)
+
+          print("validated release %s (%s)" % (manifest.version, manifest.channel))
+          PY
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: buddy3d-release-${{ steps.meta.outputs.release_tag }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      # The signed manifest bakes .../releases/download/<tag>/<bundle>, so the
+      # GitHub Release must actually carry those assets. Fail the run if any
+      # file in dist/ does not match a published asset (or vice versa).
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: ${{ steps.meta.outputs.release_tag }}
+          prerelease: ${{ steps.meta.outputs.channel == 'alpha' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*
+
+      - name: Verify the published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          bearer = os.environ["GH_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          expected = sorted(
+              name for name in os.listdir("dist")
+              if os.path.isfile(os.path.join("dist", name))
+          )
+          request = urllib.request.Request(
+              "https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag),
+              headers={
+                  "Authorization": "Bearer %s" % bearer,
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "buddy3d-release",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              document = json.load(response)
+          assets = sorted(asset["name"] for asset in document.get("assets", []))
+          if assets != expected:
+              raise SystemExit(
+                  "published release assets do not match dist/: expected %r, got %r"
+                  % (expected, assets)
+              )
+          print("release %s has %d assets" % (tag, len(assets)))
+          PY
+
+      - name: Remove the release signing key
+        if: always()
+        run: rm -f "${MINISIGN_KEY:-}" "$RUNNER_TEMP/minisign.key"
