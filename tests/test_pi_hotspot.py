@@ -183,6 +183,23 @@ class StartTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn('unavailable', result.reason)
 
+    def test_nmcli_stderr_is_logged_on_failure(self):
+        # The real reason ("shared connection requires dnsmasq", "AP mode not
+        # supported", ...) only appears on nmcli's stderr; it must reach the
+        # journal so a headless first-boot failure is diagnosable.
+        failure = FakeResult(10, '', 'Error: shared connection requires dnsmasq')
+        runner = make_runner(handlers=[
+            ('connection add', failure),
+            ('connection modify', failure),
+        ])
+        with self.assertLogs('prusa-cam.hotspot', level='WARNING') as logs:
+            result = hotspot.start('Buddy3D-Setup-ddeeff', runner=runner)
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any('requires dnsmasq' in message for message in logs.output),
+            logs.output,
+        )
+
 
 class StopTests(unittest.TestCase):
     def test_stop_success_uses_disconnect(self):

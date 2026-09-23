@@ -173,6 +173,16 @@ def make_rootfs(base):
     (root / "etc" / "overlayroot.conf").write_text(
         'overlayroot="tmpfs:recurse=0"\n', encoding="utf-8"
     )
+    # Read-only ROOT + volatile tmpfs mounts for the writable runtime state.
+    (root / "etc" / "fstab").write_text(
+        "# synthetic fstab\n"
+        "PARTUUID=b33dcafe-02     /               ext4  ro,noatime 0 1\n"
+        "PARTUUID=b33dcafe-01     /boot/firmware  vfat  defaults,rw 0 2\n"
+        "PARTUUID=b33dcafe-03     /data           ext4  defaults 0 2\n"
+        "tmpfs                    /var            tmpfs  mode=0755 0 0\n"
+        "tmpfs                    /etc/prusa-cam  tmpfs  mode=0750,uid=1000,gid=1000 0 0\n",
+        encoding="utf-8",
+    )
     boot = root / "boot" / "firmware"
     boot.mkdir(parents=True)
     (boot / "cmdline.txt").write_text(
@@ -523,6 +533,23 @@ class RootfsValidationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("RESULT: PASS", result.stdout)
         self.assertIn("all required units installed", result.stdout)
+
+    def test_missing_tmpfs_volatile_mounts_fails(self):
+        # Read-only ROOT without the tmpfs mounts leaves NM/systemd unwritable.
+        root = self._root()
+        fstab = root / "etc" / "fstab"
+        fstab.write_text(
+            fstab.read_text(encoding="utf-8")
+            .replace("tmpfs                    /var            tmpfs  mode=0755 0 0\n", "")
+            .replace(
+                "tmpfs                    /etc/prusa-cam  tmpfs  mode=0750,uid=1000,gid=1000 0 0\n",
+                "",
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must mount /var and /etc/prusa-cam on tmpfs", result.stdout)
 
     def test_missing_dnsmasq_fails(self):
         # NetworkManager shared/hotspot mode cannot activate without dnsmasq.

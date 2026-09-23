@@ -1057,6 +1057,19 @@ PY
       report fail "/etc/overlayroot.conf missing or does not configure overlayroot"
    fi
 
+   # The ROOT is read-only (power-off safe), so the volatile runtime state that
+   # must be writable has to be mounted on tmpfs: /var (NetworkManager, systemd,
+   # Samba, journald) and /etc/prusa-cam (the app's ephemeral files). Without
+   # these, dnsmasq/NM cannot write and the setup hotspot never comes up.
+   fstab="$MOUNT_ROOT/etc/fstab"
+   if [ -f "$fstab" ] \
+      && grep -qE '^tmpfs[[:space:]]+/var[[:space:]]' "$fstab" \
+      && grep -qE '^tmpfs[[:space:]]+/etc/prusa-cam[[:space:]]' "$fstab"; then
+      report ok "fstab mounts volatile /var and /etc/prusa-cam on tmpfs"
+   else
+      report fail "fstab must mount /var and /etc/prusa-cam on tmpfs (read-only ROOT)"
+   fi
+
    # --- volatile, size-limited journald -----------------------------------
    journald_files=()
    if [ -f "$MOUNT_ROOT/etc/systemd/journald.conf" ]; then

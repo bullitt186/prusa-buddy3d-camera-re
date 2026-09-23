@@ -301,6 +301,11 @@ class ImageScaffoldingTests(unittest.TestCase):
         # ROOT is the immutable overlay lower with a tmpfs upper.
         self.assertIn("overlayroot=tmpfs", setup)
         self.assertIn('overlayroot="tmpfs:recurse=0"', setup)
+        # ROOT stays read-only; volatile runtime state (NM/systemd/Samba and the
+        # app's ephemeral /etc/prusa-cam files) is mounted on tmpfs so a
+        # power-off cannot damage the OS and the runtime is still writable.
+        self.assertIn("tmpfs                 /var            tmpfs", setup)
+        self.assertIn("tmpfs                 /etc/prusa-cam  tmpfs", setup)
         # PERSIST is mounted at /data, never part of the overlay.
         self.assertIn("/data", setup)
 

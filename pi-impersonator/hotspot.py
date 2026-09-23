@@ -150,6 +150,12 @@ def _returncode(result):
     return value if isinstance(value, int) else 1
 
 
+def _stderr(result):
+    """Best-effort text stderr of a runner result ('' when absent)."""
+    value = getattr(result, 'stderr', '')
+    return value if isinstance(value, str) else ''
+
+
 def _sanitize_reason(reason):
     """Bound and strip a reason so it can never carry control characters."""
     if not isinstance(reason, str):
@@ -179,7 +185,17 @@ def _run(runner, args, timeout):
         # otherwise carry argv (and a PSK) into the log.
         log.warning(f'hotspot: runner failed: {type(e).__name__}')
         return None, '', 'network manager command failed'
-    return _returncode(result), _stdout(result), None
+    code = _returncode(result)
+    if code != 0:
+        # nmcli's stderr is non-secret and is the only place the real reason
+        # appears (e.g. "shared connection requires dnsmasq", "AP mode not
+        # supported"). Persist a bounded copy to the journal without changing
+        # the public reason string; the first-boot hotspot failure was only
+        # diagnosable once this was visible.
+        detail = _sanitize_reason(_stderr(result))
+        if detail:
+            log.warning(f'hotspot: nmcli failed (exit {code}): {detail}')
+    return code, _stdout(result), None
 
 
 # --------------------------------------------------------------------------- #
