@@ -203,6 +203,8 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn("python3-pip", packages)
         # Hardware-found: NetworkManager shared/hotspot mode needs dnsmasq.
         self.assertIn("dnsmasq-base", packages)
+        self.assertIn("nftables", packages)
+        self.assertIn("iptables", packages)
 
     @unittest.skipUnless(yaml is not None, "PyYAML not available")
     def test_layer_metadata_declares_layout_variables(self):
@@ -234,6 +236,8 @@ class ImageScaffoldingTests(unittest.TestCase):
             "samba",
             "sudo",
             "dnsmasq-base",
+            "nftables",
+            "iptables",
         ):
             self.assertIn(name, packages, name)
 

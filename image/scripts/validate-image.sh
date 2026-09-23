@@ -1109,6 +1109,15 @@ PY
       report fail "dnsmasq missing (NetworkManager shared/hotspot DHCP requires dnsmasq-base)"
    fi
 
+   # network-manager also only Recommends the shared-mode NAT backend. Accept
+   # either backend NetworkManager can use (nftables preferred, iptables is the
+   # Raspberry Pi OS default) so the image does not depend on one.
+   if [ -x "$MOUNT_ROOT/usr/sbin/nft" ] || [ -x "$MOUNT_ROOT/usr/sbin/iptables" ]; then
+      report ok "a firewall backend (nftables/iptables) is present for shared-mode NAT"
+   else
+      report fail "no firewall backend (nftables/iptables) for NetworkManager shared-mode NAT"
+   fi
+
    # --- factory app + launcher fallback -----------------------------------
    if [ -f "$MOUNT_ROOT/opt/prusa-cam/main.py" ]; then
       report ok "factory application present under /opt/prusa-cam"

@@ -113,6 +113,12 @@ mmdebstrap:
     # dead device, found on hardware). dnsmasq-base provides /usr/sbin/dnsmasq;
     # the full `dnsmasq` package is intentionally NOT installed (no service).
     - dnsmasq-base
+    # network-manager also only *Recommends* the shared-mode NAT backend. The AP
+    # beacons before NAT is applied, but include both backends NetworkManager can
+    # use (nftables preferred; iptables is the Raspberry Pi OS default) so
+    # shared-mode activation is fully self-contained.
+    - nftables
+    - iptables
     - ca-certificates
     - sudo
   customize-hooks:

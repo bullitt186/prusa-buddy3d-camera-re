@@ -255,6 +255,10 @@ def make_rootfs(base):
     dnsmasq.parent.mkdir(parents=True, exist_ok=True)
     dnsmasq.write_text("#!/bin/sh\n# synthetic dnsmasq\nexit 0\n", encoding="utf-8")
     dnsmasq.chmod(0o755)
+    # Shared-mode NAT backend (nftables/iptables); the validator requires one.
+    nft = root / "usr" / "sbin" / "nft"
+    nft.write_text("#!/bin/sh\n# synthetic nft\nexit 0\n", encoding="utf-8")
+    nft.chmod(0o755)
     sudoers_dir = root / "etc" / "sudoers.d"
     sudoers_dir.mkdir(parents=True)
     sudoers_file = sudoers_dir / "prusa-cam"
@@ -527,6 +531,16 @@ class RootfsValidationTests(unittest.TestCase):
         result = run_validator("--image", self.image, "--mount-root", root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dnsmasq missing", result.stdout)
+
+    def test_missing_firewall_backend_fails(self):
+        root = self._root()
+        for name in ("nft", "iptables"):
+            candidate = root / "usr" / "sbin" / name
+            if candidate.exists():
+                candidate.unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("firewall backend", result.stdout)
 
     def test_unit_referencing_personal_home_fails(self):
         root = self._root()
