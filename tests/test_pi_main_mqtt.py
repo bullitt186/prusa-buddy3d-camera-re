@@ -58,7 +58,8 @@ class MainMqttSourceTests(unittest.TestCase):
         for node in ast.walk(self.tree):
             if isinstance(node, ast.Import):
                 imported.update(alias.name for alias in node.names)
-        for name in ('mqtt_service', 'config_schema', 'app_metrics', 'app_version'):
+        for name in ('mqtt_service', 'config_schema', 'app_metrics', 'app_version',
+                     'privileged', 'updater_install'):
             self.assertIn(name, imported)
 
     def test_build_timelapse_video_is_defined_and_returns_bool(self):
@@ -104,6 +105,7 @@ class MainMqttSourceTests(unittest.TestCase):
         for name in (
             'application_version', 'serial', 'mac', 'build_timelapse',
             'restart', 'metrics_provider', 'secrets',
+            'update_state_provider', 'update_install',
         ):
             self.assertIn(name, keywords, f'MqttService missing {name}')
         # The callables are the real module-level providers.
@@ -111,6 +113,16 @@ class MainMqttSourceTests(unittest.TestCase):
         self.assertEqual(_attr_chain(keywords['restart']), ['reboot_device'])
         self.assertEqual(
             _attr_chain(keywords['metrics_provider']), ['app_metrics', 'metrics_provider'])
+        # AC-31: the update state comes from the root-written state file and the
+        # install trigger is the fixed-verb privileged helper, never in-process.
+        self.assertEqual(
+            _attr_chain(keywords['update_install']),
+            ['privileged', 'install_update'])
+        provider = keywords['update_state_provider']
+        self.assertIsInstance(provider, ast.Lambda)
+        self.assertEqual(
+            _attr_chain(getattr(provider.body, 'func', None)),
+            ['updater_install', 'read_update_state'])
         version_node = keywords['application_version']
         if isinstance(version_node, ast.Call):
             version_node = version_node.func

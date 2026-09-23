@@ -1,0 +1,36 @@
+# Signed application update install (WP-R4c / AC-30/AC-31). Root because the
+# install path (``updater_install.py install``) must swap the release symlinks
+# under /data and restart the camera runtime.
+#
+# This unit is triggered ONLY through the fixed-verb root helper
+# (``prusa-priv install-update`` -> ``systemctl start``), never by a timer and
+# never by camera startup. It deliberately has no [Install] section: it is
+# installed but never enabled, so it cannot run on its own. It is not Wants=/
+# Requires= pulled by prusa-camera.target (AC-27 isolation): an update failure
+# cannot stop the source, signaling, snapshots, RTSP, or WebRTC.
+#
+# The manifest source is the root-owned /etc/prusa-updater.conf
+# (``PRUSA_UPDATE_MANIFEST_URL``); with no positional manifest argument the CLI
+# downloads the signed manifest from that URL. The release-signing public key is
+# fixed in updater_install.py (DEFAULT_PUBLIC_KEY_PATH, AC-32) and is never
+# configurable through the environment.
+#
+# PATH is pinned so the ``minisign``/``zstd`` binaries invoked by updater.py
+# resolve deterministically under the root service.
+[Unit]
+Description=Buddy3D signed application update install
+After=network-online.target data-ready.target
+Wants=network-online.target
+Requires=data-ready.target
+ConditionPathIsMountPoint=/data
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/prusa-cam
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/prusa-updater.conf
+ExecStartPre=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/updater_install.py recover
+ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/updater_install.py install

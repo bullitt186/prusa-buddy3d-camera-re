@@ -109,6 +109,16 @@ DEFAULT_STATE_DIR = DATA_ROOT
 DEFAULT_LAST_CHECK_PATH = DEFAULT_STATE_DIR + '/last-update-check.json'
 DEFAULT_PUBLIC_KEY_PATH = updater.DEFAULT_PUBLIC_KEY_PATH
 
+#: HA update-state document read by the MQTT service and written by the root
+#: updater after every ``check``/``install`` run. It lives directly under the
+#: durable ``/data/prusa-cam`` state area (root-owned releases aside, this file is
+#: written only by the root updater with mode 0644, so the unprivileged
+#: ``prusa-cam`` app can read it but never needs to write it).
+DEFAULT_UPDATE_STATE_PATH = DATA_ROOT + '/update-state.json'
+#: Hard bound on the state document (both read and write); a larger file is
+#: treated as corrupt so a runaway writer cannot feed the MQTT publisher.
+MAX_UPDATE_STATE_BYTES = 8 * 1024
+
 #: Downloaded bundle filename inside the unique staging directory.
 BUNDLE_FILENAME = 'bundle.tar.zst'
 #: Detached minisign signature for the bundle (master §7.1 publishes it next to
@@ -318,9 +328,13 @@ def required_free_space(bundle_size):
 
 
 def _remove_file(path):
+    # A failed os.makedirs/tempfile leaves ``path`` as None; never let a
+    # best-effort cleanup turn into a TypeError (WP-R4c-2a).
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return
     try:
         os.remove(path)
-    except OSError:
+    except (OSError, TypeError):
         pass
 
 
@@ -1093,6 +1107,88 @@ def update_state_document(*, installed_version, latest_version, release_summary,
     }
 
 
+#: The exact HA update-schema keys the persisted state file may carry. Reads are
+#: projected onto this allowlist so an unexpected key (for example a secret a
+#: future writer might add) can never reach the MQTT publisher.
+UPDATE_STATE_KEYS = (
+    'installed_version', 'latest_version', 'release_summary', 'release_url',
+    'in_progress', 'update_percentage',
+)
+
+
+def read_update_state(path=DEFAULT_UPDATE_STATE_PATH):
+    """Read and normalize the persisted HA update-state document.
+
+    Returns a dict with exactly :data:`UPDATE_STATE_KEYS`, or ``None`` when the
+    file is absent, unreadable, oversized, malformed JSON, or not a JSON object.
+    Bounded and never raises. The value is re-normalized through
+    :func:`update_state_document` so unknown keys and control characters cannot
+    reach the MQTT publisher.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        with open(path, 'rb') as handle:
+            raw = handle.read(MAX_UPDATE_STATE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_UPDATE_STATE_BYTES:
+        return None
+    try:
+        document = json.loads(raw.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return update_state_document(
+        installed_version=document.get('installed_version'),
+        latest_version=document.get('latest_version'),
+        release_summary=document.get('release_summary'),
+        release_url=document.get('release_url'),
+        in_progress=document.get('in_progress', False),
+        update_percentage=document.get('update_percentage'),
+    )
+
+
+def write_update_state(document, path=DEFAULT_UPDATE_STATE_PATH):
+    """Atomically write the HA update-state document; never raises.
+
+    The state area is root-owned (only the root updater writes this file) and the
+    document is written as mode 0644 so the unprivileged ``prusa-cam`` app can
+    read it. The write goes through a temp file + ``os.replace`` so a concurrent
+    reader never observes a partially written document. Returns ``True`` on
+    success; a non-dict document, a non-string/empty path, an oversized
+    encoding, or any filesystem error returns ``False``.
+    """
+    if not isinstance(document, dict) or not isinstance(path, str) or not path:
+        return False
+    try:
+        payload = json.dumps(document, separators=(',', ':')).encode('utf-8')
+    except (TypeError, ValueError):
+        return False
+    if len(payload) > MAX_UPDATE_STATE_BYTES:
+        return False
+    tmp = None
+    try:
+        directory = os.path.dirname(path) or '.'
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=os.path.basename(path) + '.', dir=directory)
+        try:
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(payload)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except OSError:
+            _remove_file(tmp)
+            return False
+        return True
+    except OSError:
+        _remove_file(tmp)
+        return False
+
+
+
 # --------------------------------------------------------------------------- #
 # Real callables for the CLI (never used by the tests)
 # --------------------------------------------------------------------------- #
@@ -1315,15 +1411,55 @@ def _paths_from_data_root(data_root):
     )
 
 
+def _state_path(args):
+    """State-file path: explicit ``--state-path`` or ``<data-root>/update-state.json``."""
+    explicit = getattr(args, 'state_path', '')
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return os.path.join(args.data_root, 'update-state.json')
+
+
+def _install_state_document(installed_version, manifest=None, reason=''):
+    """Build the HA update-state document written after a CLI run.
+
+    ``manifest`` supplies the offered version/summary/URL when an installable or
+    up-to-date release was seen; otherwise ``reason`` (already bounded by the
+    caller) is surfaced as the summary so HA reflects an error/rejection.
+    """
+    latest = getattr(manifest, 'version', '') if manifest is not None else ''
+    summary = getattr(manifest, 'release_summary', '') if manifest is not None else ''
+    url = getattr(manifest, 'release_url', '') if manifest is not None else ''
+    if not latest and reason:
+        summary = reason
+    return update_state_document(
+        installed_version=installed_version,
+        latest_version=latest,
+        release_summary=summary or '',
+        release_url=url or '',
+        in_progress=False,
+        update_percentage=None,
+    )
+
+
+def _write_state(args, installed_version, manifest=None, reason=''):
+    """Best-effort persist of the HA update-state document; never raises."""
+    write_update_state(
+        _install_state_document(installed_version, manifest, reason),
+        path=_state_path(args))
+
+
 def _cli_check(args):
     # Repair any interrupted previous update before deciding availability; the
     # service also runs this via ExecStartPre. Idempotent and best-effort.
     paths = _paths_from_data_root(args.data_root)
     recover_interrupted(paths)
+    current_version = args.current_version or app_version.application_version()
     if not args.manifest_url:
         # No manifest URL configured (the root-owned /etc/prusa-updater.conf is
-        # unset): a scheduled check is a no-op, never a usage error.
+        # unset): a scheduled check is a no-op, never a usage error. The state
+        # file is still refreshed so HA reflects the installed version.
         print('updater: no update manifest URL is configured; nothing to check')
+        _write_state(args, current_version)
         return 0
     tmp = tempfile.mkdtemp(prefix='buddy3d-update-check-')
     try:
@@ -1339,6 +1475,8 @@ def _cli_check(args):
         except Exception as e:  # noqa: BLE001 - fetch failures are reported
             print(f'updater: could not fetch the update manifest '
                   f'({type(e).__name__})', file=sys.stderr)
+            _write_state(args, current_version,
+                         reason=f'manifest fetch failed ({type(e).__name__})')
             return 1
 
         def fetch_manifest():
@@ -1349,7 +1487,6 @@ def _cli_check(args):
                 manifest_path, signature_path=sig_path,
                 public_key_path=DEFAULT_PUBLIC_KEY_PATH)
 
-        current_version = args.current_version or app_version.application_version()
         result = check_for_update(
             current_version=current_version,
             current_image_version=args.current_image_version,
@@ -1365,68 +1502,115 @@ def _cli_check(args):
         shutil.rmtree(tmp, ignore_errors=True)
 
     if result.outcome == CHECK_AVAILABLE:
+        _write_state(args, current_version, manifest=result.manifest)
         print(f'updater: update {result.manifest.version} is available')
         return 0
-    if result.outcome in (CHECK_UP_TO_DATE, CHECK_SUPPRESSED):
+    if result.outcome == CHECK_UP_TO_DATE:
+        _write_state(args, current_version, manifest=result.manifest,
+                     reason=result.reason)
         print(f'updater: {result.reason or "no update available"}')
         return 0
+    if result.outcome == CHECK_SUPPRESSED:
+        _write_state(args, current_version, reason=result.reason)
+        print(f'updater: {result.reason or "no update available"}')
+        return 0
+    _write_state(args, current_version, reason=result.reason or result.outcome)
     print(f'updater: update check failed: {result.reason}', file=sys.stderr)
     return 1
 
 
 def _cli_install(args):
-    manifest_path = args.manifest
-    if not os.path.isfile(manifest_path):
-        print(f'updater: manifest not found: {manifest_path}', file=sys.stderr)
-        return 2
-    # The signing key is fixed in the image (AC-32); it is never taken from the
-    # environment or a CLI flag, so a service-writable config cannot redirect it.
-    ok, reason = updater.verify_file(
-        manifest_path, public_key_path=DEFAULT_PUBLIC_KEY_PATH)
-    if not ok:
-        print(f'updater: manifest signature verification failed: {reason}',
+    current_version = args.current_version or app_version.application_version()
+    tmp = None
+    try:
+        manifest_path = args.manifest
+        if manifest_path:
+            if not os.path.isfile(manifest_path):
+                print(f'updater: manifest not found: {manifest_path}',
+                      file=sys.stderr)
+                _write_state(args, current_version, reason='manifest not found')
+                return 2
+        elif args.manifest_url:
+            # The root service starts ``install`` with no positional manifest; it
+            # fetches the signed manifest from the configured (root-owned)
+            # PRUSA_UPDATE_MANIFEST_URL. The signature is read from the default
+            # ``<manifest>.minisig`` path that ``updater.verify_file`` expects.
+            tmp = tempfile.mkdtemp(prefix='buddy3d-update-install-')
+            manifest_path = os.path.join(tmp, 'update-manifest.json')
+            sig_path = manifest_path + updater.DEFAULT_SIGNATURE_SUFFIX
+            try:
+                _download_to(args.manifest_url, manifest_path,
+                             MAX_MANIFEST_DOWNLOAD_BYTES)
+                _download_to(args.manifest_url + updater.DEFAULT_SIGNATURE_SUFFIX,
+                             sig_path, MAX_MANIFEST_DOWNLOAD_BYTES)
+            except Exception as e:  # noqa: BLE001 - fetch failures are reported
+                print(f'updater: could not fetch the update manifest '
+                      f'({type(e).__name__})', file=sys.stderr)
+                _write_state(args, current_version,
+                             reason='manifest fetch failed')
+                return 1
+        else:
+            print('updater: no manifest or update manifest URL is configured',
+                  file=sys.stderr)
+            _write_state(args, current_version, reason='no manifest configured')
+            return 2
+
+        # The signing key is fixed in the image (AC-32); it is never taken from
+        # the environment or a CLI flag, so a service-writable config cannot
+        # redirect it.
+        ok, reason = updater.verify_file(
+            manifest_path, public_key_path=DEFAULT_PUBLIC_KEY_PATH)
+        if not ok:
+            print(f'updater: manifest signature verification failed: {reason}',
+                  file=sys.stderr)
+            _write_state(args, current_version, reason=reason)
+            return 1
+        try:
+            with open(manifest_path, encoding='utf-8') as handle:
+                payload = handle.read(updater.MAX_MANIFEST_BYTES + 1)
+            manifest = updater.parse_manifest(payload)
+        except (OSError, updater.ManifestError) as e:
+            print(f'updater: invalid manifest: {e}', file=sys.stderr)
+            _write_state(args, current_version, reason='invalid manifest')
+            return 1
+
+        paths = _paths_from_data_root(args.data_root)
+        recover_interrupted(paths)
+        result = install_update(
+            manifest,
+            paths=paths,
+            download=default_download,
+            verify_manifest_signature=lambda _m, _s: updater.verify_file(
+                manifest_path, public_key_path=DEFAULT_PUBLIC_KEY_PATH),
+            verify_bundle_signature=lambda path: updater.verify_file(
+                path, public_key_path=DEFAULT_PUBLIC_KEY_PATH),
+            free_space=default_free_space,
+            extract=updater.extract_bundle,
+            build_venv=default_build_venv,
+            preflight=default_preflight,
+            switch=switch_release,
+            health_check=default_health_check,
+            restart_services=default_restart_services,
+            record_bad=lambda version, bad_reason: record_bad_release(
+                paths, version, bad_reason),
+            prune=default_prune,
+            clock=time.time,
+            sleeper=time.sleep,
+            current_version=current_version,
+            current_image_version=args.current_image_version,
+            force_reinstall=args.force_reinstall,
+        )
+        _write_state(args, result.installed_version or current_version,
+                     manifest=manifest)
+        if result.ok:
+            print(f'updater: installed {result.installed_version}')
+            return 0
+        print(f'updater: install failed ({result.outcome}): {result.reason}',
               file=sys.stderr)
         return 1
-    try:
-        with open(manifest_path, encoding='utf-8') as handle:
-            payload = handle.read(updater.MAX_MANIFEST_BYTES + 1)
-        manifest = updater.parse_manifest(payload)
-    except (OSError, updater.ManifestError) as e:
-        print(f'updater: invalid manifest: {e}', file=sys.stderr)
-        return 1
-
-    paths = _paths_from_data_root(args.data_root)
-    recover_interrupted(paths)
-    result = install_update(
-        manifest,
-        paths=paths,
-        download=default_download,
-        verify_manifest_signature=lambda _m, _s: updater.verify_file(
-            manifest_path, public_key_path=DEFAULT_PUBLIC_KEY_PATH),
-        verify_bundle_signature=lambda path: updater.verify_file(
-            path, public_key_path=DEFAULT_PUBLIC_KEY_PATH),
-        free_space=default_free_space,
-        extract=updater.extract_bundle,
-        build_venv=default_build_venv,
-        preflight=default_preflight,
-        switch=switch_release,
-        health_check=default_health_check,
-        restart_services=default_restart_services,
-        record_bad=lambda version, bad_reason: record_bad_release(
-            paths, version, bad_reason),
-        prune=default_prune,
-        clock=time.time,
-        sleeper=time.sleep,
-        current_version=args.current_version or app_version.application_version(),
-        current_image_version=args.current_image_version,
-        force_reinstall=args.force_reinstall,
-    )
-    if result.ok:
-        print(f'updater: installed {result.installed_version}')
-        return 0
-    print(f'updater: install failed ({result.outcome}): {result.reason}',
-          file=sys.stderr)
-    return 1
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _cli_recover(args):
@@ -1473,12 +1657,26 @@ def main(argv=None):
         default=os.environ.get('PRUSA_IMAGE_VERSION', ''))
     check.add_argument('--last-check-path', default=DEFAULT_LAST_CHECK_PATH)
     check.add_argument('--data-root', default=DATA_ROOT)
+    check.add_argument(
+        '--state-path', default='',
+        help='HA update-state file (default: <data-root>/update-state.json)')
     check.add_argument('--force', action='store_true',
                        help='bypass the 24 h interval (manual request)')
 
-    install = sub.add_parser('install', help='install a signed update')
-    install.add_argument('manifest', help='path to update-manifest.json')
+    install = sub.add_parser(
+        'install',
+        help='install a signed update (from a manifest path or manifest URL)')
+    install.add_argument(
+        'manifest', nargs='?', default='',
+        help='path to update-manifest.json (default: fetch --manifest-url)')
+    install.add_argument(
+        '--manifest-url',
+        default=os.environ.get(MANIFEST_URL_ENV, ''),
+        help=f'signed update-manifest.json URL (default: ${MANIFEST_URL_ENV})')
     install.add_argument('--data-root', default=DATA_ROOT)
+    install.add_argument(
+        '--state-path', default='',
+        help='HA update-state file (default: <data-root>/update-state.json)')
     install.add_argument('--current-version', default='')
     install.add_argument(
         '--current-image-version',
@@ -1515,6 +1713,7 @@ __all__ = [
     'DEFAULT_PUBLIC_KEY_PATH',
     'DEFAULT_RELEASES_DIR',
     'DEFAULT_STATE_DIR',
+    'DEFAULT_UPDATE_STATE_PATH',
     'EXTRACTED_EXPANSION_FACTOR',
     'FREE_SPACE_HEADROOM_BYTES',
     'HEALTH_TIMEOUT_SECONDS',
@@ -1524,7 +1723,9 @@ __all__ = [
     'InstallPaths',
     'InstallResult',
     'MAX_SIGNATURE_DOWNLOAD_BYTES',
+    'MAX_UPDATE_STATE_BYTES',
     'RecoveryReport',
+    'UPDATE_STATE_KEYS',
     'VENV_ALLOWANCE_BYTES',
     'check_for_update',
     'default_build_venv',
@@ -1537,11 +1738,13 @@ __all__ = [
     'install_update',
     'main',
     'read_bad_versions',
+    'read_update_state',
     'record_bad_release',
     'recover_interrupted',
     'required_free_space',
     'switch_release',
     'update_state_document',
+    'write_update_state',
 ]
 
 

@@ -291,7 +291,8 @@ else
       prusa-cam.service pi-persist.service prusa-data-ready.service \
       data-ready.target bootlog.service prusa-data-grow.service \
       prusa-camera.target prusa-boot-mode.service \
-      prusa-updater.service prusa-updater.timer; do
+      prusa-updater.service prusa-updater.timer \
+      prusa-updater-install.service; do
       add_unit "$unit"
    done
    if [ -d "$REPO_UNITS" ]; then
@@ -471,6 +472,60 @@ else
        fi
     else
        report fail "prusa-updater.timer is missing"
+    fi
+
+    # WP-R4c/AC-31: the install oneshot runs the full signed install, is gated on
+    # data-ready.target, and is triggered ONLY via the fixed-verb helper
+    # (``prusa-priv install-update``). It must never be enabled: no [Install]
+    # section and no enable symlink at multi-user.target or prusa-camera.target.
+    install_unit="$SYSTEMD_DIR/prusa-updater-install.service"
+    if [ -f "$install_unit" ]; then
+       report ok "prusa-updater-install.service is installed"
+       if grep -q 'updater_install.py install' "$install_unit"; then
+          report ok "prusa-updater-install.service runs updater_install.py install"
+       else
+          report fail "prusa-updater-install.service must run 'updater_install.py install'"
+       fi
+       if grep -q 'updater_install.py recover' "$install_unit"; then
+          report ok "prusa-updater-install.service recovers interrupted state before install"
+       else
+          report fail "prusa-updater-install.service must run 'updater_install.py recover' before install"
+       fi
+       if unit_has "$install_unit" Requires data-ready.target \
+          && unit_has "$install_unit" After data-ready.target; then
+          report ok "prusa-updater-install.service is After= and Requires= data-ready.target"
+       else
+          report fail "prusa-updater-install.service must be After= and Requires= data-ready.target"
+       fi
+       if [ -L "$wants_dir/prusa-updater-install.service" ] \
+          || [ -L "$camera_wants_dir/prusa-updater-install.service" ]; then
+          report fail "prusa-updater-install.service must not be enabled (triggered only via the helper)"
+       else
+          report ok "prusa-updater-install.service is not enabled"
+       fi
+       if [ -f "$target_file" ]; then
+          if unit_has "$target_file" Wants prusa-updater-install.service \
+             || unit_has "$target_file" Requires prusa-updater-install.service; then
+             report fail "prusa-camera.target must not pull prusa-updater-install.service"
+          else
+             report ok "prusa-camera.target does not pull prusa-updater-install.service"
+          fi
+       fi
+       # AC-32, same standard as prusa-updater.service: no public-key env
+       # override and no service-writable EnvironmentFile (the root-owned
+       # /etc/prusa-updater.conf is the only config source).
+       if grep -q 'PRUSA_UPDATE_PUBLIC_KEY' "$install_unit"; then
+          report fail "prusa-updater-install.service must not allow a public-key env override"
+       else
+          report ok "prusa-updater-install.service has no public-key env override"
+       fi
+       if grep -q 'EnvironmentFile=.*/etc/prusa-cam' "$install_unit"; then
+          report fail "prusa-updater-install.service must not read a service-writable EnvironmentFile"
+       else
+          report ok "prusa-updater-install.service has no service-writable EnvironmentFile"
+       fi
+    else
+       report fail "prusa-updater-install.service is missing"
     fi
 
     # prusa-admin.service is bound to the camera runtime, never to

@@ -70,7 +70,8 @@ unit_src="$repo/pi-impersonator/systemd"
 for u in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
          prusa-cam.service prusa-admin.service prusa-provisioning.service \
          pi-persist.service prusa-data-ready.service data-ready.target \
-         bootlog.service prusa-updater.service prusa-updater.timer; do
+         bootlog.service prusa-updater.service prusa-updater.timer \
+         prusa-updater-install.service; do
    install -D -m 0644 "$unit_src/$u" "$SYSTEMD_DST/$u"
 done
 

@@ -45,6 +45,7 @@ VERBS = frozenset({
     'hotspot-start',
     'hotspot-stop',
     'wifi-station-apply',
+    'install-update',
 })
 
 #: Bounded wall-clock timeout for a privileged invocation.
@@ -155,6 +156,16 @@ def start_camera(runner=None):
 def stop_provisioning(runner=None):
     """Stop ``prusa-provisioning.service`` as root."""
     return _invoke('stop-provisioning', runner=runner)
+
+
+def install_update(runner=None):
+    """Trigger ``prusa-updater-install.service`` as root.
+
+    The helper starts the root oneshot unit, which runs the signed install
+    (``updater_install.py install``); the MQTT trigger never performs the install
+    itself and never handles the signing key. Returns a :class:`PrivilegedResult`.
+    """
+    return _invoke('install-update', runner=runner)
 
 
 def hotspot_start(runner=None):

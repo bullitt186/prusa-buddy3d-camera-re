@@ -1102,6 +1102,57 @@ class UpdaterImageValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("prusa-updater.service must not be enabled", result.stdout)
 
+    def test_good_rootfs_reports_install_unit_checks(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "prusa-updater-install.service is installed", result.stdout)
+        self.assertIn(
+            "prusa-updater-install.service runs updater_install.py install",
+            result.stdout)
+        self.assertIn(
+            "prusa-updater-install.service is After= and Requires= data-ready.target",
+            result.stdout)
+        self.assertIn(
+            "prusa-updater-install.service is not enabled", result.stdout)
+        self.assertIn(
+            "prusa-camera.target does not pull prusa-updater-install.service",
+            result.stdout)
+
+    def test_missing_install_unit_fails(self):
+        root = self._root()
+        (self._systemd(root) / "prusa-updater-install.service").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-updater-install.service is missing", result.stdout)
+
+    def test_enabled_install_unit_fails(self):
+        root = self._root()
+        os.symlink(
+            "../prusa-updater-install.service",
+            self._systemd(root) / "multi-user.target.wants"
+            / "prusa-updater-install.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "prusa-updater-install.service must not be enabled", result.stdout)
+
+    def test_install_unit_in_camera_target_fails(self):
+        root = self._root()
+        target = self._systemd(root) / "prusa-camera.target.wants"
+        if not target.exists():
+            target.mkdir(parents=True)
+        os.symlink(
+            "../prusa-updater-install.service",
+            target / "prusa-updater-install.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "must not be enabled (triggered only via the helper)", result.stdout)
+
 
 class LauncherWiringValidationTests(unittest.TestCase):
     """WP-R4c: runtime units exec the launcher; launcher prefers the release."""

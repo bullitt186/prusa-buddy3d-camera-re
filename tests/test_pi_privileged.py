@@ -58,6 +58,7 @@ class ImportSafetyTests(unittest.TestCase):
             importlib.reload(privileged)
         self.assertTrue(callable(privileged.start_camera))
         self.assertTrue(callable(privileged.activate_station))
+        self.assertTrue(callable(privileged.install_update))
 
 
 class AllowlistTests(unittest.TestCase):
@@ -66,7 +67,7 @@ class AllowlistTests(unittest.TestCase):
             privileged.VERBS,
             frozenset({
                 'start-camera', 'stop-provisioning', 'hotspot-start',
-                'hotspot-stop', 'wifi-station-apply',
+                'hotspot-stop', 'wifi-station-apply', 'install-update',
             }),
         )
 
@@ -95,6 +96,21 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(
             verbs, ['stop-provisioning', 'hotspot-start', 'hotspot-stop']
         )
+
+    def test_install_update_uses_sudo_no_prompt_helper(self):
+        runner = make_runner()
+        result = privileged.install_update(runner=runner)
+        self.assertTrue(result)
+        self.assertEqual(
+            runner.calls[0][0],
+            ['sudo', '-n', '/usr/libexec/prusa-cam/prusa-priv', 'install-update'],
+        )
+
+    def test_install_update_failure_is_bounded(self):
+        runner = make_runner(default=FakeResult(1, ''))
+        result = privileged.install_update(runner=runner)
+        self.assertFalse(result)
+        self.assertIn('install-update failed', result.reason)
 
     def test_start_camera_failure_returns_false(self):
         runner = make_runner(default=FakeResult(1, ''))

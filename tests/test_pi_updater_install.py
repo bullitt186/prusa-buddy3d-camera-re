@@ -1012,6 +1012,116 @@ class UpdateStateDocumentTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# read_update_state / write_update_state (WP-R4c)
+# --------------------------------------------------------------------------- #
+
+class UpdateStateFileTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, 'update-state.json')
+
+    def test_default_path_is_under_durable_data(self):
+        self.assertEqual(ui.DEFAULT_UPDATE_STATE_PATH,
+                         '/data/prusa-cam/update-state.json')
+
+    def test_round_trip(self):
+        document = ui.update_state_document(
+            installed_version='1.0.0', latest_version='1.1.0',
+            release_summary='Fixes a camera bug.',
+            release_url='https://example.com/releases/1.1.0',
+            in_progress=False, update_percentage=None)
+        self.assertTrue(ui.write_update_state(document, path=self.path))
+        self.assertEqual(ui.read_update_state(self.path), document)
+
+    def test_write_is_mode_0644_so_app_can_read(self):
+        self.assertTrue(ui.write_update_state(
+            ui.update_state_document(
+                installed_version='1.0.0', latest_version='',
+                release_summary='', release_url='', in_progress=False,
+                update_percentage=None),
+            path=self.path))
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o644)
+
+    def test_read_missing_or_empty_path_is_none(self):
+        self.assertIsNone(ui.read_update_state(self.path))
+        self.assertIsNone(ui.read_update_state(''))
+        self.assertIsNone(ui.read_update_state(None))
+
+    def test_read_garbage_json_is_none(self):
+        with open(self.path, 'w', encoding='utf-8') as handle:
+            handle.write('{not json')
+        self.assertIsNone(ui.read_update_state(self.path))
+
+    def test_read_non_object_json_is_none(self):
+        for payload in ('[1, 2, 3]', '"version"', '42', 'null'):
+            with open(self.path, 'w', encoding='utf-8') as handle:
+                handle.write(payload)
+            self.assertIsNone(ui.read_update_state(self.path), payload)
+
+    def test_read_oversized_file_is_none(self):
+        with open(self.path, 'w', encoding='utf-8') as handle:
+            handle.write('{"installed_version": "' + 'x' * (
+                ui.MAX_UPDATE_STATE_BYTES + 1) + '"}')
+        self.assertIsNone(ui.read_update_state(self.path))
+
+    def test_read_projects_unknown_keys_and_normalizes(self):
+        with open(self.path, 'w', encoding='utf-8') as handle:
+            json.dump({
+                'installed_version': '1.0.0',
+                'latest_version': '1.1.0',
+                'in_progress': True,
+                'update_percentage': 150,
+                'secret_token': 'must-not-survive',
+            }, handle)
+        document = ui.read_update_state(self.path)
+        self.assertEqual(set(document), set(ui.UPDATE_STATE_KEYS))
+        self.assertNotIn('secret_token', document)
+        self.assertTrue(document['in_progress'])
+        self.assertEqual(document['update_percentage'], 100)
+
+    def test_write_rejects_non_dict_and_keeps_existing(self):
+        self.assertTrue(ui.write_update_state(
+            ui.update_state_document(
+                installed_version='1.0.0', latest_version='',
+                release_summary='', release_url='', in_progress=False,
+                update_percentage=None),
+            path=self.path))
+        before = ui.read_update_state(self.path)
+        self.assertFalse(ui.write_update_state(['not', 'a', 'dict'], path=self.path))
+        self.assertFalse(ui.write_update_state(None, path=self.path))
+        self.assertEqual(ui.read_update_state(self.path), before)
+
+    def test_write_rejects_oversized_document(self):
+        self.assertFalse(ui.write_update_state(
+            {'installed_version': 'x' * (ui.MAX_UPDATE_STATE_BYTES + 1)},
+            path=self.path))
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_write_leaves_no_temp_files(self):
+        self.assertTrue(ui.write_update_state(
+            ui.update_state_document(
+                installed_version='1.0.0', latest_version='',
+                release_summary='', release_url='', in_progress=False,
+                update_percentage=None),
+            path=self.path))
+        leftovers = [
+            name for name in os.listdir(self.tmp.name)
+            if name != os.path.basename(self.path)
+        ]
+        self.assertEqual(leftovers, [], 'write must clean up its temp file')
+
+    def test_write_failure_never_raises(self):
+        directory = os.path.join(self.tmp.name, 'file-not-dir')
+        with open(directory, 'w', encoding='utf-8') as handle:
+            handle.write('x')
+        self.assertFalse(ui.write_update_state(
+            {'installed_version': '1.0.0'},
+            path=os.path.join(directory, 'nested', 'update-state.json')))
+
+
+
+# --------------------------------------------------------------------------- #
 # default_prune (real filesystem, temp dirs)
 # --------------------------------------------------------------------------- #
 
@@ -1291,6 +1401,33 @@ class CliTests(unittest.TestCase):
             code = ui.main(['check', '--data-root', self.tmp.name])
         self.assertEqual(code, 0)
 
+    def test_check_without_manifest_url_writes_state(self):
+        with patch.dict(os.environ, {}, clear=True):
+            code = ui.main(['check', '--data-root', self.tmp.name])
+        self.assertEqual(code, 0)
+        document = ui.read_update_state(
+            os.path.join(self.tmp.name, 'update-state.json'))
+        self.assertIsNotNone(document)
+        self.assertEqual(set(document), set(ui.UPDATE_STATE_KEYS))
+        self.assertFalse(document['in_progress'])
+        self.assertTrue(document['installed_version'])
+
+    def test_install_missing_manifest_writes_state(self):
+        code = ui.main([
+            'install', os.path.join(self.tmp.name, 'missing.json'),
+            '--data-root', self.tmp.name,
+        ])
+        self.assertEqual(code, 2)
+        document = ui.read_update_state(
+            os.path.join(self.tmp.name, 'update-state.json'))
+        self.assertIsNotNone(document)
+        self.assertIn('installed_version', document)
+
+    def test_install_without_manifest_or_url_is_a_usage_failure(self):
+        with patch.dict(os.environ, {}, clear=True):
+            code = ui.main(['install'])
+        self.assertEqual(code, 2)
+
     def test_recover_subcommand_is_idempotent(self):
         code = ui.main(['recover', '--data-root', self.tmp.name])
         self.assertEqual(code, 0)
@@ -1323,6 +1460,11 @@ class ValidatorAssertionsTests(unittest.TestCase):
         self.assertIn('no service-writable EnvironmentFile', self.text)
         self.assertIn('no public-key env override', self.text)
         self.assertIn('updater_install.py recover', self.text)
+        # WP-R4c: the install oneshot runs the install and is never enabled.
+        self.assertIn('prusa-updater-install.service', self.text)
+        self.assertIn('updater_install.py install', self.text)
+        self.assertIn(
+            'prusa-updater-install.service is not enabled', self.text)
 
 
 class ImportSafetyTests(unittest.TestCase):

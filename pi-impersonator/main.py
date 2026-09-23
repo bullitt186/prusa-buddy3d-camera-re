@@ -58,6 +58,8 @@ import app_metrics
 import app_version
 import config_schema
 import mqtt_service
+import privileged
+import updater_install
 from settings_coordinator import SettingsCoordinator, persist_state
 
 logging.basicConfig(
@@ -658,6 +660,12 @@ async def main():
                 restart=reboot_device,
                 metrics_provider=app_metrics.metrics_provider,
                 secrets=(token,),
+                # AC-31: the HA update entity's retained state is read from the
+                # root-written /data/prusa-cam/update-state.json; the install
+                # trigger routes through the fixed-verb privileged helper (which
+                # starts prusa-updater-install.service), never in-process.
+                update_state_provider=lambda: updater_install.read_update_state(),
+                update_install=privileged.install_update,
             )
             # Schedule, never await: a slow or unreachable broker must not delay
             # signaling, snapshots, RTSP, ONVIF, or WebRTC (AC-27). The task

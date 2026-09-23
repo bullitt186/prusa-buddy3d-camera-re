@@ -50,6 +50,7 @@ REUSED_UNITS = [
     "bootlog.service",
     "prusa-updater.service",
     "prusa-updater.timer",
+    "prusa-updater-install.service",
 ]
 
 IMAGE_ONLY_UNITS = [
@@ -367,6 +368,13 @@ class ImageScaffoldingTests(unittest.TestCase):
         # Optional later units must never be hard requirements.
         for optional in ("prusa-mqtt.service", "prusa-updater.timer"):
             self.assertNotIn(optional, section.get("Requires", "").split())
+        # WP-R4c: the install oneshot is triggered only via the root helper and
+        # is never part of camera startup.
+        self.assertNotIn("prusa-updater-install.service", wants)
+        self.assertNotIn("prusa-updater-install.service", after)
+        self.assertNotIn(
+            "prusa-updater-install.service", section.get("Requires", "").split()
+        )
 
     def test_provisioning_unit_is_conflicts_gated_and_never_enabled(self):
         unit = parse_unit(REPO_SYSTEMD / "prusa-provisioning.service")
@@ -422,6 +430,7 @@ class ImageScaffoldingTests(unittest.TestCase):
             "prusa-rtsp.service",
             "prusa-ha-rtsp.service",
             "prusa-cam.service",
+            "prusa-updater-install.service",
         ):
             self.assertNotIn(deferred, enable_block)
 
@@ -484,6 +493,7 @@ class ImageScaffoldingTests(unittest.TestCase):
             "hotspot-start",
             "hotspot-stop",
             "wifi-station-apply",
+            "install-update",
         ):
             self.assertIn(verb, text)
         # Unknown verbs must exit 2 before any privileged command.
@@ -847,6 +857,32 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn("prusa-updater.timer", enable_block)
         # The oneshot service is triggered by the timer, never enabled directly.
         self.assertNotIn("prusa-updater.service", enable_block)
+        # WP-R4c: the install oneshot is installed but never enabled (triggered
+        # only through the fixed-verb root helper).
+        self.assertIn("prusa-updater-install.service", text)
+        self.assertNotIn("prusa-updater-install.service", enable_block)
+
+    def test_install_unit_is_oneshot_gated_and_never_enabled(self):
+        unit = parse_unit(REPO_SYSTEMD / "prusa-updater-install.service")
+        section = unit["Unit"]
+        self.assertIn("data-ready.target", section["Requires"].split())
+        self.assertIn("data-ready.target", section["After"].split())
+        service = unit["Service"]
+        self.assertEqual(service["Type"], "oneshot")
+        self.assertEqual(service["User"], "root")
+        self.assertIn("updater_install.py install", service["ExecStart"])
+        self.assertIn("updater_install.py recover", service["ExecStartPre"])
+        self.assertIn("PATH=", service["Environment"])
+        # Triggered only via ``prusa-priv install-update``: no [Install] section
+        # and never enabled at multi-user.target.
+        self.assertNotIn("Install", unit)
+
+    def test_helper_routes_install_update_to_the_install_unit(self):
+        text = read_text(PRUSA_PRIV)
+        self.assertIn("install-update)", text)
+        self.assertIn(
+            'exec "$SYSTEMCTL" start prusa-updater-install.service', text
+        )
 
     def test_updater_units_are_reused_and_valid(self):
         service = parse_unit(REPO_SYSTEMD / "prusa-updater.service")

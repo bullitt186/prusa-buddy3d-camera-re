@@ -396,9 +396,10 @@ class StartupTests(ServiceTestCase):
         self.assertLess(will_index, connect_index)
         self.assertLess(connect_index, online_index)
 
-        # Every command topic + HA status subscribed at QoS 1.
+        # Every command topic + HA status + the update install topic at QoS 1.
         expected = [(topic, 1) for topic in service.command_topics()]
         expected.append((mqtt_topics.HA_STATUS_TOPIC, 1))
+        expected.append((service.update_install_topic, 1))
         self.assertEqual([(call[1], call[2]) for call in self.subscribes(backend)], expected)
 
         # Retained authoritative state + retained discovery.
@@ -927,6 +928,102 @@ class DiscoveryLifecycleTests(ServiceTestCase):
 # --------------------------------------------------------------------------- #
 # Import safety (no paho at module top)
 # --------------------------------------------------------------------------- #
+
+class UpdateEntityTests(ServiceTestCase):
+    """WP-R4c-2a (AC-31): the HA update entity state and install command."""
+
+    DOC = {
+        'installed_version': '1.2.3',
+        'latest_version': '1.3.0',
+        'release_summary': 'bug fixes',
+        'release_url': 'https://example.com/releases/1.3.0',
+        'in_progress': False,
+        'update_percentage': None,
+    }
+
+    def update_publishes(self, backend, topic):
+        return [call for call in self.publishes(backend) if call[1] == topic]
+
+    def test_update_state_is_published_retained_on_start(self):
+        provider = lambda: dict(self.DOC)
+        service, _, backend, _, _ = self.make(update_state_provider=provider)
+        self.assertTrue(service.start())
+        published = self.update_publishes(backend, service.update_state_topic)
+        self.assertTrue(published)
+        _, topic, payload, qos, retain = published[-1]
+        self.assertEqual(json.loads(payload.decode('utf-8')), self.DOC)
+        self.assertEqual(qos, 1)
+        self.assertTrue(retain)
+
+    def test_update_state_absent_provider_publishes_nothing(self):
+        service, _, backend, _, _ = self.make()
+        self.assertIsNone(service.publish_update_state())
+        self.assertEqual(
+            self.update_publishes(backend, service.update_state_topic), [])
+
+    def test_update_state_provider_failure_keeps_last_retained(self):
+        def broken():
+            raise RuntimeError('boom')
+
+        service, _, backend, _, _ = self.make(update_state_provider=broken)
+        self.assertIsNone(service.publish_update_state())
+        self.assertEqual(
+            self.update_publishes(backend, service.update_state_topic), [])
+
+    def test_update_state_non_dict_provider_publishes_nothing(self):
+        service, _, backend, _, _ = self.make(update_state_provider=lambda: 'x')
+        self.assertIsNone(service.publish_update_state())
+        self.assertEqual(
+            self.update_publishes(backend, service.update_state_topic), [])
+
+    def test_install_payload_triggers_the_callable(self):
+        calls = []
+
+        def install():
+            calls.append(True)
+            return True
+
+        service, _, backend, _, _ = self.make(update_install=install)
+        result = service.handle_update_install(b'install')
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, [True])
+        self.assertIsNone(service.last_command_error)
+
+    def test_install_wrong_payload_is_rejected(self):
+        calls = []
+        service, _, _, _, _ = self.make(update_install=lambda: calls.append(True))
+        result = service.handle_update_install(b'not-install')
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, 'expected install payload')
+        self.assertEqual(calls, [])
+
+    def test_install_without_callable_is_unavailable(self):
+        service, _, _, _, _ = self.make()
+        result = service.handle_update_install(b'install')
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, 'update install unavailable')
+
+    def test_install_callback_failure_is_bounded(self):
+        def broken():
+            raise RuntimeError('root helper missing')
+
+        service, _, _, _, _ = self.make(update_install=broken)
+        result = service.handle_update_install(b'install')
+        self.assertFalse(result.ok)
+        # The trigger's exception text is logged, never surfaced in the reason.
+        self.assertEqual(result.reason, 'update install failed')
+
+    def test_retained_install_command_is_ignored(self):
+        calls = []
+        service, _, _, _, _ = self.make(update_install=lambda: calls.append(True))
+        service._on_message(service.update_install_topic, b'install', retain=True)
+        self.assertEqual(calls, [])
+
+    def test_update_install_is_not_a_command_topic(self):
+        service, _, _, _, _ = self.make(update_install=lambda: True)
+        self.assertIsNone(
+            service.handle_command(service.update_install_topic, b'install'))
+
 
 class ImportSafetyTests(unittest.TestCase):
     def test_module_imports_without_paho(self):

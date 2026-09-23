@@ -84,6 +84,11 @@ ONLINE = 'online'
 OFFLINE = 'offline'
 PRESS = 'press'
 
+#: The literal ``update/install`` payload declared by the HA discovery document
+#: (``mqtt_state`` sets ``payload_install: 'install'``, AC-31). Anything else is
+#: rejected before the privileged install trigger is called.
+INSTALL_PAYLOAD = 'install'
+
 #: State-document metric overrides a caller may supply through
 #: ``metrics_provider``. ``application_version``/``last_command_error`` are owned
 #: by the service itself and are intentionally excluded.
@@ -468,6 +473,23 @@ def _parse_quality(text):
     return None
 
 
+def _normalize_action_result(result):
+    """Normalize a button/install action result to ``(ok, reason)``.
+
+    Accepts the documented forms: a ``(ok, reason)`` tuple, a result object with
+    ``ok``/``reason`` attributes (for example ``privileged.PrivilegedResult``), or
+    a truthy/falsy scalar. ``reason`` is only returned when it is a string; it is
+    bounded/redacted later by :meth:`MqttService._set_command_error`.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        reason = result[1] if isinstance(result[1], str) else ''
+        return bool(result[0]), reason
+    if hasattr(result, 'ok'):
+        reason = getattr(result, 'reason', '')
+        return bool(getattr(result, 'ok', False)), reason if isinstance(reason, str) else ''
+    return bool(result), ''
+
+
 # --------------------------------------------------------------------------- #
 # The runtime service
 # --------------------------------------------------------------------------- #
@@ -484,7 +506,8 @@ class MqttService:
     def __init__(self, coordinator, config, backend=None, *, clock=None,
                  sleeper=None, jitter=None, secrets=(), application_version='',
                  serial=None, mac=None, build_timelapse=None, restart=None,
-                 metrics_provider=None, dispatcher=None):
+                 metrics_provider=None, dispatcher=None,
+                 update_state_provider=None, update_install=None):
         self._coordinator = coordinator
         self._config = config
         self._backend = backend
@@ -498,6 +521,13 @@ class MqttService:
         self._build_timelapse = build_timelapse
         self._restart = restart
         self._metrics_provider = metrics_provider
+        # AC-31: the HA update entity's state comes from a provider (typically
+        # ``updater_install.read_update_state``) and the install command from a
+        # privileged trigger (``privileged.install_update``). Both are optional:
+        # without them the update topics stay inert and the rest of the service
+        # is unaffected.
+        self._update_state_provider = update_state_provider
+        self._update_install = update_install
         self._last_command_error = None
         self._command_error_at = None
         self._error_lock = threading.Lock()
@@ -540,6 +570,16 @@ class MqttService:
     def discovery_topic(self):
         return mqtt_topics.discovery_device_topic(
             self._discovery_prefix, self.device_id)
+
+    @property
+    def update_state_topic(self):
+        """``update/state``: retained HA update-state JSON (AC-31)."""
+        return mqtt_topics.update_state(self.device_id, self._config.topic_prefix)
+
+    @property
+    def update_install_topic(self):
+        """``update/install``: non-retained install command (AC-31)."""
+        return mqtt_topics.update_install(self.device_id, self._config.topic_prefix)
 
     @property
     def last_command_error(self):
@@ -595,6 +635,7 @@ class MqttService:
         self._subscribe_topics()
         self.publish_state()
         self.publish_discovery()
+        self.publish_update_state()
         return True
 
     def stop(self):
@@ -612,6 +653,10 @@ class MqttService:
             self._guard(self._backend.subscribe, topic, qos=COMMAND_QOS)
         self._guard(
             self._backend.subscribe, mqtt_topics.HA_STATUS_TOPIC, qos=COMMAND_QOS)
+        # AC-31: the update install command is a separate topic, not a
+        # ``command/<name>`` leaf, so it is subscribed explicitly here.
+        self._guard(
+            self._backend.subscribe, self.update_install_topic, qos=COMMAND_QOS)
 
     def _publish_availability(self, value):
         self._publish(
@@ -640,6 +685,7 @@ class MqttService:
             self._guard(self._sleeper, delay)
         self.publish_discovery()
         self.publish_state()
+        self.publish_update_state()
         self._reconnect_attempt = 0
 
     # -- publishing --------------------------------------------------------
@@ -657,6 +703,31 @@ class MqttService:
             self._log('mqtt: could not encode state document; keeping last retained')
             return None
         self._publish(self.state_topic, payload, qos=COMMAND_QOS, retain=True)
+        return document
+
+    def publish_update_state(self):
+        """Publish the retained HA update-state document; returns the dict.
+
+        The document is supplied by ``update_state_provider`` (AC-31). On a
+        missing provider, a provider failure, a non-dict/empty result, or an
+        encoding failure the last retained document is kept: this method never
+        publishes ``{}`` over good state and never raises.
+        """
+        if self._update_state_provider is None:
+            return None
+        try:
+            document = self._update_state_provider()
+        except Exception as e:  # a provider failure must not escape (AC-27)
+            self._log('mqtt: update state provider failed: %s', e)
+            return None
+        if not isinstance(document, dict) or not document:
+            # Absent/failed provider: keep the last retained good document.
+            return None
+        payload = self._encode(document)
+        if payload is None:
+            self._log('mqtt: could not encode update state; keeping last retained')
+            return None
+        self._publish(self.update_state_topic, payload, qos=COMMAND_QOS, retain=True)
         return document
 
     def publish_discovery(self):
@@ -752,6 +823,12 @@ class MqttService:
                 # Source §6.3/§6.4: ignore retained command messages defensively.
                 log.debug('mqtt: ignoring retained command on %s', topic)
                 return
+            if topic == self.update_install_topic:
+                # AC-31: the update install topic is not a ``command/<name>``
+                # leaf, so it is routed to its own handler, never through
+                # ``command_from_topic``.
+                self.handle_update_install(payload)
+                return
             self.handle_command(topic, payload)
         except Exception as e:  # absolute isolation from Prusa/media
             self._log('mqtt: inbound message handling failed: %s', e)
@@ -772,6 +849,46 @@ class MqttService:
         # authoritative state even after a rejection.
         self.publish_state()
         return result
+
+    def handle_update_install(self, payload):
+        """Handle one ``update/install`` command; never raises.
+
+        Accepts only the literal discovery payload (:data:`INSTALL_PAYLOAD`).
+        The injected ``update_install`` callable is normalized like the other
+        command actions (``bool`` or ``(ok, reason)``). A bounded, redacted
+        reason is surfaced through ``last_command_error`` and the retained state
+        and update-state documents are republished. An MQTT/update failure here
+        cannot disturb the Prusa or local media paths (AC-27).
+        """
+        result = self._apply_update_install(payload)
+        if result.ok:
+            self._clear_command_error()
+        else:
+            self._set_command_error(result.reason)
+        # Publish both the authoritative settings state (so ``last_command_error``
+        # is visible) and the update state (so HA reflects the install outcome).
+        self.publish_state()
+        self.publish_update_state()
+        return result
+
+    def _apply_update_install(self, payload):
+        try:
+            text = _decode_payload(payload)
+        except CommandError as e:
+            return CommandResult(False, str(e))
+        if text.strip() != INSTALL_PAYLOAD:
+            return CommandResult(False, 'expected install payload')
+        if self._update_install is None:
+            return CommandResult(False, 'update install unavailable')
+        try:
+            raw = self._update_install()
+        except Exception as e:  # a privileged trigger failure must not escape
+            self._log('mqtt: update install trigger failed: %s', e)
+            return CommandResult(False, 'update install failed')
+        ok, reason = _normalize_action_result(raw)
+        if not ok:
+            return CommandResult(False, reason or 'update install failed')
+        return CommandResult(True)
 
     def _apply_command(self, name, payload):
         try:
