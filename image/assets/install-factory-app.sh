@@ -91,7 +91,9 @@ install -D -m 0644 "$assets/systemd/NetworkManager.service.d/10-data-ready.conf"
 install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
    "$root/etc/systemd/journald.conf.d/99-buddy3d-volatile.conf"
 
-# --- factory fallback launcher (AC-13; units wired through it in WP-6) ------
+# --- runtime launcher + factory fallback (AC-13; WP-R4c) --------------------
+# The runtime units exec this launcher, which prefers an installed release
+# under DATA and falls back to the immutable factory app when none is valid.
 install -D -m 0755 "$assets/launcher.sh" "$root$APP_ROOT/launcher.sh"
 
 # --- hash-locked Python runtime venv (WP-R3 / AC-14) ------------------------

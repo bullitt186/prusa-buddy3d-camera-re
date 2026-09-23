@@ -195,7 +195,9 @@ def make_rootfs(base):
         "[main]\nplugins=keyfile\n", encoding="utf-8"
     )
 
-    # Factory application + launcher fallback.
+    # Factory application + launcher fallback. The fixture installs the real
+    # image asset so the validator's WP-R4c launcher assertions (per-release
+    # venv preference, factory fallback) exercise the shipped script.
     app = root / "opt" / "prusa-cam"
     app.mkdir(parents=True)
     # The image installs the factory app root-owned 0755 (B3); the fixture's
@@ -203,10 +205,7 @@ def make_rootfs(base):
     app.chmod(0o755)
     (app / "main.py").write_text("# synthetic factory app\n", encoding="utf-8")
     launcher = app / "launcher.sh"
-    launcher.write_text(
-        "#!/bin/sh\nexec /opt/prusa-cam/venv/bin/python /opt/prusa-cam/main.py\n",
-        encoding="utf-8",
-    )
+    shutil.copy2(REPO_ROOT / "image" / "assets" / "launcher.sh", launcher)
     launcher.chmod(0o755)
 
     # Hash-locked runtime venv + dependency lock (WP-R3/AC-14). The installer
@@ -1102,6 +1101,98 @@ class UpdaterImageValidationTests(unittest.TestCase):
         result = run_validator("--image", self.image, "--mount-root", root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("prusa-updater.service must not be enabled", result.stdout)
+
+
+class LauncherWiringValidationTests(unittest.TestCase):
+    """WP-R4c: runtime units exec the launcher; launcher prefers the release."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def _systemd(self, root):
+        return Path(root) / "etc" / "systemd" / "system"
+
+    def _launcher(self, root):
+        return Path(root) / "opt" / "prusa-cam" / "launcher.sh"
+
+    def test_good_rootfs_reports_launcher_wiring(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("prusa-cam.service execs /opt/prusa-cam/launcher.sh main.py",
+                      result.stdout)
+        self.assertIn(
+            "prusa-rtsp.service execs /opt/prusa-cam/launcher.sh rtsp_server.py",
+            result.stdout,
+        )
+        self.assertIn(
+            "prusa-ha-rtsp.service execs /opt/prusa-cam/launcher.sh rtsp_server.py",
+            result.stdout,
+        )
+        self.assertIn(
+            "prusa-admin.service execs /opt/prusa-cam/launcher.sh admin_app.py",
+            result.stdout,
+        )
+        self.assertIn(
+            "launcher prefers the per-release venv with a factory fallback",
+            result.stdout,
+        )
+
+    def test_unit_execing_factory_venv_directly_fails(self):
+        root = self._root()
+        unit = self._systemd(root) / "prusa-cam.service"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(
+                "ExecStart=/opt/prusa-cam/launcher.sh main.py",
+                "ExecStart=/opt/prusa-cam/venv/bin/python main.py",
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must ExecStart=/opt/prusa-cam/launcher.sh main.py",
+                      result.stdout)
+
+    def test_wrong_script_in_unit_fails(self):
+        root = self._root()
+        unit = self._systemd(root) / "prusa-rtsp.service"
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace(
+                "ExecStart=/opt/prusa-cam/launcher.sh rtsp_server.py",
+                "ExecStart=/opt/prusa-cam/launcher.sh main.py",
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must ExecStart=/opt/prusa-cam/launcher.sh rtsp_server.py",
+                      result.stdout)
+
+    def test_launcher_without_release_preference_fails(self):
+        root = self._root()
+        launcher = self._launcher(root)
+        launcher.write_text(
+            "#!/bin/bash\nexec /opt/prusa-cam/venv/bin/python \"$@\"\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "launcher must prefer the per-release venv and fall back to the factory venv",
+            result.stdout,
+        )
 
 
 class PrivateKeyScanTests(unittest.TestCase):

@@ -578,10 +578,11 @@ else
     fi
 
     # --- hash-locked Python runtime venv + dependency lock (WP-R3/AC-14) ---
-    # The runtime units all ExecStart=/opt/prusa-cam/venv/bin/python. The venv
-    # is built by install-factory-app.sh from the committed hash-locked
-    # requirements.lock; a venv-less image is not runnable, so a missing venv
-    # or lock is a hard failure here.
+    # The runtime units start through /opt/prusa-cam/launcher.sh (WP-R4c), which
+    # resolves the per-release or factory venv; the factory venv is the
+    # immutable fallback and is built by install-factory-app.sh from the
+    # committed hash-locked requirements.lock. A venv-less image is not
+    # runnable, so a missing venv or lock is a hard failure here.
     venv_dir="$app_root/venv"
     venv_python="$venv_dir/bin/python"
     if [ -f "$venv_python" ]; then
@@ -1061,6 +1062,42 @@ PY
       report ok "release launcher fallback present (/opt/prusa-cam/$launcher)"
    else
       report fail "release launcher fallback missing (/opt/prusa-cam/launcher.sh)"
+   fi
+
+   # --- runtime units execute through the launcher (WP-R4c) ----------------
+   # An installed signed release under DATA is only used if the runtime units
+   # start through launcher.sh; a unit that execs the factory venv directly
+   # would pin the appliance to the immutable factory code forever. Each runtime
+   # unit must exec the launcher with its own entry point.
+    declare -A launcher_script=(
+       [prusa-cam.service]=main.py
+       [prusa-rtsp.service]=rtsp_server.py
+       [prusa-ha-rtsp.service]=rtsp_server.py
+       [prusa-admin.service]=admin_app.py
+    )
+    for unit in prusa-cam.service prusa-rtsp.service prusa-ha-rtsp.service \
+                prusa-admin.service; do
+      file="$SYSTEMD_DIR/$unit"
+      [ -f "$file" ] || continue
+      want_script="${launcher_script[$unit]}"
+      if unit_has "$file" ExecStart /opt/prusa-cam/launcher.sh \
+         && unit_has "$file" ExecStart "$want_script"; then
+         report ok "$unit execs /opt/prusa-cam/launcher.sh $want_script"
+      else
+         report fail "$unit must ExecStart=/opt/prusa-cam/launcher.sh $want_script"
+      fi
+   done
+
+   # The launcher must prefer a complete per-release venv under DATA and fall
+   # back to the factory venv; the runtime-unit assertions above depend on it.
+   if [ -n "$launcher" ]; then
+      launcher_path="$MOUNT_ROOT/opt/prusa-cam/$launcher"
+      if grep -q 'current/venv/bin/python' "$launcher_path" \
+         && grep -q 'APP_ROOT/venv/bin/python' "$launcher_path"; then
+         report ok "launcher prefers the per-release venv with a factory fallback"
+      else
+         report fail "launcher must prefer the per-release venv and fall back to the factory venv"
+      fi
    fi
 
    # --- build-info.json ---------------------------------------------------

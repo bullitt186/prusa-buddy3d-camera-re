@@ -25,7 +25,9 @@ User=prusa-cam
 WorkingDirectory=/opt/prusa-cam
 Environment=ADMIN_MODE=admin
 EnvironmentFile=-/etc/prusa-cam/admin.env
-ExecStart=/opt/prusa-cam/venv/bin/python /opt/prusa-cam/admin_app.py
+# WP-R4c: start through the launcher so an installed signed release under DATA
+# (and its per-release venv) runs; the launcher falls back to the factory app.
+ExecStart=/opt/prusa-cam/launcher.sh admin_app.py
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=5

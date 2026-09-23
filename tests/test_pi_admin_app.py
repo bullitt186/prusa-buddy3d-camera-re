@@ -322,8 +322,10 @@ class AdminUnitTests(unittest.TestCase):
     def test_execstart_runs_the_transport_entry_point(self):
         exec_start = self._values('ExecStart')
         self.assertEqual(len(exec_start), 1)
-        self.assertIn('/opt/prusa-cam/venv/bin/python', exec_start[0])
-        self.assertIn('/opt/prusa-cam/admin_app.py', exec_start[0])
+        # WP-R4c: the unit starts through the launcher so an installed signed
+        # release (and its per-release venv) runs, with a factory fallback.
+        self.assertIn('/opt/prusa-cam/launcher.sh', exec_start[0])
+        self.assertIn('admin_app.py', exec_start[0])
 
     def test_gated_on_data_ready(self):
         self.assertTrue(any('data-ready.target' in v for v in self._values('After')))

@@ -432,6 +432,36 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn('chown -R root:root "$root$APP_ROOT"', text)
         self.assertNotIn('chown -R "$uid:$gid" "$root$APP_ROOT"', text)
 
+    def test_runtime_units_exec_the_launcher(self):
+        # WP-R4c: the runtime units start through launcher.sh with their own
+        # entry point so an installed signed release under DATA runs.
+        expected = {
+            "prusa-cam.service": "main.py",
+            "prusa-rtsp.service": "rtsp_server.py",
+            "prusa-ha-rtsp.service": "rtsp_server.py",
+            "prusa-admin.service": "admin_app.py",
+        }
+        for name, script in expected.items():
+            with self.subTest(unit=name):
+                service = parse_unit(REPO_SYSTEMD / name)["Service"]
+                self.assertEqual(
+                    service["ExecStart"], f"/opt/prusa-cam/launcher.sh {script}"
+                )
+
+    def test_launcher_prefers_release_venv_with_factory_fallback(self):
+        text = read_text(ASSETS / "launcher.sh")
+        self.assertIn("current/venv/bin/python", text)
+        self.assertIn("APP_ROOT/venv/bin/python", text)
+        self.assertIn("DEFAULT_SCRIPT=main.py", text)
+        self.assertIn("exec ", text)
+
+    def test_installer_installs_runtime_launcher(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn('"$assets/launcher.sh"', text)
+        self.assertIn('"$root$APP_ROOT/launcher.sh"', text)
+        # The launcher is the shipped runtime entry point, not a WP-6 placeholder.
+        self.assertNotIn("WP-6", text)
+
     def test_installer_installs_helper_and_sudoers(self):
         text = read_text(ASSETS / "install-factory-app.sh")
         self.assertIn('"$assets/prusa-priv"', text)

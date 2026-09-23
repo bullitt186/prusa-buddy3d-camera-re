@@ -10,7 +10,9 @@ Requires=rpicam-source.service data-ready.target
 Type=simple
 User=prusa-cam
 WorkingDirectory=/opt/prusa-cam
-ExecStart=/opt/prusa-cam/venv/bin/python rtsp_server.py
+# WP-R4c: start through the launcher so an installed signed release under DATA
+# (and its per-release venv) runs; the launcher falls back to the factory app.
+ExecStart=/opt/prusa-cam/launcher.sh rtsp_server.py
 Restart=always
 RestartSec=2
 
