@@ -57,12 +57,14 @@ DEFAULT_SERVICE_USER = 'prusa-cam'
 # mode each directory must end up with. ``config``/``backups`` hold secrets and
 # migration backups, so they are group-accessible but not world-readable; the
 # media directories stay 0755 so the bind-mounted SMB share can traverse them.
+# ``releases`` is world-traversable (0755) but root-owned (see ROOT_ONLY_DIRS):
+# only the root updater may write installation targets.
 DATA_LAYOUT = (
     (DATA_SDCARD, 0o755),
     (TIMELAPSE_DIR, 0o755),
     (DATA_PRUSA_CAM, 0o750),
     (DATA_CONFIG_DIR, 0o750),
-    (DATA_RELEASES_DIR, 0o750),
+    (DATA_RELEASES_DIR, 0o755),
     (DATA_BACKUPS_DIR, 0o750),
     (DATA_NETWORK_DIR, 0o700),
     (DATA_NETWORK_CONNECTIONS, 0o700),
@@ -72,10 +74,17 @@ DATA_LAYOUT = (
 #: bind-mounted onto ``/etc/NetworkManager/system-connections`` (see
 #: :data:`NM_CONNECTIONS`), which root consumes and inotify-reloads; giving the
 #: unprivileged service account write access there would both weaken the
-#: privilege boundary and let NM reject the profiles. These entries are created
-#: (as root, since ``pi-persist.service`` runs as root) but never chowned to the
-#: service user.
-ROOT_ONLY_DIRS = frozenset({DATA_NETWORK_DIR, DATA_NETWORK_CONNECTIONS})
+#: privilege boundary and let NM reject the profiles. ``releases`` holds the
+#: signed application releases the root updater installs and swaps; if the
+#: service account owned it, it could tamper with (or replace) installation
+#: targets. These entries are created (and, to repair an older image seed,
+#: explicitly re-asserted) as root by ``pi-persist.service``; they are never
+#: handed to the service user.
+ROOT_ONLY_DIRS = frozenset({
+    DATA_NETWORK_DIR,
+    DATA_NETWORK_CONNECTIONS,
+    DATA_RELEASES_DIR,
+})
 
 
 def quality_env_values(tier):
@@ -161,10 +170,13 @@ def ensure_durable_layout(service_user):
         except OSError as e:
             log.warning(f'persist: could not create {directory}: {e}')
             continue
-        # The NetworkManager keyfile store stays root-owned (see ROOT_ONLY_DIRS);
-        # pi-persist.service runs as root, so a freshly created directory is
-        # already owned correctly and must not be handed to the service account.
-        if directory not in ROOT_ONLY_DIRS:
+        # Root-only entries stay root-owned (see ROOT_ONLY_DIRS) and are
+        # explicitly re-asserted so an image seed or an older layout that handed
+        # them to the service account is repaired. pi-persist.service runs as
+        # root, so the chown succeeds.
+        if directory in ROOT_ONLY_DIRS:
+            _chown(directory, 'root')
+        else:
             _chown(directory, service_user)
         created.append(directory)
     return created

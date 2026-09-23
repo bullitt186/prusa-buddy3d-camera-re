@@ -70,7 +70,7 @@ unit_src="$repo/pi-impersonator/systemd"
 for u in rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
          prusa-cam.service prusa-admin.service prusa-provisioning.service \
          pi-persist.service prusa-data-ready.service data-ready.target \
-         bootlog.service; do
+         bootlog.service prusa-updater.service prusa-updater.timer; do
    install -D -m 0644 "$unit_src/$u" "$SYSTEMD_DST/$u"
 done
 
@@ -169,9 +169,14 @@ chown "$uid:$gid" "$root$APP_ROOT/.ssh"
 # starts prusa-camera.target after claim and it pulls them via Wants=
 # (AC-12/AC-17), so nothing camera-related runs while the device is unclaimed.
 # The units' own [Install] sections are left intact for the dev deploy.sh path.
+# prusa-updater.timer (WP-R4b) is enabled here: the daily signed-update check
+# runs independently of claim and is isolated from camera startup (AC-27). Its
+# oneshot service is triggered by the timer and has no [Install] section, so it
+# is installed but not separately enabled.
 chroot "$root" systemctl enable \
    data-ready.target prusa-data-ready.service prusa-data-grow.service \
-   pi-persist.service bootlog.service prusa-boot-mode.service >/dev/null 2>&1 || true
+   pi-persist.service bootlog.service prusa-boot-mode.service \
+   prusa-updater.timer >/dev/null 2>&1 || true
 
 # SSH is installed but disabled by default (AC-13/AC-20). The disable runs in
 # image/layer/post-build.sh, which executes after every layer — the reused
@@ -206,6 +211,34 @@ python3 "$assets/build-info.py" \
    --package-manifest "$manifest_arg" \
    --python-lock-sha256 "$lock_sha256" \
    --output "$root/usr/share/prusa-buddy3d-camera/build-info.json"
+
+# --- embedded release-signing public key (WP-R4b / AC-29) -------------------
+# The updater trusts exactly this committed public key; the matching secret key
+# never enters the repository or the image. It is root:root 0644 so the root
+# updater service can read it and the service account cannot modify it. The
+# image secret scan (validate-image.sh) asserts it is not private key material.
+install -D -o root -g root -m 0644 "$repo/image/keys/buddy3d-release.pub" \
+   "$root/usr/share/prusa-buddy3d-camera/buddy3d-release.pub"
+log "embedded release-signing public key (buddy3d-release.pub)"
+
+# --- root-owned updater configuration (WP-R4b / AC-32) ----------------------
+# prusa-updater.service reads only /etc/prusa-updater.conf via EnvironmentFile=.
+# It is root:root 0644 — never under /etc/prusa-cam, which the service account
+# can write — so the account cannot redirect the updater at an attacker manifest
+# or override the trust anchor. The signing public key is fixed in
+# updater_install.py and is not configurable here. Unset manifest URL => the
+# scheduled check exits 0 ("not configured"), never a usage error.
+if [ ! -f "$root/etc/prusa-updater.conf" ]; then
+   install -D -o root -g root -m 0644 /dev/null "$root/etc/prusa-updater.conf"
+   {
+      echo '# Buddy3D signed application updates (WP-R4b). Root-owned, mode 0644.'
+      echo '# Set one manifest URL to enable the daily availability check:'
+      echo '# PRUSA_UPDATE_MANIFEST_URL=https://example.invalid/update-manifest.json'
+   } > "$root/etc/prusa-updater.conf"
+   chown root:root "$root/etc/prusa-updater.conf"
+   chmod 0644 "$root/etc/prusa-updater.conf"
+fi
+log "root-owned updater config /etc/prusa-updater.conf"
 
 # --- durable configuration directory + ownership ----------------------------
 # /opt/prusa-cam stays root:root 0755 (B3): the factory app is immutable and is

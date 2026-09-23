@@ -61,5 +61,16 @@ EOF
             "$IMAGEMOUNTPATH/network" \
             "$IMAGEMOUNTPATH/sdcard"
       fi
+      # Root-only durable directories: the root application updater owns the
+      # releases tree and NetworkManager owns the keyfile store, so the service
+      # account must not be able to write them (WP-R4b). persist_restore.py
+      # re-asserts this at runtime; the build seed matches.
+      chown root:root \
+         "$IMAGEMOUNTPATH/prusa-cam/releases" \
+         "$IMAGEMOUNTPATH/network" \
+         "$IMAGEMOUNTPATH/network/system-connections"
+      chmod 0755 "$IMAGEMOUNTPATH/prusa-cam/releases"
+      chmod 0700 "$IMAGEMOUNTPATH/network" \
+         "$IMAGEMOUNTPATH/network/system-connections"
       ;;
 esac

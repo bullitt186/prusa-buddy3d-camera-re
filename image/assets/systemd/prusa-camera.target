@@ -22,13 +22,15 @@ After=prusa-provisioning.service
 
 # Reused units, activated and awaited by this target. prusa-admin.service is
 # pulled here (its [Install] WantedBy=prusa-camera.target), so the admin UI is
-# only reachable after claim.
-Wants=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service prusa-admin.service
+# only reachable after claim. prusa-updater.timer (WP-R4b) is pulled with Wants=
+# so the update check is available after claim without gating camera startup.
+Wants=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service prusa-admin.service prusa-updater.timer
 After=pi-persist.service rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service prusa-cam.service prusa-admin.service
 
-# Optional units (prusa-mqtt, prusa-updater.timer; added by later WPs) must be
-# Wants=, never Requires=, so a WS-Discovery/MQTT/admin/update failure never
-# stops the source, Prusa registration/signaling, snapshots, RTSP, or WebRTC.
+# Optional units (prusa-mqtt.service; added by later WPs) must be Wants=, never
+# Requires=, so a WS-Discovery/MQTT/admin/update failure never stops the source,
+# Prusa registration/signaling, snapshots, RTSP, or WebRTC (AC-27). The updater
+# timer above is likewise optional and isolated.
 
 [Install]
 WantedBy=multi-user.target

@@ -53,6 +53,14 @@ REQUIRED_DATA_DIRS = [
     "sdcard/timelapse",
 ]
 
+# Durable dirs the validator requires to be root:root 0:0 rather than owned by
+# the service account (the root updater owns releases; NetworkManager the store).
+PERSIST_ROOT_ONLY = {
+    "prusa-cam/releases",
+    "network",
+    "network/system-connections",
+}
+
 # The synthetic tree is created by the (unprivileged) test runner, so every
 # file is owned by the current uid/gid. Map the image's "root" account to that
 # uid/gid and give prusa-cam a distinct sentinel so the validator's ownership
@@ -138,7 +146,7 @@ def make_rootfs(base):
     # Reused application units verbatim, plus the image-only units.
     for src in sorted(REPO_SYSTEMD.glob("*.service")) + sorted(
         REPO_SYSTEMD.glob("*.target")
-    ):
+    ) + sorted(REPO_SYSTEMD.glob("*.timer")):
         shutil.copy2(src, systemd / src.name)
     for name in (
         "prusa-data-grow.service",
@@ -154,6 +162,9 @@ def make_rootfs(base):
     wants = systemd / "multi-user.target.wants"
     wants.mkdir(parents=True)
     os.symlink("../prusa-boot-mode.service", wants / "prusa-boot-mode.service")
+    # WP-R4b: the updater timer is enabled at multi-user.target; its oneshot
+    # service is triggered by the timer and is not enabled directly.
+    os.symlink("../prusa-updater.timer", wants / "prusa-updater.timer")
     camera_wants = systemd / "prusa-camera.target.wants"
     camera_wants.mkdir(parents=True)
     os.symlink("../prusa-admin.service", camera_wants / "prusa-admin.service")
@@ -268,6 +279,15 @@ def make_rootfs(base):
         encoding="utf-8",
     )
 
+    # Embedded release-signing public key (WP-R4b/AC-29): root:root 0644, no
+    # private key material.
+    (build_info_dir / "buddy3d-release.pub").write_text(
+        "untrusted comment: minisign public key SYNTHETIC\n"
+        "RWTjuP4R4QtoSN543KA74kYYGJ7WkKAz2j5el+ZZC310+TJvrxVAia02\n",
+        encoding="utf-8",
+    )
+    (build_info_dir / "buddy3d-release.pub").chmod(0o644)
+
     # SSH disabled by default, root locked, no authorized_keys.
     ssh = root / "etc" / "ssh"
     ssh.mkdir(parents=True)
@@ -332,13 +352,17 @@ def make_persist_image(path, tree, uid=None, gid=None):
     )
     if uid is not None and gid is not None:
         for relative in REQUIRED_DATA_DIRS:
+            # Root-only dirs must be 0:0; the rest use the synthetic prusa-cam.
+            owner_uid, owner_gid = (
+                (0, 0) if relative in PERSIST_ROOT_ONLY else (uid, gid)
+            )
             subprocess.run(
-                ["debugfs", "-w", "-R", f"sif /{relative} uid {uid}", str(path)],
+                ["debugfs", "-w", "-R", f"sif /{relative} uid {owner_uid}", str(path)],
                 check=True,
                 capture_output=True,
             )
             subprocess.run(
-                ["debugfs", "-w", "-R", f"sif /{relative} gid {gid}", str(path)],
+                ["debugfs", "-w", "-R", f"sif /{relative} gid {owner_gid}", str(path)],
                 check=True,
                 capture_output=True,
             )
@@ -963,7 +987,7 @@ class PersistPartitionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PERSIST has the seeded /data layout", result.stdout)
-        self.assertIn("owned by prusa-cam", result.stdout)
+        self.assertIn("PERSIST directories owned correctly", result.stdout)
 
     def test_missing_seeded_layout_fails(self):
         tree = make_persist_tree(Path(self.tmp) / "empty", [])
@@ -978,6 +1002,106 @@ class PersistPartitionTests(unittest.TestCase):
         result = run_validator("--image", self.image)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no --persist-image", result.stdout)
+
+
+class UpdaterImageValidationTests(unittest.TestCase):
+    """WP-R4b: embedded public key + updater units/timer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.image = make_image(Path(cls.tmp) / "image.img")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return make_rootfs(tmp)
+
+    def _systemd(self, root):
+        return Path(root) / "etc" / "systemd" / "system"
+
+    def _key(self, root):
+        return (
+            Path(root) / "usr" / "share" / "prusa-buddy3d-camera"
+            / "buddy3d-release.pub"
+        )
+
+    def test_good_rootfs_reports_updater_checks(self):
+        root = self._root()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("buddy3d-release.pub is root:root mode 0644", result.stdout)
+        self.assertIn("buddy3d-release.pub contains no private key material",
+                      result.stdout)
+        self.assertIn("prusa-updater.timer is enabled at multi-user.target",
+                      result.stdout)
+        self.assertIn("prusa-updater.service is not separately enabled",
+                      result.stdout)
+        self.assertIn("prusa-updater.service runs updater_install.py",
+                      result.stdout)
+        self.assertIn("prusa-camera.target Wants= prusa-updater.timer",
+                      result.stdout)
+
+    def test_missing_key_fails(self):
+        root = self._root()
+        self._key(root).unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("buddy3d-release.pub is missing", result.stdout)
+
+    def test_wrong_key_mode_fails(self):
+        root = self._root()
+        self._key(root).chmod(0o600)
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("buddy3d-release.pub must be mode 0644", result.stdout)
+
+    def test_prusa_cam_owned_key_fails(self):
+        root = self._root()
+        passwd = root / "etc" / "passwd"
+        passwd.write_text(
+            passwd.read_text(encoding="utf-8").replace(
+                f":{SYNTH_PRUSA_UID}:{SYNTH_PRUSA_GID}:Prusa Camera:",
+                f":{SYNTH_ROOT_UID}:{SYNTH_ROOT_GID}:Prusa Camera:",
+            ),
+            encoding="utf-8",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("buddy3d-release.pub must not be owned by prusa-cam",
+                      result.stdout)
+
+    def test_missing_updater_service_fails(self):
+        root = self._root()
+        (self._systemd(root) / "prusa-updater.service").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-updater.service is missing", result.stdout)
+
+    def test_timer_not_enabled_fails(self):
+        root = self._root()
+        (
+            self._systemd(root) / "multi-user.target.wants"
+            / "prusa-updater.timer"
+        ).unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-updater.timer must be enabled", result.stdout)
+
+    def test_updater_service_enabled_fails(self):
+        root = self._root()
+        os.symlink(
+            "../prusa-updater.service",
+            self._systemd(root) / "multi-user.target.wants"
+            / "prusa-updater.service",
+        )
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prusa-updater.service must not be enabled", result.stdout)
 
 
 class PrivateKeyScanTests(unittest.TestCase):

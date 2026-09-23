@@ -48,6 +48,8 @@ REUSED_UNITS = [
     "prusa-data-ready.service",
     "data-ready.target",
     "bootlog.service",
+    "prusa-updater.service",
+    "prusa-updater.timer",
 ]
 
 IMAGE_ONLY_UNITS = [
@@ -359,6 +361,9 @@ class ImageScaffoldingTests(unittest.TestCase):
         # AC-18: the camera target is ordered after the provisioning process so
         # it cannot start while QR capture/probe may still hold the sensor.
         self.assertIn("prusa-provisioning.service", section["After"].split())
+        # WP-R4b: the updater timer is pulled optionally (available after claim)
+        # and is never a hard requirement of camera startup.
+        self.assertIn("prusa-updater.timer", wants)
         # Optional later units must never be hard requirements.
         for optional in ("prusa-mqtt.service", "prusa-updater.timer"):
             self.assertNotIn(optional, section.get("Requires", "").split())
@@ -398,7 +403,7 @@ class ImageScaffoldingTests(unittest.TestCase):
 
     def test_installer_enables_only_the_pre_runtime_gate(self):
         text = read_text(ASSETS / "install-factory-app.sh")
-        enable_block = text.split("systemctl enable", 1)[1]
+        enable_block = text.split("systemctl enable", 1)[1].split("|| true", 1)[0]
         for enabled in (
             "data-ready.target",
             "prusa-data-ready.service",
@@ -406,6 +411,7 @@ class ImageScaffoldingTests(unittest.TestCase):
             "pi-persist.service",
             "bootlog.service",
             "prusa-boot-mode.service",
+            "prusa-updater.timer",
         ):
             self.assertIn(enabled, enable_block)
         for deferred in (
@@ -773,6 +779,63 @@ class ImageScaffoldingTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- WP-R4b / AC-29: signed application updates -------------------------
+
+    def test_layer_installs_minisign_and_zstd(self):
+        doc = yaml.safe_load(read_text(LAYER_DIR / "buddy3d-image.yaml"))
+        packages = set(doc["mmdebstrap"]["packages"])
+        for name in ("minisign", "zstd"):
+            self.assertIn(name, packages, name)
+
+    def test_installer_embeds_release_public_key(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        # The committed public key is copied root:root 0644 to the documented
+        # in-image path the updater trusts (never a private key).
+        self.assertIn("image/keys/buddy3d-release.pub", text)
+        self.assertIn(
+            "/usr/share/prusa-buddy3d-camera/buddy3d-release.pub", text
+        )
+        self.assertIn("-o root -g root -m 0644", text)
+        self.assertNotIn("release-signing.key", text)
+
+    def test_release_public_key_is_public_material(self):
+        key = REPO_ROOT / "image" / "keys" / "buddy3d-release.pub"
+        self.assertTrue(key.is_file(), f"missing {key}")
+        text = read_text(key)
+        self.assertIn("minisign public key", text)
+        self.assertNotIn("PRIVATE KEY", text)
+        # No secret-looking assignment in the committed key file.
+        self.assertIsNone(
+            re.search(r"(?i)\b(token|password|secret|private[_-]?key)\s*[:=]\s*\S+", text)
+        )
+
+    def test_installer_installs_and_enables_updater_units(self):
+        text = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn("prusa-updater.service prusa-updater.timer", text)
+        enable_block = text.split("systemctl enable", 1)[1].split("|| true", 1)[0]
+        self.assertIn("prusa-updater.timer", enable_block)
+        # The oneshot service is triggered by the timer, never enabled directly.
+        self.assertNotIn("prusa-updater.service", enable_block)
+
+    def test_updater_units_are_reused_and_valid(self):
+        service = parse_unit(REPO_SYSTEMD / "prusa-updater.service")
+        unit_section = service["Unit"]
+        self.assertIn("data-ready.target", unit_section["Requires"].split())
+        self.assertEqual(service["Service"]["Type"], "oneshot")
+        self.assertEqual(service["Service"]["User"], "root")
+        self.assertIn("updater_install.py", service["Service"]["ExecStart"])
+        self.assertIn(" check", service["Service"]["ExecStart"])
+        # A documented fixed PATH so minisign/zstd resolve deterministically.
+        self.assertIn("PATH=", service["Service"]["Environment"])
+        self.assertNotIn("Install", service)
+
+        timer = parse_unit(REPO_SYSTEMD / "prusa-updater.timer")
+        self.assertEqual(timer["Timer"]["Unit"], "prusa-updater.service")
+        self.assertIn("24h", timer["Timer"]["OnUnitActiveSec"])
+        self.assertIn(
+            "multi-user.target", timer["Install"]["WantedBy"].split()
+        )
 
     def test_icon_is_png(self):
         data = (ASSETS / "icon" / "buddy3d-camera.png").read_bytes()

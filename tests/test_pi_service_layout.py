@@ -71,6 +71,8 @@ class ServiceIdentityConstantsTests(unittest.TestCase):
         # config/backups hold secrets and migration backups: not world-readable.
         self.assertEqual(modes['/data/prusa-cam/config'], 0o750)
         self.assertEqual(modes['/data/prusa-cam/backups'], 0o750)
+        # The root updater owns installation targets; releases stays traversable.
+        self.assertEqual(modes['/data/prusa-cam/releases'], 0o755)
 
 
 class DurableLayoutCreationTests(unittest.TestCase):
@@ -90,24 +92,29 @@ class DurableLayoutCreationTests(unittest.TestCase):
 
         expected = [path for path, _mode in persist_restore.DATA_LAYOUT]
         self.assertEqual(calls['makedirs'], expected)
-        # The NetworkManager keyfile store stays root-owned (B4): it is created
-        # but never chowned to the service account, because it is bind-mounted
-        # onto /etc/NetworkManager/system-connections and consumed by root.
+        # Root-only entries (the NM keyfile store and the releases tree) are
+        # re-asserted as root-owned; everything else is handed to the service
+        # account so it can write state/config/backups/frames.
         expected_chown = [
-            path for path in expected if path not in persist_restore.ROOT_ONLY_DIRS
+            (path, 'root' if path in persist_restore.ROOT_ONLY_DIRS else 'prusa-cam')
+            for path in expected
         ]
-        self.assertEqual([p for p, _u in calls['chown']], expected_chown)
-        self.assertEqual({u for _p, u in calls['chown']}, {'prusa-cam'})
+        self.assertEqual(calls['chown'], expected_chown)
         chmod = dict(calls['chmod'])
         self.assertEqual(chmod['/data/prusa-cam/config'], 0o750)
         self.assertEqual(chmod['/data/prusa-cam/backups'], 0o750)
+        self.assertEqual(chmod['/data/prusa-cam/releases'], 0o755)
         self.assertEqual(chmod['/data/network'], 0o700)
         self.assertEqual(chmod['/data/network/system-connections'], 0o700)
 
-    def test_root_only_dirs_are_never_chowned(self):
+    def test_root_only_dirs_are_owned_by_root(self):
         self.assertEqual(
             persist_restore.ROOT_ONLY_DIRS,
-            {'/data/network', '/data/network/system-connections'},
+            {
+                '/data/network',
+                '/data/network/system-connections',
+                '/data/prusa-cam/releases',
+            },
         )
 
     def test_service_user_env_override(self):
@@ -116,14 +123,18 @@ class DurableLayoutCreationTests(unittest.TestCase):
                 patch.object(persist_restore.os, 'makedirs'), \
                 patch.object(persist_restore.os, 'chmod'), \
                 patch.object(persist_restore, '_chown',
-                             side_effect=lambda p, u: users.append(u)), \
+                             side_effect=lambda p, u: users.append((p, u))), \
                 patch.object(persist_restore, '_bind_mount'), \
                 patch.object(persist_restore, '_restore_settings'), \
                 patch.object(persist_restore, '_prune_timelapse'), \
                 patch.dict(os.environ, {'SERVICE_USER': 'custom-svc'}):
             persist_restore.main()
         self.assertTrue(users)
-        self.assertEqual(set(users), {'custom-svc'})
+        for path, user in users:
+            if path in persist_restore.ROOT_ONLY_DIRS:
+                self.assertEqual(user, 'root', path)
+            else:
+                self.assertEqual(user, 'custom-svc', path)
 
     def test_main_inert_when_data_unavailable(self):
         with patch.object(persist_restore.settings_store, 'available', return_value=False), \

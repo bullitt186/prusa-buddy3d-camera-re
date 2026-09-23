@@ -23,6 +23,7 @@
 #      units and ordering, absence of personal usernames/home paths,
 #      SSH/password login disabled, overlayroot.conf, volatile journald,
 #      NetworkManager, the factory app and launcher fallback, build-info.json,
+#      the embedded release-signing public key and updater units,
 #      forbidden secret/identity artifacts, and that the ROOT /data mount point
 #      is empty (no build-time identity).
 #
@@ -289,7 +290,8 @@ else
       rpicam-source.service prusa-rtsp.service prusa-ha-rtsp.service \
       prusa-cam.service pi-persist.service prusa-data-ready.service \
       data-ready.target bootlog.service prusa-data-grow.service \
-      prusa-camera.target prusa-boot-mode.service; do
+      prusa-camera.target prusa-boot-mode.service \
+      prusa-updater.service prusa-updater.timer; do
       add_unit "$unit"
    done
    if [ -d "$REPO_UNITS" ]; then
@@ -413,6 +415,64 @@ else
        report ok "prusa-camera.target is not enabled"
     fi
 
+    # WP-R4b: the updater timer is enabled at multi-user.target; its oneshot
+    # service is installed and triggered by the timer (no [Install] section), so
+    # it must NOT be separately enabled. The updater must never be Requires=
+    # pulled into camera startup (AC-27 isolation).
+    if [ -L "$wants_dir/prusa-updater.timer" ]; then
+       report ok "prusa-updater.timer is enabled at multi-user.target"
+    else
+       report fail "prusa-updater.timer must be enabled at multi-user.target"
+    fi
+    if [ -L "$wants_dir/prusa-updater.service" ]; then
+       report fail "prusa-updater.service must not be enabled (triggered by the timer)"
+    else
+       report ok "prusa-updater.service is not separately enabled"
+    fi
+    if [ -f "$SYSTEMD_DIR/prusa-updater.service" ]; then
+       if grep -q 'updater_install.py' "$SYSTEMD_DIR/prusa-updater.service"; then
+          report ok "prusa-updater.service runs updater_install.py"
+       else
+          report fail "prusa-updater.service must run updater_install.py"
+       fi
+       if unit_has "$SYSTEMD_DIR/prusa-updater.service" Requires data-ready.target; then
+          report ok "prusa-updater.service Requires= data-ready.target"
+       else
+          report fail "prusa-updater.service must Require= data-ready.target"
+       fi
+       # AC-32: the trust anchor is fixed and the manifest source must not come
+       # from a service-writable path. The updater reads /etc/prusa-updater.conf
+       # (root:root 0644); /etc/prusa-cam is writable by prusa-cam and is never a
+       # legitimate EnvironmentFile.
+       if grep -q 'PRUSA_UPDATE_PUBLIC_KEY' "$SYSTEMD_DIR/prusa-updater.service"; then
+          report fail "prusa-updater.service must not allow a public-key env override"
+       else
+          report ok "prusa-updater.service has no public-key env override"
+       fi
+       if grep -Eq 'EnvironmentFile=.*(/etc/prusa-cam/|updater\.env)' \
+             "$SYSTEMD_DIR/prusa-updater.service"; then
+          report fail "prusa-updater.service must not read a service-writable EnvironmentFile"
+       else
+          report ok "prusa-updater.service has no service-writable EnvironmentFile"
+       fi
+       if grep -q 'updater_install.py recover' "$SYSTEMD_DIR/prusa-updater.service"; then
+          report ok "prusa-updater.service recovers interrupted state before check"
+       else
+          report fail "prusa-updater.service must run 'updater_install.py recover' before check"
+       fi
+    else
+       report fail "prusa-updater.service is missing"
+    fi
+    if [ -f "$SYSTEMD_DIR/prusa-updater.timer" ]; then
+       if unit_has "$SYSTEMD_DIR/prusa-updater.timer" Unit prusa-updater.service; then
+          report ok "prusa-updater.timer triggers prusa-updater.service"
+       else
+          report fail "prusa-updater.timer must trigger prusa-updater.service"
+       fi
+    else
+       report fail "prusa-updater.timer is missing"
+    fi
+
     # prusa-admin.service is bound to the camera runtime, never to
     # multi-user.target: it is either enabled under prusa-camera.target.wants or
     # (because the installer does not enable it directly) carries
@@ -435,6 +495,20 @@ else
        report ok "prusa-camera.target Wants= prusa-admin.service"
     else
        report fail "prusa-camera.target must Wants= prusa-admin.service"
+    fi
+
+    # WP-R4b/AC-27: the updater timer is optional and isolated. The camera
+    # target Wants= it (available after claim) but must never Requires= it, so
+    # an update failure cannot stop camera startup.
+    if [ -f "$target_file" ] && unit_has "$target_file" Wants prusa-updater.timer; then
+       report ok "prusa-camera.target Wants= prusa-updater.timer"
+    else
+       report fail "prusa-camera.target must Wants= prusa-updater.timer"
+    fi
+    if [ -f "$target_file" ] && unit_has "$target_file" Requires prusa-updater.timer; then
+       report fail "prusa-camera.target must not Require= prusa-updater.timer"
+    else
+       report ok "prusa-camera.target does not Require= prusa-updater.timer"
     fi
 
     # --- privileged helper + sudoers (B3) ----------------------------------
@@ -1015,6 +1089,33 @@ PY
       report fail "build-info.json missing at /usr/share/prusa-buddy3d-camera/build-info.json"
    fi
 
+   # --- embedded release-signing public key (WP-R4b / AC-29) --------------
+   # The updater trusts exactly the committed public key. It must be present,
+   # root:root 0644, not service-account-owned, and public (no private key
+   # material). The private key must never appear anywhere in the image; the
+   # Python secret/key scan above asserts that.
+   pubkey="$MOUNT_ROOT/usr/share/prusa-buddy3d-camera/buddy3d-release.pub"
+   if [ -f "$pubkey" ]; then
+      key_owner="$(stat -c '%u:%g' "$pubkey" 2>/dev/null || true)"
+      key_mode="$(stat -c '%a' "$pubkey" 2>/dev/null || true)"
+      if [ -n "$prusa_uid" ] && [ "$key_owner" = "$prusa_uid:$prusa_gid" ]; then
+         report fail "buddy3d-release.pub must not be owned by prusa-cam ($key_owner)"
+      elif [ "$key_owner" != "$root_uid:$root_gid" ]; then
+         report fail "buddy3d-release.pub must be root:root (found ${key_owner:-missing})"
+      elif [ "$key_mode" != "644" ]; then
+         report fail "buddy3d-release.pub must be mode 0644 (found ${key_mode:-?})"
+      else
+         report ok "buddy3d-release.pub is root:root mode 0644"
+      fi
+      if grep -q 'PRIVATE KEY' "$pubkey"; then
+         report fail "buddy3d-release.pub contains private key material"
+      else
+         report ok "buddy3d-release.pub contains no private key material"
+      fi
+   else
+      report fail "buddy3d-release.pub is missing at /usr/share/prusa-buddy3d-camera/"
+   fi
+
    # --- ROOT /data is an empty mount point, no build-time identity --------
    # genimage MOVES the seeded /data contents onto the PERSIST partition, so
    # ROOT's /data is an empty mount point that must carry no build-time device
@@ -1124,6 +1225,13 @@ def list_dir(directory):
 cache = {}
 missing = []
 owners = []
+# Durable directories the service account must NOT own: the root updater owns
+# the releases tree and NetworkManager owns the keyfile store (WP-R4b).
+ROOT_OWNED = {
+    "/prusa-cam/releases",
+    "/network",
+    "/network/system-connections",
+}
 for parent, name in REQUIRED:
     if parent not in cache:
         cache[parent] = list_dir(parent)
@@ -1159,28 +1267,49 @@ if mount_root:
         expected = None
 
 if expected is not None:
-    wrong = [f"{p}({u}:{g})" for p, u, g in owners if (u, g) != expected]
+    wrong = []
+    for p, u, g in owners:
+        want = ("0", "0") if p in ROOT_OWNED else expected
+        if (u, g) != want:
+            wrong.append(f"{p}({u}:{g})")
     if wrong:
         out(
             "fail",
             "PERSIST ownership mismatch (expected prusa-cam "
-            f"{expected[0]}:{expected[1]}): {', '.join(wrong)}",
+            f"{expected[0]}:{expected[1]} and root:root for root-only dirs): "
+            f"{', '.join(wrong)}",
         )
     else:
-        out("ok", f"PERSIST directories owned by prusa-cam ({expected[0]}:{expected[1]})")
+        out(
+            "ok",
+            "PERSIST directories owned correctly (prusa-cam "
+            f"{expected[0]}:{expected[1]}; root-only dirs 0:0)",
+        )
 else:
-    unique = sorted({(u, g) for _, u, g in owners})
-    if len(unique) == 1 and unique[0] != ("0", "0"):
+    root_wrong = [
+        f"{p}({u}:{g})" for p, u, g in owners
+        if p in ROOT_OWNED and (u, g) != ("0", "0")
+    ]
+    others = {(u, g) for p, u, g in owners if p not in ROOT_OWNED}
+    if root_wrong:
+        out(
+            "fail",
+            "PERSIST root-only directories are not root-owned: "
+            f"{', '.join(root_wrong)}",
+        )
+    elif len(others) == 1 and ("0", "0") not in others:
+        owner = next(iter(others))
         out(
             "ok",
             "PERSIST directories consistently owned by "
-            f"{unique[0][0]}:{unique[0][1]} (pass --mount-root to verify the prusa-cam id)",
+            f"{owner[0]}:{owner[1]} with root-only dirs (pass --mount-root to "
+            "verify the prusa-cam id)",
         )
     else:
         out(
             "fail",
             "PERSIST directories are not owned by a single non-root account: "
-            f"{unique}",
+            f"{sorted(others)}",
         )
 PY
 )
