@@ -16,6 +16,33 @@ LOG=/boot/firmware/bootlog.txt
     echo "--- dmesg (first 40 lines) ---"
     dmesg -T 2>/dev/null | head -40
     echo
+    # Appliance bring-up forensics: the journal is volatile and the root is an
+    # overlay, so persist the runtime unit state, NetworkManager view, and the
+    # provisioning/hotspot logs here. This is what made the first-boot "no
+    # setup hotspot" failure diagnosable without a console.
+    echo "--- buddy3d services ($(date -Is)) ---"
+    systemctl --failed --no-pager 2>/dev/null
+    for unit in data-ready.target pi-persist.service prusa-boot-mode.service \
+                prusa-provisioning.service NetworkManager.service; do
+        echo "$unit: active=$(systemctl is-active "$unit" 2>/dev/null) enabled=$(systemctl is-enabled "$unit" 2>/dev/null)"
+    done
+    echo "--- systemctl status ---"
+    systemctl status --no-pager -l prusa-boot-mode.service prusa-provisioning.service 2>/dev/null | head -60
+    echo "--- nmcli general / device ---"
+    nmcli general status 2>/dev/null
+    nmcli -t device status 2>/dev/null
+    echo "--- nmcli connections ---"
+    nmcli -t -f NAME,DEVICE,STATE connection show 2>/dev/null
+    echo "--- rfkill ---"
+    rfkill list 2>/dev/null
+    echo "--- provisioning state / data ---"
+    cat /data/prusa-cam/provisioning.json 2>/dev/null || echo "(no provisioning.json)"
+    ls -la /data/prusa-cam/ 2>/dev/null
+    ls -la /data/network/system-connections/ 2>/dev/null
+    echo "--- journal (boot-mode/provisioning/NetworkManager) ---"
+    journalctl -b --no-pager -n 300 -u prusa-boot-mode \
+        -u prusa-provisioning -u NetworkManager -u data-ready.target 2>/dev/null
+    echo
 } >> "$LOG" 2>&1 || true
 
 # Keep the small vfat boot partition bounded.

@@ -9,6 +9,9 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
+# Give the runtime selector and provisioning service time to attempt startup so
+# the persisted snapshot captures their real state (see bootlog.sh).
+ExecStartPre=/bin/sleep 25
 ExecStart=/opt/prusa-cam/bootlog.sh
 Nice=10
 
