@@ -9,6 +9,10 @@ Requires=rpicam-source.service data-ready.target
 [Service]
 Type=simple
 User=prusa-cam
+# GStreamer/fontconfig need a writable cache; HOME (/opt/prusa-cam) is
+# read-only on the appliance, which spammed "Fontconfig error: No writable
+# cache directories".
+Environment=XDG_CACHE_HOME=/tmp/prusa-cam
 WorkingDirectory=/opt/prusa-cam
 # WP-R4c: start through the launcher so an installed signed release under DATA
 # (and its per-release venv) runs; the launcher falls back to the factory app.

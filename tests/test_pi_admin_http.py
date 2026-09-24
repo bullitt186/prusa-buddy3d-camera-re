@@ -869,6 +869,34 @@ class StatusTests(AdminHttpTestBase):
         self.assertTrue(payload['hotspot']['active'])
         self.assertEqual(payload['hotspot']['address'], '192.168.4.1')
 
+    def test_camera_probe_only_runs_in_setup_mode(self):
+        # Post-runtime rpicam-source owns libcamera (single consumer), so probing
+        # would fail and misreport a working camera as unavailable. Setup mode
+        # probes; admin mode must not.
+        calls = []
+
+        class _Probe:
+            ok = True
+            reason = ''
+            sensors = 1
+
+        def probe():
+            calls.append(True)
+            return _Probe()
+
+        admin = self._build_app(probe=probe)
+        admin_payload = json.loads(
+            admin.handle(self.req('GET', '/api/status')).body.decode('utf-8'))
+        self.assertNotIn('camera', admin_payload)
+        self.assertEqual(calls, [])
+
+        setup = self._build_app(mode='setup', probe=probe)
+        setup_payload = json.loads(
+            setup.handle(self.req('GET', '/api/status')).body.decode('utf-8'))
+        self.assertIn('camera', setup_payload)
+        self.assertTrue(setup_payload['camera']['ok'])
+        self.assertEqual(calls, [True])
+
 
 # --------------------------------------------------------------------------- #
 # Setup wizard

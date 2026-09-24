@@ -735,7 +735,11 @@ class AdminApp:
             payload['provisioning_error'] = view.error
         if self._hotspot is not None:
             payload['hotspot'] = _hotspot_view(self._hotspot)
-        if self._probe is not None:
+        if self._probe is not None and self.mode == 'setup':
+            # Probe only in setup mode. Once the camera target runs,
+            # rpicam-source owns libcamera (single consumer), so a second capture
+            # would fail and misreport a working camera as unavailable
+            # (hardware-found: admin /api/status said "still capture failed").
             payload['camera'] = _probe_view(self._probe)
         if self._ssh_runner is not None:
             payload['ssh'] = _ssh_view(self._ssh_runner)

@@ -10,6 +10,8 @@ Requires=rpicam-source.service data-ready.target
 Type=simple
 User=prusa-cam
 WorkingDirectory=/opt/prusa-cam
+# GStreamer/fontconfig need a writable cache (HOME is read-only on the appliance).
+Environment=XDG_CACHE_HOME=/tmp/prusa-cam
 Environment=RTSP_PORT=8555
 Environment=RTSP_PATH=/live
 Environment="RTSP_LABEL=Home Assistant"
