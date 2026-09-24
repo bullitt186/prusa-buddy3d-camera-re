@@ -1,0 +1,10 @@
+# libcamera/rpicam (the wizard probe, rpicam-source, and the web UI snapshot)
+# needs /dev/dma_heap/* to allocate camera buffers. The kernel creates those
+# device nodes root:root 0600, so the unprivileged prusa-cam service account
+# cannot open them and rpicam reports:
+#     Could not open any dmaHeap device
+#     No cameras available!
+# (hardware-found: camera "not detected" even though rpicam-hello as root sees
+# the OV5647 sensor). Grant the video group -- prusa-cam is a member -- read/
+# write access so the whole camera stack works without running as root.
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"

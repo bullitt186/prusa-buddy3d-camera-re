@@ -198,6 +198,13 @@ def make_rootfs(base):
         "[Journal]\nStorage=volatile\nRuntimeMaxUse=32M\n", encoding="utf-8"
     )
 
+    # Camera device access: prusa-cam must be able to open /dev/dma_heap/*.
+    udev = root / "etc" / "udev" / "rules.d"
+    udev.mkdir(parents=True)
+    (udev / "50-prusa-cam-camera.rules").write_text(
+        'SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"\n', encoding="utf-8"
+    )
+
     # NetworkManager configuration.
     networkmanager = root / "etc" / "NetworkManager"
     networkmanager.mkdir(parents=True)
@@ -558,6 +565,13 @@ class RootfsValidationTests(unittest.TestCase):
         result = run_validator("--image", self.image, "--mount-root", root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dnsmasq missing", result.stdout)
+
+    def test_missing_camera_dma_heap_rule_fails(self):
+        root = self._root()
+        (root / "etc" / "udev" / "rules.d" / "50-prusa-cam-camera.rules").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing dma_heap udev rule", result.stdout)
 
     def test_missing_firewall_backend_fails(self):
         root = self._root()

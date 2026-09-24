@@ -1131,6 +1131,17 @@ PY
       report fail "no firewall backend (nftables/iptables) for NetworkManager shared-mode NAT"
    fi
 
+   # The camera stack runs as prusa-cam, but /dev/dma_heap/* is root:root 0600 by
+   # default so rpicam reports "Could not open any dmaHeap device" and no camera.
+   camera_rule="$MOUNT_ROOT/etc/udev/rules.d/50-prusa-cam-camera.rules"
+   if [ -f "$camera_rule" ] \
+      && grep -q 'SUBSYSTEM=="dma_heap"' "$camera_rule" \
+      && grep -q 'GROUP="video"' "$camera_rule"; then
+      report ok "dma_heap udev rule grants camera access to the video group"
+   else
+      report fail "missing dma_heap udev rule (prusa-cam cannot open the camera)"
+   fi
+
    # --- factory app + launcher fallback -----------------------------------
    if [ -f "$MOUNT_ROOT/opt/prusa-cam/main.py" ]; then
       report ok "factory application present under /opt/prusa-cam"

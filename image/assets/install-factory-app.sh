@@ -92,6 +92,12 @@ install -D -m 0644 "$assets/systemd/NetworkManager.service.d/10-data-ready.conf"
 install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
    "$root/etc/systemd/journald.conf.d/99-buddy3d-volatile.conf"
 
+# --- camera device access (hardware fix) ------------------------------------
+# /dev/dma_heap/* is root:root 0600, so the prusa-cam service account cannot
+# allocate camera buffers; grant the video group access (prusa-cam is a member).
+install -D -o root -g root -m 0644 "$assets/udev/50-prusa-cam-camera.rules" \
+   "$root/etc/udev/rules.d/50-prusa-cam-camera.rules"
+
 # --- runtime launcher + factory fallback (AC-13; WP-R4c) --------------------
 # The runtime units exec this launcher, which prefers an installed release
 # under DATA and falls back to the immutable factory app when none is valid.

@@ -591,6 +591,17 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertEqual(rc("b33dcafe-04"), 1)
         self.assertEqual(rc("b33dcafe-xx"), 2)
 
+    def test_installer_grants_camera_dma_heap_access(self):
+        # The camera stack runs as prusa-cam; /dev/dma_heap/* is root:root 0600,
+        # so a udev rule must grant the video group access (hardware-found).
+        rule = read_text(ASSETS / "udev" / "50-prusa-cam-camera.rules")
+        self.assertIn('SUBSYSTEM=="dma_heap"', rule)
+        self.assertIn('GROUP="video"', rule)
+        self.assertIn('MODE="0660"', rule)
+        installer = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn("50-prusa-cam-camera.rules", installer)
+        self.assertIn("etc/udev/rules.d/50-prusa-cam-camera.rules", installer)
+
     # --- AC-13/AC-14: build script + no secrets ----------------------------
 
     def test_build_script_verifies_pin_and_syntax(self):
