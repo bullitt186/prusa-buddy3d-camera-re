@@ -159,8 +159,37 @@ def summarize_info_response(body, token, fingerprint):
 
 def load_config():
     cfg = configparser.ConfigParser()
-    # config.ini sits next to this script — deploy-path independent
+    # config.ini sits next to this script — the dev-Pi deployment path.
     cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini'))
+    if not cfg.has_section('identity'):
+        # Appliance: the durable device.toml/secrets.toml replace config.ini.
+        # Bridge them into the legacy cfg shape this module consumes, otherwise
+        # startup dies with KeyError: 'identity' on a freshly claimed device
+        # (hardware-found: prusa-cam crash-looped and the camera target failed).
+        try:
+            device = config_schema.load_device()
+            secrets = config_schema.load_secrets()
+        except Exception as e:  # noqa: BLE001 - config must never be fatal
+            log.warning(f'appliance config unavailable: {type(e).__name__}')
+            device, secrets = {}, {}
+        if not isinstance(device, dict):
+            device = {}
+        if not isinstance(secrets, dict):
+            secrets = {}
+        cfg.add_section('identity')
+        cfg.set(
+            'identity', 'token',
+            str((secrets.get('prusa') or {}).get('token') or ''),
+        )
+        cfg.set('identity', 'fingerprint', str(device.get('fingerprint') or ''))
+        if not cfg.has_section('upload'):
+            cfg.add_section('upload')
+        cfg.set(
+            'upload', 'server',
+            str((device.get('prusa') or {}).get('server')
+                or 'webcam.connect.prusa3d.com'),
+        )
+        cfg.set('upload', 'interval', '10')
     return cfg
 
 def get_network_info(configured_fingerprint=None):
