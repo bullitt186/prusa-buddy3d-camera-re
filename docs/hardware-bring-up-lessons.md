@@ -23,6 +23,41 @@
   iterate on the device (remount ROOT rw, patch a file, restart a unit) instead
   of swapping the SD card.
 
+## Live view (WebRTC) is gated by Prusa's camera-service registry
+
+Symptom: registration, `/c/info`, snapshots and RTSP all work, but the **live
+view** never appears in the Prusa Connect website or the app. The device logs:
+
+```
+ICE configured: stun=stun://coturn.prusa3d.com:5349 turn=coturn.prusa3d.com:3478 user=set cred=set
+Offer SDP text ready (833 chars, m-lines=['m=video 9 UDP/TLS/RTP/SAVPF 96'])
+SIO OUT webrtc ... 5=3 (offer) / 5=4 (candidates)
+WebRTC stream ended (no-ice-connection)
+```
+
+The device sends its offer and ICE candidates but receives **no answer and no
+remote candidates**, so ICE never connects. The web UI exposes only the snapshot
+(no `<video>` player for the external camera).
+
+Cause (verified on the device, 2026-09-24):
+
+```
+GET https://camera-service-api.prusa3d.com/v1/cameras/<token>
+  -> 404 {"statusCode":404,"errorCode":"NOT_FOUND"}
+```
+
+`docs/protocol.md` §5 "Server-side gate" already recorded this: the viewer's
+`client_authentication` is rejected (ACK 5) for tokens not in Prusa's
+camera-service registry and `GET .../v1/cameras/<token>` returns 404, so
+"viewers cannot connect and the camera never receives any relayed events".
+
+**Conclusion:** the live stream is blocked by a **Prusa backend gate** (a
+real-hardware allowlist or a staged feature rollout — the docs leave which one
+open), not by an appliance defect. It cannot be fixed from the device. Snapshots
+work because `PUT /c/snapshot` is not gated. The device half of WebRTC is
+correct: `/c/info` `registered=True`, signaling `Auth ACK: 0`, `Snapshot: 200`,
+offer + candidates emitted, TURN/STUN configured.
+
 ## Defects found only on hardware
 
 | # | Symptom on device | Root cause | Fix |
