@@ -50,6 +50,7 @@ import trigger
 import webrtc_control
 import webrtc_lifecycle
 import local_http
+import privileged
 import timezone
 import ota
 import timelapse
@@ -239,11 +240,16 @@ def reboot_device():
 
 
 def rtsp_service_start():
-    subprocess.run(['sudo', 'systemctl', 'start', 'prusa-rtsp.service'], capture_output=True)
+    # Appliance: prusa-cam may only run the fixed-verb root helper, not
+    # systemctl directly (hardware-found: "command not allowed"). Dev Pi: the
+    # helper is absent, so fall back to sudo systemctl.
+    if not privileged.rtsp_start().ok:
+        subprocess.run(['sudo', 'systemctl', 'start', 'prusa-rtsp.service'], capture_output=True)
 
 
 def rtsp_service_stop():
-    subprocess.run(['sudo', 'systemctl', 'stop', 'prusa-rtsp.service'], capture_output=True)
+    if not privileged.rtsp_stop().ok:
+        subprocess.run(['sudo', 'systemctl', 'stop', 'prusa-rtsp.service'], capture_output=True)
 
 
 def rtsp_service_active():

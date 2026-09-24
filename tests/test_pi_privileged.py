@@ -68,8 +68,20 @@ class AllowlistTests(unittest.TestCase):
             frozenset({
                 'start-camera', 'stop-provisioning', 'hotspot-start',
                 'hotspot-stop', 'wifi-station-apply', 'install-update',
+                'rtsp-start', 'rtsp-stop',
             }),
         )
+
+    def test_rtsp_verbs_match_the_helper(self):
+        # Every Python verb must be a case label in the root helper.
+        helper = (
+            Path(__file__).resolve().parent.parent
+            / 'image'
+            / 'assets'
+            / 'prusa-priv'
+        ).read_text(encoding='utf-8')
+        for verb in ('rtsp-start', 'rtsp-stop'):
+            self.assertIn(f'{verb})', helper)
 
     def test_unknown_verb_is_rejected_without_running(self):
         runner = make_runner()

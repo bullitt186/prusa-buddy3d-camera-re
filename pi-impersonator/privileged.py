@@ -46,6 +46,8 @@ VERBS = frozenset({
     'hotspot-stop',
     'wifi-station-apply',
     'install-update',
+    'rtsp-start',
+    'rtsp-stop',
 })
 
 #: Bounded wall-clock timeout for a privileged invocation.
@@ -166,6 +168,21 @@ def install_update(runner=None):
     itself and never handles the signing key. Returns a :class:`PrivilegedResult`.
     """
     return _invoke('install-update', runner=runner)
+
+
+def rtsp_start(runner=None):
+    """Start ``prusa-rtsp.service`` as root.
+
+    The appliance's ``prusa-cam`` account cannot call ``systemctl`` directly
+    (only the fixed-verb helper is in sudoers), so runtime RTSP toggles go
+    through the helper. Returns a :class:`PrivilegedResult`.
+    """
+    return _invoke('rtsp-start', runner=runner)
+
+
+def rtsp_stop(runner=None):
+    """Stop ``prusa-rtsp.service`` as root (see :func:`rtsp_start`)."""
+    return _invoke('rtsp-stop', runner=runner)
 
 
 def hotspot_start(runner=None):
