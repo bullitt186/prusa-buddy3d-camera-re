@@ -276,5 +276,27 @@ class SensorHandoffTests(unittest.TestCase):
         self.assertIsInstance(reason, str)
 
 
+class BinaryStdoutTests(unittest.TestCase):
+    """The still/JPEG captures stream a binary JPEG to stdout."""
+
+    def test_capture_accepts_binary_stdout(self):
+        # Hardware-found regression: the runner decoded stdout as UTF-8, so a
+        # JPEG capture raised and every probe failed. Binary must be accepted.
+        jpeg = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00' + b'\x00' * 32
+        runner = lambda args, timeout: FakeResult(0, jpeg)
+        ok, reason = camera_probe._default_capture(640, 480, 'still', runner)
+        self.assertTrue(ok, reason)
+
+    def test_default_runner_does_not_decode_as_text(self):
+        # Guard the runner: text=True would raise on the binary capture.
+        import inspect
+
+        source = inspect.getsource(camera_probe._default_runner)
+        self.assertNotIn('text=True', source)
+
+    def test_stdout_handles_bytes(self):
+        self.assertEqual(camera_probe._stdout(FakeResult(0, b'abc')), 'abc')
+
+
 if __name__ == '__main__':
     unittest.main()

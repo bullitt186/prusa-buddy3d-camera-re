@@ -112,15 +112,19 @@ class ProbeResult:
 # --------------------------------------------------------------------------- #
 
 def _default_runner(args, timeout):
-    """Run ``args`` with a bounded timeout, capturing text stdout/stderr.
+    """Run ``args`` with a bounded timeout, capturing stdout/stderr as **bytes**.
 
+    Bytes, not text: ``rpicam-still -o -`` / ``rpicam-jpeg -o -`` stream a
+    binary JPEG to stdout, and decoding that as UTF-8 raised
+    ``'utf-8' codec can't decode byte 0xff`` -- which made every still/JPEG
+    capture step fail ("still capture: camera probe failed") on hardware even
+    though the camera worked. Text consumers decode via :func:`_stdout`.
     The single place this module touches :mod:`subprocess`; tests replace it
     with a fake so no hardware or process is involved.
     """
     return subprocess.run(
         list(args),
         capture_output=True,
-        text=True,
         timeout=timeout,
         check=False,
     )
