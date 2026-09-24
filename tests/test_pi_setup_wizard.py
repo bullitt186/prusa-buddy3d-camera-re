@@ -266,9 +266,30 @@ class FingerprintTests(WizardTestBase):
     def test_fingerprint_is_optional(self):
         session = self.make_session()
         self.assertTrue(session.submit('fingerprint', {}).ok)
+        # The host has no wlan0, so no stable fingerprint can be derived; on a
+        # device the empty submission persists the MAC-derived value.
         self.assertEqual(session.fingerprint, '')
         self.assertTrue(session.submit('fingerprint', {'fingerprint': 'fp-123'}).ok)
         self.assertEqual(session.fingerprint, 'fp-123')
+
+    def test_empty_submission_persists_the_mac_derived_fingerprint(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile('w', suffix='.mac') as handle:
+            handle.write('d8:3a:dd:32:1c:ac\n')
+            handle.flush()
+            derived = setup_wizard.WizardSession._derived_fingerprint(
+                mac_path=handle.name)
+        self.assertTrue(derived)
+        self.assertNotEqual(derived, '')
+        self.assertRegex(derived, r'^[0-9a-f]{32}$')
+
+    def test_derived_fingerprint_is_empty_without_a_mac(self):
+        self.assertEqual(
+            setup_wizard.WizardSession._derived_fingerprint(
+                mac_path='/nonexistent/wlan0/address'),
+            '',
+        )
 
     def test_invalid_type_is_rejected(self):
         session = self.make_session()

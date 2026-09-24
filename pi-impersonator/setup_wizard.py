@@ -62,6 +62,7 @@ import admin_auth
 import camera_probe
 import config_schema
 import hotspot
+import identity
 import mqtt_service
 import provisioning
 import settings_store
@@ -390,14 +391,43 @@ class WizardSession:
         return True, ''
 
     def _step_fingerprint(self, data):
-        """Step 5: optional explicit fingerprint (empty keeps MAC-derived)."""
+        """Step 5: explicit fingerprint, else persist the stable MAC-derived one.
+
+        Leaving it empty derived the fingerprint at runtime from the wlan0 MAC,
+        which NetworkManager randomizes during scans, so the identity (and the
+        Prusa Connect token binding) was not stable -- hardware-found as
+        "Invalid fingerprint", snapshot 400, and signaling ACK=1 after a rescan.
+        """
         fingerprint = data.get('fingerprint', '')
         if fingerprint is None:
             fingerprint = ''
         if not isinstance(fingerprint, str):
             return False, 'fingerprint must be a string'
-        self.fingerprint = fingerprint.strip()
+        fingerprint = fingerprint.strip()
+        if not fingerprint:
+            fingerprint = self._derived_fingerprint()
+        self.fingerprint = fingerprint
         return True, ''
+
+    @classmethod
+    def _derived_fingerprint(cls, mac_path='/sys/class/net/wlan0/address'):
+        """The stable MAC-derived fingerprint, or '' when no MAC is readable.
+
+        Deliberately does NOT fall back to a stored seed: the fingerprint must
+        be a real hardware identity at onboarding, and an invented one would not
+        match what the runtime derives.
+        """
+        try:
+            raw_mac = open(mac_path).read().strip()
+        except OSError:
+            raw_mac = ''
+        if not raw_mac:
+            return ''
+        try:
+            _mac, derived = identity.resolve_fingerprint(None, raw_mac)
+        except Exception:  # noqa: BLE001 - a step must never raise
+            return ''
+        return derived or ''
 
     def _step_admin_password(self, data):
         """Step 6: strength-check, confirm, then store only the scrypt hash."""

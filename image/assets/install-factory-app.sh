@@ -98,6 +98,12 @@ install -D -m 0644 "$assets/systemd/journald-volatile.conf" \
 install -D -o root -g root -m 0644 "$assets/udev/50-prusa-cam-camera.rules" \
    "$root/etc/udev/rules.d/50-prusa-cam-camera.rules"
 
+# --- stable Wi-Fi identity (hardware fix) -----------------------------------
+# Keep the wlan0 MAC stable: NetworkManager's scan-time MAC randomization made
+# the MAC-derived fingerprint flap and broke the Prusa Connect token binding.
+install -D -o root -g root -m 0644 "$assets/networkmanager/10-prusa-mac.conf" \
+   "$root/etc/NetworkManager/conf.d/10-prusa-mac.conf"
+
 # --- runtime launcher + factory fallback (AC-13; WP-R4c) --------------------
 # The runtime units exec this launcher, which prefers an installed release
 # under DATA and falls back to the immutable factory app when none is valid.

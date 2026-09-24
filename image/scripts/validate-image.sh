@@ -1142,6 +1142,15 @@ PY
       report fail "missing dma_heap udev rule (prusa-cam cannot open the camera)"
    fi
 
+   # Stable Wi-Fi identity: NetworkManager randomizes the MAC during scans, and
+   # the fingerprint is MAC-derived, so a scan would break the Connect binding.
+   mac_conf="$MOUNT_ROOT/etc/NetworkManager/conf.d/10-prusa-mac.conf"
+   if [ -f "$mac_conf" ] && grep -q 'scan-rand-mac-address=no' "$mac_conf"; then
+      report ok "NetworkManager scan MAC randomization disabled (stable fingerprint)"
+   else
+      report fail "missing NetworkManager scan-rand-mac-address=no (fingerprint flaps)"
+   fi
+
    # --- factory app + launcher fallback -----------------------------------
    if [ -f "$MOUNT_ROOT/opt/prusa-cam/main.py" ]; then
       report ok "factory application present under /opt/prusa-cam"

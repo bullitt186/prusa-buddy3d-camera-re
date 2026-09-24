@@ -211,6 +211,12 @@ def make_rootfs(base):
     (networkmanager / "NetworkManager.conf").write_text(
         "[main]\nplugins=keyfile\n", encoding="utf-8"
     )
+    # Stable Wi-Fi identity: no scan-time MAC randomization.
+    nm_conf = networkmanager / "conf.d"
+    nm_conf.mkdir(parents=True, exist_ok=True)
+    (nm_conf / "10-prusa-mac.conf").write_text(
+        "[device]\nwifi.scan-rand-mac-address=no\n", encoding="utf-8"
+    )
 
     # Factory application + launcher fallback. The fixture installs the real
     # image asset so the validator's WP-R4c launcher assertions (per-release
@@ -585,6 +591,13 @@ class RootfsValidationTests(unittest.TestCase):
         result = run_validator("--image", self.image, "--mount-root", root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing dma_heap udev rule", result.stdout)
+
+    def test_missing_stable_mac_conf_fails(self):
+        root = self._root()
+        (root / "etc" / "NetworkManager" / "conf.d" / "10-prusa-mac.conf").unlink()
+        result = run_validator("--image", self.image, "--mount-root", root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fingerprint flaps", result.stdout)
 
     def test_missing_firewall_backend_fails(self):
         root = self._root()

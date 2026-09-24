@@ -604,6 +604,15 @@ class ImageScaffoldingTests(unittest.TestCase):
         self.assertIn("50-prusa-cam-camera.rules", installer)
         self.assertIn("etc/udev/rules.d/50-prusa-cam-camera.rules", installer)
 
+    def test_installer_disables_wifi_mac_randomization(self):
+        # Scan-time MAC randomization flips the MAC-derived fingerprint and
+        # breaks the Prusa Connect token binding.
+        conf = read_text(ASSETS / "networkmanager" / "10-prusa-mac.conf")
+        self.assertIn("wifi.scan-rand-mac-address=no", conf)
+        installer = read_text(ASSETS / "install-factory-app.sh")
+        self.assertIn("10-prusa-mac.conf", installer)
+        self.assertIn("etc/NetworkManager/conf.d/10-prusa-mac.conf", installer)
+
     # --- AC-13/AC-14: build script + no secrets ----------------------------
 
     def test_build_script_verifies_pin_and_syntax(self):
