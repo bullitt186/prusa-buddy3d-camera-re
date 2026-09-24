@@ -342,8 +342,14 @@ def make_rootfs(base):
     return root
 
 
-def make_boot_image(path, cmdline):
-    """Build a FAT BOOT image containing ``cmdline.txt`` (requires mtools)."""
+def make_boot_image(
+    path, cmdline, config="[pi02]\ndtoverlay=dwc2,dr_mode=host\n"
+):
+    """Build a FAT BOOT image with ``cmdline.txt`` and ``config.txt``.
+
+    Requires mtools. ``config`` defaults to the Pi Zero 2 W USB host mode line
+    the validator asserts; pass a different value to test its absence.
+    """
     path = Path(path)
     with open(path, "wb") as handle:
         handle.truncate(16 * 1024 * 1024)
@@ -354,6 +360,13 @@ def make_boot_image(path, cmdline):
     source.write_text(cmdline, encoding="utf-8")
     subprocess.run(
         ["mcopy", "-i", str(path), str(source), "::/cmdline.txt"],
+        check=True,
+        capture_output=True,
+    )
+    cfg = path.with_name(path.name + ".config.txt")
+    cfg.write_text(config, encoding="utf-8")
+    subprocess.run(
+        ["mcopy", "-i", str(path), str(cfg), "::/config.txt"],
         check=True,
         capture_output=True,
     )
@@ -1017,6 +1030,27 @@ class BootPartitionTests(unittest.TestCase):
         result = run_validator("--image", self.image, "--boot-image", boot)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("BOOT cmdline does not set overlayroot=", result.stdout)
+
+    def test_cmdline_with_usb_host_mode_passes(self):
+        boot = make_boot_image(
+            Path(self.tmp) / "boot-usb.vfat",
+            "console=serial0,115200 root=PARTUUID=b33dcafe-02 rootwait "
+            "overlayroot=tmpfs\n",
+        )
+        result = run_validator("--image", self.image, "--boot-image", boot)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("enables Pi Zero 2 W USB host mode", result.stdout)
+
+    def test_cmdline_without_usb_host_mode_fails(self):
+        boot = make_boot_image(
+            Path(self.tmp) / "boot-nousb.vfat",
+            "console=serial0,115200 root=PARTUUID=b33dcafe-02 rootwait "
+            "overlayroot=tmpfs\n",
+            config="[all]\ncamera_auto_detect=1\n",
+        )
+        result = run_validator("--image", self.image, "--boot-image", boot)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks [pi02] dtoverlay=dwc2,dr_mode=host", result.stdout)
 
     def test_missing_boot_image_skips_and_passes(self):
         result = run_validator("--image", self.image)

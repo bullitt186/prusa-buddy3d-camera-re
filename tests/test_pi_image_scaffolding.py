@@ -301,6 +301,8 @@ class ImageScaffoldingTests(unittest.TestCase):
         # ROOT is the immutable overlay lower with a tmpfs upper.
         self.assertIn("overlayroot=tmpfs", setup)
         self.assertIn('overlayroot="tmpfs:recurse=0"', setup)
+        # Pi Zero 2 W USB host mode (wired Ethernet/operator path).
+        self.assertIn("dtoverlay=dwc2,dr_mode=host", setup)
         # ROOT stays read-only; volatile runtime state (NM/systemd/Samba and the
         # app's ephemeral /etc/prusa-cam files) is mounted on tmpfs so a
         # power-off cannot damage the OS and the runtime is still writable.

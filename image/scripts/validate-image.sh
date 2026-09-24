@@ -1298,6 +1298,25 @@ else
    report skip "BOOT cmdline overlayroot= (mtools not available; install mtools)"
 fi
 
+# --- BOOT config.txt: Pi Zero 2 W USB host mode -----------------------------
+# The micro-USB data port is OTG and defaults to peripheral mode; host mode is
+# what makes a USB Ethernet adapter (wired operator/diagnostic path) work.
+if [ -z "$BOOT_IMAGE" ]; then
+   report oskip "BOOT config.txt USB host mode (no --boot-image)"
+elif command -v mtype >/dev/null 2>&1; then
+   if config_text="$(mtype -i "$BOOT_IMAGE" ::/config.txt 2>/dev/null)"; then
+      if printf '%s\n' "$config_text" | grep -q 'dwc2,dr_mode=host'; then
+         report ok "BOOT config.txt enables Pi Zero 2 W USB host mode"
+      else
+         report fail "BOOT config.txt lacks [pi02] dtoverlay=dwc2,dr_mode=host"
+      fi
+   else
+      report fail "cannot read config.txt from BOOT image: $BOOT_IMAGE"
+   fi
+else
+   report skip "BOOT config.txt USB host mode (mtools not available; install mtools)"
+fi
+
 # --- PERSIST seeded layout --------------------------------------------------
 # List the ext4 PERSIST partition with debugfs (no mount, no root) and assert
 # the seeded /data layout from image/layer/setup.sh plus its prusa-cam uid/gid.

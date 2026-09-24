@@ -25,6 +25,15 @@ case "$LABEL" in
       if ! grep -q 'overlayroot=' "$cmdline"; then
          sed -i "s|\$| overlayroot=tmpfs|" "$cmdline"
       fi
+      # Pi Zero 2 W USB host mode: the micro-USB data port is OTG and defaults
+      # to peripheral mode, so a USB Ethernet adapter (or any USB peripheral) is
+      # invisible. Host mode gives a wired operator/diagnostic path independent
+      # of Wi-Fi. Appended as its own [pi02] section (config.txt sections may
+      # repeat); idempotent.
+      config="$IMAGEMOUNTPATH/config.txt"
+      if [ -f "$config" ] && ! grep -q 'dwc2,dr_mode=host' "$config"; then
+         printf '\n[pi02]\ndtoverlay=dwc2,dr_mode=host\n' >> "$config"
+      fi
       ;;
    ROOT)
       # PARTUUID-based fstab. ROOT stays read-only and is never written, so a
